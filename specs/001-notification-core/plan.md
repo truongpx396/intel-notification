@@ -7,18 +7,22 @@
 ```text
 backend-go/                      # Go BFF, gateway, kernel (template-level + product)
 ├── cmd/api/
-│   ├── main.go                  # wire kernel interfaces + start server
-│   └── routes.go                # register routes
-├── kernel/                      # template-level; never imports product/
+│   ├── main.go                  # build appCtx (platform clients) + call each feature's SetupModule
+│   └── routes.go                # shared router
+├── kernel/                      # template-level; never imports product (depguard-enforced)
 │   ├── auth.go bus.go storage.go mailer.go meter.go flags.go cache.go actor.go
 │   └── identity/ tenancy/ billing/ notifications/ audit/ flags/ files/ observability/ admin/
-├── internal/
-│   ├── handler/                 # auth, workspace, invite, ingest, query, admin, policy
-│   ├── service/                 # auth, workspace, invite, credits, policy, notification
-│   ├── repo/                    # user, workspace, invite, credits, policy, audit, notification
-│   └── middleware/              # kernel.go, auth.go, tenant.go, agent_gateway.go
+├── internal/                    # product tier — feature-first (Principle II)
+│   ├── platform/                # concrete infra clients: postgres/ redis/ qdrant/ nats/ otel/ logger/
+│   ├── shared/                  # cross-cutting: dto/ errors/ middleware/ model/
+│   ├── workspace/               # feature: module.go, model/, dto/, errors/, service/, infra/{repo/db,transport/http}
+│   ├── invite/                  # feature: same internal layout
+│   ├── credits/                 # feature: ledger service + repo + transport
+│   ├── ingest/                  # feature: presign/transport + ingestion orchestration
+│   ├── query/                   # feature: query transport + SSE relay
+│   └── policy/                  # feature: agent-gateway policy + repo
 ├── migrations/                  # SQL migrations (RLS policies, partitions)
-└── tests/                       # contract, integration, unit
+└── tests/                       # contract, integration (//go:build integration), e2e
 
 backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 ├── src/
@@ -37,11 +41,11 @@ backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 
 frontend/                        # React 19 + Vite SPA
 ├── src/
-│   ├── pages/                   # Chat, Library, Upload, Admin, Workspace
-│   ├── components/              # DebugPanel, SourceCard, CreditBadge, IngestionStatus, TagFilter
-│   ├── hooks/                   # useQuery, useIngestion, useCredits
+│   ├── features/                # feature-first: chat/, library/, upload/, admin/, workspace/
+│   │   └── <feature>/           #   components/, hooks/, api/, types/ per feature
+│   ├── components/              # shared design-system primitives only
 │   ├── lib/                     # api.ts, sse.ts
-│   └── types/                   # agent, document, workspace, credits
+│   └── types/                   # cross-cutting shared types
 └── tests/                       # vitest
 
 deploy/
@@ -51,4 +55,4 @@ deploy/
 Makefile                         # canonical task runner: up/down, build, test, lint, migrate, eval, dev
 ```
 
-**Structure Decision**: Web application with three runtimes plus shared infra. The Go backend follows a strict kernel/product split (constitution Principle I + risk mitigation): `kernel/` is template-level and never imports `product/`, enforced by `golangci-lint depguard`. Authentication is provided through the swappable kernel `Auth` interface (Casdoor in this deployment). The Python tier centralizes all LLM access in `llm_gateway.py` and all tool access in the MCP server, mirroring the Go policy chokepoint. The frontend is a single SPA consuming the BFF over REST + SSE, served behind Caddy (reverse proxy + automatic TLS) locally and CloudFront in production. NATS is the async seam between Go and Python; Redis/Postgres/Qdrant/S3 are shared backing stores.
+**Structure Decision**: Web application with three runtimes plus shared infra. Per constitution Principle II, the architecture is **layered**: a high-level kernel/product split in Go (`kernel/` is template-level and never imports product code, enforced by `golangci-lint depguard`), and a **lower-level feature-based** organization inside each runtime's product tier — Go `internal/<feature>/{model,dto,errors,service,infra}` wired by `SetupModule(appCtx)`, Python `src/<feature>/`, and React `src/features/<feature>/`, each with a shared/platform layer for cross-cutting concerns. Authentication is provided through the swappable kernel `Auth` interface (Casdoor in this deployment). The Python tier centralizes all LLM access in `llm_gateway.py` and all tool access in the MCP server (shared platform chokepoints), mirroring the Go policy chokepoint. The frontend is a single SPA consuming the BFF over REST + SSE, served behind Caddy (reverse proxy + automatic TLS) locally and CloudFront in production. NATS is the async seam between Go and Python; Redis/Postgres/Qdrant/S3 are shared backing stores.
