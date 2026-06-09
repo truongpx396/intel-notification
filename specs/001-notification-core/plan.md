@@ -22,7 +22,7 @@ backend-go/                      # Go BFF, gateway, kernel (template-level + pro
 │   ├── query/                   # feature: query transport + SSE relay
 │   └── policy/                  # feature: agent-gateway policy + repo
 ├── migrations/                  # SQL migrations (RLS policies, partitions)
-└── tests/                       # contract, integration (//go:build integration), e2e
+└── tests/                       # contract, integration (//go:build integration, Testcontainers), e2e
 
 backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 ├── src/
@@ -46,7 +46,7 @@ frontend/                        # React 19 + Vite SPA
 │   ├── components/              # shared design-system primitives only
 │   ├── lib/                     # api.ts, sse.ts
 │   └── types/                   # cross-cutting shared types
-└── tests/                       # vitest
+└── tests/                       # vitest (unit/component) + Playwright (e2e/)
 
 deploy/
 ├── docker-compose.yml           # local dev: postgres, redis, qdrant, nats, casdoor, services
