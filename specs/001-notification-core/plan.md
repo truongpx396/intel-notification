@@ -31,7 +31,7 @@ backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 │   │   ├── llm_gateway.py       # single LLM chokepoint (aliases, fallback, budget, trace)
 │   │   ├── ingestion/           # pipeline, chunker, captioner, markitdown, crawler, tagger
 │   │   ├── retrieval/           # hybrid, reranker, hot_cold, filter
-│   │   └── agent/               # graph (7 nodes), memory (Mem0), cache (semantic)
+│   │   └── agent/               # graph (8 nodes: 7 RAG + Node 7 suggestions), memory (Mem0), cache (semantic), suggestions (FR-031)
 │   ├── mcp_server/              # server.py + tools/{knowledge,structured,utility}, billing/ledger.py
 │   ├── baml_client/             # generated BAML client
 │   └── schemas/                 # ingest, query, agent, billing

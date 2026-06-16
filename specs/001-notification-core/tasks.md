@@ -22,6 +22,11 @@ description: "Task list for AISAT-STUDIO MVP (Phase 1) implementation"
 
 - [ ] T055 [US1] Implement embed + Qdrant upsert with full payload (incl. `access_level`, `hot`); embed-provider outage → `ingestion.dlq.<ws>` (no model substitution) in `backend-python/src/services/ingestion/embed_index.py` (FR-029)
 
+### Implementation for User Story 2
+
+- [ ] T077a [P] [US2] Implement follow-up question generator (Node 7, post-generate) in `backend-python/src/services/agent/suggestions.py`; emits `suggestions` SSE event with 2–3 clearance-scoped question strings after `done`; suppressed on moderation block or zero-source answer (FR-031)
+- [ ] T077b [P] [US2] Contract test for `suggestions` SSE event — correct shape `{ questions: string[] }`, exactly 2–3 items, suppressed when `source_count == 0` or answer was refused, in `backend-go/tests/contract/query_sse_suggestions_test.go` (FR-031)
+
 ### Implementation for User Story 3
 
 - [ ] T084 [US3] Implement invite service (invite by email, accept assigns role+clearance, revoke) in `backend-go/internal/invite/service/invite.go` (FR-015)
