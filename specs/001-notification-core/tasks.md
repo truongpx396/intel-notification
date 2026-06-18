@@ -37,7 +37,7 @@ description: "Task list for AISAT-STUDIO MVP (Phase 1) implementation"
 
 - [ ] T084 [US3] Implement invite service (invite by email, accept assigns role+clearance, revoke) in `backend-go/internal/invite/service/invite.go` (FR-015)
 
-## Phase 10: User Story 8 - Stay informed through notifications (Priority: P3)
+## Stage 10: User Story 8 - Stay informed through notifications (Priority: P3)
 
 **Goal**: Recipient-scoped notifications for ingestion, invites, credit warning/exhaustion, task-halt, doc-shared, clearance-change, member-joined, and admin broadcast — persisted to an in-app inbox, pushed in real time over SSE, and (per opted-in category) delivered by email via a provider-agnostic port. Each member controls delivery per category × per channel.
 
@@ -60,7 +60,7 @@ description: "Task list for AISAT-STUDIO MVP (Phase 1) implementation"
 - [ ] T138 [P] [US8] Implement Python email worker with provider-agnostic `EmailSender` port (default Resend, env-swappable), template rendering, retry with backoff, and `notify.email.dlq.<ws>` parking in `backend-python/src/services/notification/email_worker.py` (FR-035)
 - [ ] T139 [P] [US8] Implement notification bell + inbox + per-category/per-channel preferences UI (live SSE badge, mark read/all, deep-link via payload) in `frontend/src/features/notification/`
 
-### Phase Dependencies
+### Stage Dependencies
 
   - US3–US8 can proceed in parallel once Foundational is done (if staffed)
 
