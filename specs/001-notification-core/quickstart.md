@@ -5,3 +5,11 @@
 ### Scenario 7 — Long-horizon task durability (US7, SC-008/SC-009)
 
 5. Drive a task toward its `credits_cap`. **Expect**: it halts at the cap with a notification, independent of the daily budget.
+
+### Scenario 8 — Notifications: real-time, scoping, preferences (US8, SC-011/SC-012)
+
+1. Open `GET /notifications/stream` as member A; trigger an event for A (e.g., finish an ingestion). **Expect**: a `notification` event then an updated `unread_count` within seconds (SC-011); the row appears in `GET /notifications`.
+2. Mark it read (`POST /notifications/{id}/read`), then `GET /notifications/unread-count`. **Expect**: the count decrements and read state persists.
+3. As member B (different recipient/workspace), open the stream and list notifications. **Expect**: A's notification is never visible to B (SC-012, hard).
+4. Disable the email channel for a category (`PUT /notifications/preferences`), trigger an event in it. **Expect**: an in-app notification but no `notify.email.<ws>` publish.
+5. Simulate an email-provider failure for an enabled category. **Expect**: the send parks in `notify.email.dlq.<ws>` while the in-app notification still arrives.

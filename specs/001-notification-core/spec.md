@@ -10,6 +10,37 @@
 
 5. **Given** a long-horizon task, **When** its spend reaches the per-task cost cap, **Then** it halts and notifies the member, independent of the daily budget.
 
+### User Story 8 - Stay informed through notifications (Priority: P3)
+
+1. **Given** a member with default preferences, **When** an event concerning them occurs (e.g., their ingestion completes), **Then** a notification is persisted to their inbox and pushed in real time, incrementing the unread count.
+2. **Given** an unread notification, **When** the member marks it read (individually or via mark-all-read), **Then** its read state persists and the unread count decrements accordingly.
+3. **Given** a member who has disabled the email channel for a category, **When** an event in that category occurs, **Then** no email is sent for it, though the in-app notification is still delivered if the in-app channel remains enabled.
+4. **Given** a member who has disabled both channels for a category, **When** an event in that category occurs, **Then** no notification is delivered to that member for that category.
+5. **Given** two members in different workspaces (or a different recipient in the same workspace), **When** a notification is generated for one, **Then** it is never visible or delivered to the other.
+6. **Given** a workspace admin, **When** they send a broadcast announcement, **Then** every current member of that workspace receives it subject to their own per-channel preferences.
+7. **Given** a transient email-provider failure, **When** an email notification cannot be delivered, **Then** it is retried and, on exhausting retries, parked for later inspection rather than silently dropped, while the in-app notification is unaffected.
+
+### Edge Cases
+
+- **Notification recipient scoping**: A notification is delivered only to its intended recipient within the originating workspace; it is never visible to other members or across workspaces, even at higher clearance.
+- **Email-provider outage**: A failed email send is retried with backoff and parked in a dead-letter path on exhaustion; the in-app notification is delivered independently and is never blocked by email failure.
+
 ### Functional Requirements
 
 - **FR-015**: System MUST allow owners/admins to invite members by email, assign roles and clearance, and revoke invitations or access.
+- **FR-032**: System MUST generate a notification for each of the following recipient-scoped events: ingestion completed, ingestion failed, workspace invite received/accepted/revoked, credit near-limit warning, credit balance exhausted, long-horizon task halted at its cost cap, document shared with the member, member clearance changed, new member joined (admin recipients), and admin broadcast. Each notification MUST carry a category, priority, human-readable title/body, and a payload referencing the originating resource for deep-linking.
+- **FR-033**: System MUST persist notifications in a recipient-scoped inbox, expose an unread count, and let members mark notifications read individually and all-at-once; read state MUST persist durably.
+- **FR-034**: System MUST deliver in-app notifications to the recipient in real time over the existing streaming channel, updating the unread count without a page reload.
+- **FR-035**: System MUST let each member configure delivery per category and per channel (in-app and email) independently; when a category's channel is disabled, the system MUST NOT deliver that category over that channel. Email delivery MUST go through a provider-agnostic interface and MUST retry transient failures, parking exhausted sends in a dead-letter path rather than dropping them silently.
+- **FR-036**: System MUST scope every notification strictly to its intended recipient within the originating workspace, enforced at the data layer; a notification MUST never be visible or delivered to another member or across workspaces, regardless of clearance.
+- **FR-037**: System MUST allow a workspace admin to send a broadcast announcement to all current members of that workspace, subject to each member's per-channel preferences, and MUST record the broadcast in the audit trail.
+
+### Key Entities *(include if feature involves data)*
+
+- **Notification**: A recipient-scoped, persisted record of a workspace event — category, priority, title, body, resource-reference payload, and read state — surfaced in the in-app inbox and optionally by email.
+- **Notification Preference**: A member's per-category, per-channel (in-app / email) delivery choice within a workspace.
+
+### Measurable Outcomes
+
+- **SC-011**: A notification for a triggering event reaches the recipient's connected in-app inbox in near real time (target: under 5 seconds at p95), and the unread count reflects it without a page reload.
+- **SC-012**: 100% recipient-scoping correctness — across all generated notifications, a notification is never delivered to or visible by any member other than its intended recipient, nor across workspaces (hard requirement; any violation is a release blocker).

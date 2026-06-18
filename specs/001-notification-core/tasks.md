@@ -6,13 +6,19 @@
 description: "Task list for AISAT-STUDIO MVP (Phase 1) implementation"
 ---
 
+## Format: `[ID] [P?] [Story] Description`
+
+- **[Story]**: Which user story this task belongs to (US1–US8); omitted for Setup / Foundational / Polish
+
 ### Go kernel interfaces & platform clients
 
 - [ ] T011 [P] Define kernel interfaces in `backend-go/kernel/auth.go`, `bus.go`, `storage.go`, `mailer.go`, `meter.go`, `flags.go`, `cache.go`, `actor.go` (consumer-defined, no product imports)
 
 ### Database schema, RLS & shared layer
 
-- [ ] T019 Create kernel tables migration in `backend-go/migrations/0002_kernel.sql`: `users`, `workspaces`, `workspace_members`, `invites`, `audit_log`, `api_keys`, `plans`, `subscriptions`, `notifications`, `feature_flags`
+- [ ] T019 Create kernel tables migration in `backend-go/migrations/0002_kernel.sql`: `users`, `workspaces`, `workspace_members`, `invites`, `audit_log`, `api_keys`, `plans`, `subscriptions`, `notifications` (recipient `user_id`, `category`, `priority`, `title`, `body`, `payload` JSONB, `read_at`, index `(user_id, read_at, created_at)`), `notification_preferences` (`user_id`, `workspace_id`, `category`, `in_app`, `email`, `UNIQUE(user_id, workspace_id, category)`), `feature_flags`
+- [ ] T020 Create RLS policies migration in `backend-go/migrations/0003_rls.sql` applying `USING (workspace_id = current_setting('app.workspace_id')::uuid)` to every tenant-scoped table (FR-014, SC-001); for `notifications` additionally restrict to the recipient via `USING (workspace_id = current_setting('app.workspace_id')::uuid AND user_id = current_setting('app.user_id')::uuid)` (FR-036, SC-012)
+- [ ] T022 [P] Implement Tenant middleware (resolves workspace from JWT/PAT, runs `SET LOCAL app.workspace_id` and `SET LOCAL app.user_id`) in `backend-go/internal/shared/middleware/tenant.go` (FR-004, FR-027, FR-036)
 
 ### Tests for User Story 1 ⚠️ (write first, must fail)
 
@@ -30,3 +36,38 @@ description: "Task list for AISAT-STUDIO MVP (Phase 1) implementation"
 ### Implementation for User Story 3
 
 - [ ] T084 [US3] Implement invite service (invite by email, accept assigns role+clearance, revoke) in `backend-go/internal/invite/service/invite.go` (FR-015)
+
+## Phase 10: User Story 8 - Stay informed through notifications (Priority: P3)
+
+**Goal**: Recipient-scoped notifications for ingestion, invites, credit warning/exhaustion, task-halt, doc-shared, clearance-change, member-joined, and admin broadcast — persisted to an in-app inbox, pushed in real time over SSE, and (per opted-in category) delivered by email via a provider-agnostic port. Each member controls delivery per category × per channel.
+
+**Independent Test**: Trigger an event for a recipient, confirm the in-app notification arrives in real time and increments the unread badge; mark read and confirm the badge decrements; disable a category's email channel and confirm a later event sends no email while still appearing in-app; confirm a second member never sees the first member's notifications.
+
+### Tests for User Story 8 ⚠️ (write first, must fail)
+
+- [ ] T129 [P] [US8] Contract test for `/notifications` list (`?unread=`, pagination), `/notifications/unread-count`, `/notifications/{id}/read` (404 for non-recipient), `/notifications/read-all`, `GET/PUT /notifications/preferences`, and `POST /admin/notifications/broadcast` in `backend-go/tests/contract/notifications_test.go` per [bff-rest.md](./contracts/bff-rest.md) (FR-032–FR-037)
+- [ ] T130 [P] [US8] Contract test for `/notifications/stream` SSE taxonomy (initial `unread_count`, then `notification` + `unread_count` per event) in `backend-go/tests/contract/notifications_sse_test.go` per [sse-events.md](./contracts/sse-events.md) (FR-034)
+- [ ] T131 [P] [US8] Integration test for recipient scoping — member A never receives/sees member B's notifications, and no cross-workspace leakage even at L5 (RLS) in `backend-go/tests/integration/notification_scoping_test.go` (FR-036, SC-012)
+- [ ] T132 [P] [US8] Integration test for preference + channel fan-out: disabled email channel publishes no `notify.email.<ws>`; simulated email-provider failure routes to `notify.email.dlq.<ws>` while in-app delivery succeeds in `backend-python/tests/integration/test_notification_email.py` (FR-035)
+
+### Implementation for User Story 8
+
+- [ ] T133 [P] [US8] Implement notification + preference models in `backend-go/internal/notification/model/notification.go` and `preference.go` (categories, priority, payload, read state)
+- [ ] T134 [US8] Implement notification service (consume `notify.<ws>`, resolve recipient prefs with category defaults, persist row, push in-app via Redis pub/sub `notify:user:<id>`, republish enabled emails to `notify.email.<ws>`) in `backend-go/internal/notification/service/notify.go` (FR-032–FR-035)
+- [ ] T135 [P] [US8] Implement inbox + preference repository (list/unread-count/mark-read/mark-all, prefs upsert) in `backend-go/internal/notification/infra/repo/notification_repo.go` (FR-033, FR-035)
+- [ ] T136 [US8] Implement notification HTTP + SSE transport (`/notifications/*`, `/notifications/stream` relaying `notify:user:<id>`, `/admin/notifications/broadcast`) + `SetupModule` in `backend-go/internal/notification/infra/transport/http/handler.go` and `backend-go/internal/notification/module.go` (FR-033, FR-034, FR-037)
+- [ ] T137 [US8] Wire producers to publish `notify.<ws>` events from existing flows (ingestion complete/failed, invite received/accepted/revoked, credit warning/exhausted, agent-run cost-cap halt, doc shared, clearance change, member joined) in their respective services (FR-032)
+- [ ] T138 [P] [US8] Implement Python email worker with provider-agnostic `EmailSender` port (default Resend, env-swappable), template rendering, retry with backoff, and `notify.email.dlq.<ws>` parking in `backend-python/src/services/notification/email_worker.py` (FR-035)
+- [ ] T139 [P] [US8] Implement notification bell + inbox + per-category/per-channel preferences UI (live SSE badge, mark read/all, deep-link via payload) in `frontend/src/features/notification/`
+
+### Phase Dependencies
+
+  - US3–US8 can proceed in parallel once Foundational is done (if staffed)
+
+### User Story Dependencies
+
+- **US8 (P3)**: After Foundational — consumes events produced by US1/US3/US4/US7 flows; independently testable via a directly published `notify.<ws>` event; recipient-scoping is a release blocker (SC-012)
+
+### Parallel Opportunities
+
+- Once Foundational completes, US1–US8 can be staffed in parallel
