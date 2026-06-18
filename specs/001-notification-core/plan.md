@@ -29,7 +29,7 @@ backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 ├── src/
 │   ├── routers/                 # ingest, query, crawl, admin (FastAPI)
 │   ├── services/
-│   │   ├── llm_gateway.py       # single LLM chokepoint (aliases, fallback, budget, trace)
+│   │   ├── llm_gateway.py       # single LLM chokepoint (aliases, fallback, budget, trace); also the Phase-2 context-compression seam (Headroom, flag-gated — research.md §12)
 │   │   ├── ingestion/           # pipeline, chunker, captioner, markitdown, crawler, tagger
 │   │   ├── retrieval/           # hybrid, reranker, hot_cold, filter
 │   │   ├── notification/        # email worker: EmailSender port (default Resend), renders + sends, DLQ on exhaustion (US8)
