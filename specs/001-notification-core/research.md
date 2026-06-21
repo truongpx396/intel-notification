@@ -6,6 +6,10 @@
 
 - **Decision**: LLM aliases (`fast`, `smart`, `embed`, `rerank`) resolve to `{primary, fallback}` in the Python `llm_gateway`. Fail over on timeout / 5xx / rate-limit only, capped at one hop, with an `llm.fallback.count` metric and a circuit breaker. `embed` has **no per-call fallback**: a down primary embedder parks the chunk in `ingestion.dlq` for retry rather than embedding with a different model.
 
+## 14. Scale-forward seams locked in Phase 1 (rework-risk decisions)
+
+- **NATS = JetStream, durable pull consumers, per-subject queue groups (not core NATS).** Crash recovery, DLQ redelivery, and autoscale-on-consumer-lag all assume persistent streams + durable consumers. Core NATS would lose in-flight messages on a worker crash and leave no lag metric to scale on — unfixable without rewriting every publisher/consumer. Queue groups make adding pods pure horizontal scale-out. (§6, [contracts/nats-subjects.md](./contracts/nats-subjects.md))
+
 ## Resolved unknowns summary
 
 | Embedding fallback | None per-call; park in DLQ | FR-029 + §1 caveat |

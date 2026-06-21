@@ -9,6 +9,9 @@ backend-go/                      # Go BFF, gateway, kernel (template-level + pro
 ├── cmd/api/
 │   ├── main.go                  # build appCtx (platform clients) + call each feature's SetupModule
 │   └── routes.go                # shared router
+├── cmd/relay/
+│   └── main.go                  # SSE-relay entrypoint — same image, mounts only the streaming GET routes;
+│                                #   subscribes to Redis pub/sub by stream_id and forwards (research §14)
 ├── kernel/                      # template-level; never imports product (depguard-enforced)
 │   ├── auth.go bus.go storage.go mailer.go meter.go flags.go cache.go actor.go
 │   └── identity/ tenancy/ billing/ notifications/ audit/ flags/ files/ observability/ admin/
@@ -34,7 +37,7 @@ backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 │   │   ├── retrieval/           # hybrid, reranker, hot_cold, filter
 │   │   ├── notification/        # email worker: EmailSender port (default Resend), renders + sends, DLQ on exhaustion (US8)
 │   │   └── agent/               # graph (8 nodes: 7 RAG + Node 7 suggestions), memory (Mem0), cache (semantic), suggestions (FR-031)
-│   ├── mcp_server/              # server.py + tools/{knowledge,structured,utility}, billing/ledger.py
+│   ├── mcp_server/              # server.py + tools/{knowledge,structured,utility}; spend emitted via services/billing (Go kernel is the sole credit_ledger writer)
 │   ├── baml_client/             # generated BAML client
 │   └── schemas/                 # ingest, query, agent, billing
 ├── prompts/                     # query_rewrite/, metadata_extract/, image_caption/, response_format/, retrieval/
@@ -57,4 +60,4 @@ deploy/
 Makefile                         # canonical task runner: up/down, build, test, lint, migrate, eval, dev
 ```
 
-**Structure Decision**: Web application with three runtimes plus shared infra. Per constitution Principle II, the architecture is **layered**: a high-level kernel/product split in Go (`kernel/` is template-level and never imports product code, enforced by `golangci-lint depguard`), and a **lower-level feature-based** organization inside each runtime's product tier — Go `internal/<feature>/{model,dto,errors,service,infra}` wired by `SetupModule(appCtx)`, Python `src/<feature>/`, and React `src/features/<feature>/`, each with a shared/platform layer for cross-cutting concerns. Authentication is provided through the swappable kernel `Auth` interface (Casdoor in this deployment). The Python tier centralizes all LLM access in `llm_gateway.py` and all tool access in the MCP server (shared platform chokepoints), mirroring the Go policy chokepoint. The frontend is a single SPA consuming the BFF over REST + SSE, served behind Caddy (reverse proxy + automatic TLS) locally and CloudFront in production. NATS is the async seam between Go and Python; Redis/Postgres/Qdrant/S3 are shared backing stores.
+**Structure Decision**: Web application with three runtimes plus shared infra. Per constitution Principle II, the architecture is **layered**: a high-level kernel/product split in Go (`kernel/` is template-level and never imports product code, enforced by `golangci-lint depguard`), and a **lower-level feature-based** organization inside each runtime's product tier — Go `internal/<feature>/{model,dto,errors,service,infra}` wired by `SetupModule(appCtx)`, Python `src/<feature>/`, and React `src/features/<feature>/`, each with a shared/platform layer for cross-cutting concerns. Authentication is provided through the swappable kernel `Auth` interface (Casdoor in this deployment). The Python tier centralizes all LLM access in `llm_gateway.py` and all tool access in the MCP server (shared platform chokepoints), mirroring the Go policy chokepoint. The frontend is a single SPA consuming the BFF over REST + SSE, served behind Caddy (reverse proxy + automatic TLS) locally and CloudFront in production. NATS (in **JetStream** mode — durable pull consumers + per-subject queue groups) is the async seam between Go and Python; Redis/Postgres/Qdrant/S3 are shared backing stores. Four scale-forward seams are locked here in Phase 1 to keep Phase 4 additive (research §14): JetStream durability, a separable SSE-relay tier, a workspace-partitionable credit outbox, and a documented Qdrant re-shard trigger. Mirroring the Python tier's one-image/many-worker-roles model, the Go BFF is a **single image with two entrypoints** — `cmd/api/main.go` (REST aggregation) and `cmd/relay/main.go` (SSE streaming) — sharing all `internal/` code; Phase 1 MAY run them as one deployment, and Phase 4 deploys them as independently-scaled `api` and `sse-relay` services (the relay scales on active-connection count, not CPU).
