@@ -33,10 +33,10 @@ backend-go/                      # Go BFF, gateway, kernel (template-level + pro
 
 backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 ├── src/
-│   ├── routers/                 # ingest, query, crawl, admin (FastAPI)
+│   ├── routers/                 # ingest, notes (enrich), query, admin (FastAPI)
 │   ├── services/
 │   │   ├── llm_gateway.py       # single LLM chokepoint (aliases, fallback, budget, trace); also the Phase-2 context-compression seam (Headroom, flag-gated — research.md §12)
-│   │   ├── ingestion/           # pipeline, chunker, captioner, markitdown, crawler, tagger
+│   │   ├── ingestion/           # pipeline, chunker, captioner, markitdown, web_distill, enrich, tagger
 │   │   ├── retrieval/           # hybrid, reranker, hot_cold, filter
 │   │   ├── notification/        # email worker: EmailSender port (default Resend), renders + sends, DLQ on exhaustion (US8)
 │   │   └── agent/               # graph (8 nodes: 7 RAG + Node 7 suggestions), memory (Mem0), cache (semantic), suggestions (FR-031); long-horizon worker + stale-heartbeat janitor (deployed as a single-owner janitor role, research §15)

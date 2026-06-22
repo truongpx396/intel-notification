@@ -23,7 +23,7 @@ description: "Task list for AISAT-STUDIO MVP (Phase 1) implementation"
 
 ### Tests for User Story 1 ⚠️ (write first, must fail)
 
-- [ ] T037 [P] [US1] Contract test for ingestion NATS subjects (`ingestion.pdf/docx/image/crawl`, `audio`→501 stub, embed-outage→`ingestion.dlq`) in `backend-python/tests/contract/test_ingestion_subjects.py` per [nats-subjects.md](./contracts/nats-subjects.md)
+- [ ] T037 [P] [US1] Contract test for ingestion + enrich NATS subjects (`ingestion.pdf/docx/image`, `enrich.note` → SSRF-guarded crawl → `ingestion.crawl` internal step, `audio`→501 stub, embed-outage→`ingestion.dlq`) in `backend-python/tests/contract/test_ingestion_subjects.py` per [nats-subjects.md](./contracts/nats-subjects.md)
 
 ### Implementation for User Story 1
 
