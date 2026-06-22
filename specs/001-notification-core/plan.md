@@ -12,6 +12,9 @@ backend-go/                      # Go BFF, gateway, kernel (template-level + pro
 ├── cmd/relay/
 │   └── main.go                  # SSE-relay entrypoint — same image, mounts only the streaming GET routes;
 │                                #   subscribes to Redis pub/sub by stream_id and forwards (research §14)
+├── cmd/worker/
+│   └── main.go                  # background/scheduled role — same image; consumes *.tick/*.refresh + outbox + DLQ
+│                                #   via JetStream queue groups; idempotent atomic claims, no in-process timers (research §15)
 ├── kernel/                      # template-level; never imports product (depguard-enforced)
 │   ├── auth.go bus.go storage.go mailer.go meter.go flags.go cache.go actor.go
 │   └── identity/ tenancy/ billing/ notifications/ audit/ flags/ files/ observability/ admin/
@@ -36,7 +39,7 @@ backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 │   │   ├── ingestion/           # pipeline, chunker, captioner, markitdown, crawler, tagger
 │   │   ├── retrieval/           # hybrid, reranker, hot_cold, filter
 │   │   ├── notification/        # email worker: EmailSender port (default Resend), renders + sends, DLQ on exhaustion (US8)
-│   │   └── agent/               # graph (8 nodes: 7 RAG + Node 7 suggestions), memory (Mem0), cache (semantic), suggestions (FR-031)
+│   │   └── agent/               # graph (8 nodes: 7 RAG + Node 7 suggestions), memory (Mem0), cache (semantic), suggestions (FR-031); long-horizon worker + stale-heartbeat janitor (deployed as a single-owner janitor role, research §15)
 │   ├── mcp_server/              # server.py + tools/{knowledge,structured,utility}; spend emitted via services/billing (Go kernel is the sole credit_ledger writer)
 │   ├── baml_client/             # generated BAML client
 │   └── schemas/                 # ingest, query, agent, billing
