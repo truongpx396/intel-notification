@@ -13,8 +13,9 @@ backend-go/                      # Go BFF, gateway, kernel (template-level + pro
 │   └── main.go                  # SSE-relay entrypoint — same image, mounts only the streaming GET routes;
 │                                #   subscribes to Redis pub/sub by stream_id and forwards (research §14)
 ├── cmd/worker/
-│   └── main.go                  # background/scheduled role — same image; consumes *.tick/*.refresh + outbox + DLQ
-│                                #   via JetStream queue groups; idempotent atomic claims, no in-process timers (research §15)
+│   └── main.go                  # background/scheduled role — same image; hosts two kinds of JetStream consumers:
+│                                #   (a) scale-out queue-group consumers (notify.<ws> fan-out, notify.email.<ws> email worker) — N replicas, idempotent;
+│                                #   (b) single-owner scheduled jobs (*.tick/*.refresh + outbox + DLQ + notify.retention.tick) — idempotent atomic claims, no in-process timers (research §15)
 ├── kernel/                      # template-level; never imports product (depguard-enforced)
 │   ├── auth.go bus.go storage.go mailer.go meter.go flags.go cache.go actor.go
 │   └── identity/ tenancy/ billing/ notifications/ audit/ flags/ files/ observability/ admin/
@@ -26,7 +27,7 @@ backend-go/                      # Go BFF, gateway, kernel (template-level + pro
 │   ├── credits/                 # feature: ledger service + repo + transport
 │   ├── ingest/                  # feature: presign/transport + ingestion orchestration
 │   ├── query/                   # feature: query transport + SSE relay
-│   ├── notification/            # feature: notify service (fan-out + prefs), inbox repo, SSE relay, admin broadcast (US8)
+│   ├── notification/            # feature: notify service (fan-out + prefs), inbox repo, SSE relay, admin broadcast, email worker via kernel/mailer.go (US8)
 │   └── policy/                  # feature: agent-gateway policy + repo
 ├── migrations/                  # SQL migrations (RLS policies, partitions)
 └── tests/                       # contract, integration (//go:build integration, Testcontainers), e2e
@@ -38,7 +39,6 @@ backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 │   │   ├── llm_gateway.py       # single LLM chokepoint (aliases, fallback, budget, trace); also the Phase-2 context-compression seam (Headroom, flag-gated — research.md §12)
 │   │   ├── ingestion/           # pipeline, chunker, captioner, markitdown, web_distill, enrich, tagger
 │   │   ├── retrieval/           # hybrid, reranker, hot_cold, filter
-│   │   ├── notification/        # email worker: EmailSender port (default Resend), renders + sends, DLQ on exhaustion (US8)
 │   │   └── agent/               # graph (8 nodes: 7 RAG + Node 7 suggestions), memory (Mem0), cache (semantic), suggestions (FR-031); long-horizon worker + stale-heartbeat janitor (deployed as a single-owner janitor role, research §15)
 │   ├── mcp_server/              # server.py + tools/{knowledge,structured,utility}; spend emitted via services/billing (Go kernel is the sole credit_ledger writer)
 │   ├── baml_client/             # generated BAML client
