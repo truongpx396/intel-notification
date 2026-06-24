@@ -22,6 +22,10 @@
 - `email_suppressions`: `id`, `email` (citext, `UNIQUE`), `reason` (`hard_bounce`|`complaint`|`unsubscribe`), `created_at` — addresses to which email is no longer sent (FR-035)
 - Rules: RLS restricts `notifications` to `user_id = current_user` within `workspace_id` — a notification is never visible to any other member or across workspaces, even at L5 (FR-036, SC-012). The notification service applies `notification_preferences` before delivery; an absent preference row uses the category default (in-app on; email on for `credit_warning`, `credit_exhausted`, `invite_received`, `task_halted`, off otherwise) (FR-035). Delivery is idempotent: the `(user_id, idem_key)` unique constraint plus a `SET NX notify:applied:{idem_key}` guard make a redelivered/retried event a no-op (one row, one in-app push, one email) (FR-032, SC-013). High-volume same-category bursts for one recipient are coalesced into a digest/rate-limited summary rather than one push + one email per event (FR-038). The email worker skips any address present in `email_suppressions` and adds rows on provider bounce/complaint webhooks; unsubscribe links flip the relevant `notification_preferences.email` to false (FR-035). Retention: read notifications older than a configured window (default 90 days) are pruned/archived so inbox + unread-count stay performant; the table MAY be range-partitioned by `created_at` for cheap drop (FR-039). Index on `(user_id, read_at, created_at)` for inbox + unread-count queries.
 
+### Supporting kernel tables
+
+- `dead_letters` (K) — terminal store for poison messages that exhausted DLQ re-drive: `id`, `workspace_id`, `source_subject` (the originating work subject), `dlq_subject`, `payload` JSONB, `dlq_attempts`, `last_error`, `first_failed_at`, `dead_at`. RLS-scoped to `workspace_id`; admin-readable for inspection / manual replay. Written only by the DLQ sweeper once `dlq_attempts ≥ MAX_DLQ_ATTEMPTS` (default 5), which also emits a `dlq.dead.count` alert metric (research §18, FR-029/FR-035).
+
 ## Relationships (high level)
 
 ```mermaid
@@ -52,3 +56,5 @@ erDiagram
 | A redelivered/retried event yields one notification, one in-app push, one email | SC-013, FR-032 | `notifications.(user_id, idem_key) UNIQUE` + `SET NX notify:applied:{idem_key}` |
 | Read notifications do not grow unbounded | FR-039 | Retention prune (default 90d) / range-partition drop on `created_at` |
 | Email is not sent to a hard-bounced/complained/unsubscribed address | FR-035 | `email_suppressions` lookup in email worker + bounce/complaint webhook upsert |
+| A DLQ-parked message is re-driven to its owning subject (reprocessed in the owning tier), not handled cross-tier in the sweeper | research §18 | DLQ sweeper re-publishes to the original work subject; owning worker idempotency |
+| A poison message terminates in `dead_letters` after `MAX_DLQ_ATTEMPTS`, never re-driven forever | research §18 | DLQ sweeper attempt-cap + `dead_letters` write + `dlq.dead.count` alert |
