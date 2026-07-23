@@ -42,10 +42,19 @@ viewer within this workspace and never leaks across members or workspaces.
 ## Preferences tab (FR-035)
 - A table: one row per **category**, two channel toggles — **In-app** and **Email** —
   each independent.
-- Categories: Ingestion, Invites & membership, Credits, Agent / long-horizon tasks,
-  Shares & clearance, Admin broadcasts.
+- Categories: Ingestion, Invites & membership, Credits, **Billing & payments** *(Phase 2)*,
+  Agent / long-horizon tasks, Shares & clearance, Admin broadcasts.
+- **Billing & payments** *(Phase 2)* covers `payment_succeeded`, `payment_failed`,
+  `subscription_renewed`, `subscription_canceled`. It is delivered to **owners and admins
+  only** — members neither cause nor can act on a billing event, so the row states its
+  restricted audience rather than appearing as a preference everyone can toggle.
 - Disabling a channel for a category stops delivery on that channel only; disabling both
   stops all delivery for that category (still recorded server-side, just not surfaced).
+- **One exception:** the **email** channel for `payment_failed` is rendered checked and
+  disabled with an explanatory tooltip. A dunning notice that nobody sees ends in lost
+  service for the whole workspace, which is a worse outcome than an unwanted email. Any
+  other non-disableable channel needs the same standard of justification — surface the
+  reason in the UI, never silently ignore the toggle.
 - Note under the table: "Email is best-effort and provider-agnostic; transient failures
   are retried and parked, never silently dropped (admins can inspect the dead-letter
   path)." In-app delivery is real-time and independent of email.
@@ -66,3 +75,21 @@ viewer within this workspace and never leaks across members or workspaces.
 - Don't use emojis as category icons — use the shared SVG icon set.
 - Don't reset unread state on reload; read state is durable (FR-033).
 - Don't deep-link to a resource above the viewer's clearance.
+- Don't show billing events to members. Payment amounts and card failures are
+  owner/admin information, and the Credits screen already gates its billing section the
+  same way.
+
+---
+
+## Phase 2+ affordances on this screen
+
+| Affordance | Phase | Backing contract |
+|---|---|---|
+| Billing category (inbox filter, preference row, sample item) | 2 | `notifications.category` enum extension; `notify.<workspace_id>` reuse |
+
+Two further categories are anticipated but **not yet mocked**, because their parent
+features are unscheduled: mind-map generation completion (Workspace Mind Map) and
+mirrored-artifact staleness (`knowledge.staleness.tick`, Enterprise Knowledge Layer).
+Both slot into this table as ordinary rows when those features are planned — the
+preference model needs no change to absorb them. See
+[specs/draft-plan.md](../../../specs/draft-plan.md).
