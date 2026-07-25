@@ -4,7 +4,7 @@
 
 ## 4. Provider fallback strategy (one-hop)
 
-- **Decision**: LLM aliases (`fast`, `smart`, `embed`, `rerank`) resolve to `{primary, fallback}` in the Python `llm_gateway`. Fail over on timeout / 5xx / rate-limit only, capped at one hop, with an `llm.fallback.count` metric and a circuit breaker. `embed` has **no per-call fallback**: a down primary embedder parks the chunk in `ingestion.dlq` for retry rather than embedding with a different model.
+- **Decision**: LLM aliases (`fast`, `smart`, `embed`, `rerank`) resolve to `{primary, fallback}` (plus multi-key/deployment load-balancing) in the **standalone LLM gateway** (LiteLLM router config, Bifrost-swappable — §21), **not** in application code. Fail over on timeout / 5xx / rate-limit only, capped at one hop, with an `llm.fallback.count` metric and a circuit breaker. `embed` has **no per-call fallback**: the `embed` alias is pinned single-model (no fallback route), and a down primary embedder parks the chunk in `ingestion.dlq` for retry rather than embedding with a different model.
 
 ## 10. Redis role separation (single cluster, logical split)
 
