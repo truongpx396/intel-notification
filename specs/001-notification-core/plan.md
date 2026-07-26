@@ -39,7 +39,7 @@ backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 │   │   ├── llm_gateway.py       # thin client to the standalone LLM gateway (LiteLLM/Bifrost): clearance-cache, PII scrub, budget gate, spend emit, trace; Headroom pre-send seam (research.md §12, §21)
 │   │   ├── ingestion/           # pipeline, chunker, captioner, markitdown, web_distill, enrich, tagger (Crawl4AI fetch → separate `crawl` image/deployment, headless browser)
 │   │   ├── retrieval/           # hybrid, reranker, hot_cold, filter
-│   │   └── agent/               # graph (8 nodes: 7 RAG + Node 7 suggestions), memory (Mem0), cache (semantic), suggestions (FR-031); long-horizon worker + stale-heartbeat janitor (deployed as a single-owner janitor role, research §15)
+│   │   └── agent/               # graph (guard·route·rewrite·retrieve·rerank·assemble·memory·generate·suggest — contracts/agent-graph.md), memory (Mem0), cache (semantic), suggestions (FR-031); long-horizon worker + stale-heartbeat janitor (deployed as a single-owner janitor role, research §15)
 │   ├── mcp_server/              # server.py + tools/{knowledge,structured,utility}; spend emitted via services/billing (Go kernel is the sole credit_ledger writer)
 │   ├── baml_client/             # generated BAML client
 │   └── schemas/                 # ingest, query, agent, billing
