@@ -12,7 +12,7 @@ description: "Task list for AISAT-INTEL MVP (Phase 1) implementation"
 
 ### Go kernel interfaces & platform clients
 
-- [ ] T011 [P] Define kernel interfaces in `backend-go/kernel/auth.go`, `bus.go`, `storage.go`, `mailer.go` (email-send port, default Resend adapter), `meter.go`, `notify.go` (notification ports — `Notifier`/`Channel`/`ChannelRegistry`/`Store`/`PreferenceStore`/`TemplateRenderer` + opaque `Recipient`/`Tenant`/`Topic`, per [notification-ports.md](./contracts/notification-ports.md)), `flags.go`, `cache.go`, `actor.go` (consumer-defined, no product imports)
+- [ ] T011 [P] Define kernel interfaces in `backend-go/kernel/auth.go`, `bus.go`, `storage.go`, `mailer.go` (email-send port, default Resend adapter), `meter.go` (metering ports — `Meter`/`Pricer`/`Ledger`/`LedgerWriter` + opaque `Scope`, per [metering-ports.md](./contracts/metering-ports.md)), `notify.go` (notification ports — `Notifier`/`Channel`/`ChannelRegistry`/`Store`/`PreferenceStore`/`TemplateRenderer` + opaque `Recipient`/`Tenant`/`Topic`, per [notification-ports.md](./contracts/notification-ports.md)), `flags.go`, `cache.go`, `actor.go` (consumer-defined, no product imports)
 
 ### Database schema, RLS & shared layer
 
