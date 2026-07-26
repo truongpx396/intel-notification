@@ -18,7 +18,7 @@ backend-go/                      # Go BFF, gateway, kernel (template-level + pro
 │                                #   (b) single-owner scheduled jobs (*.tick/*.refresh + outbox + dlq.sweep → capped re-drive then dead_letters + notify.retention.tick) — idempotent atomic claims, no in-process timers (research §15, §18)
 ├── kernel/                      # template-level; never imports product (depguard-enforced)
 │   ├── auth.go bus.go storage.go mailer.go meter.go flags.go cache.go actor.go
-│   └── identity/ tenancy/ billing/ notifications/ audit/ flags/ files/ observability/ admin/
+│   └── identity/ tenancy/ billing/ notify/ audit/ flags/ files/ observability/ admin/
 ├── internal/                    # product tier — feature-first (Principle II)
 │   ├── platform/                # concrete infra clients: postgres/ redis/ qdrant/ nats/ otel/ logger/
 │   ├── shared/                  # cross-cutting: dto/ errors/ middleware/ model/
