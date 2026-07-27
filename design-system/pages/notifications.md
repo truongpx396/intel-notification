@@ -8,8 +8,10 @@
 ## Purpose
 The recipient's home for everything that concerns them in this workspace: a real-time
 in-app inbox (ingestion done/failed, invites, credit warnings/exhaustion, a long-horizon
-task halting at its cost cap, a document shared or clearance changed, a new member joining
-for admins, and admin broadcasts), plus per-category control over how each is delivered
+task halting at its cost cap, **a human-in-the-loop approval awaiting the viewer** — an
+agent web-search/note-edit or a paused long-horizon step, FR-040/FR-041 — a document shared
+or clearance changed, a new member joining for admins, and admin broadcasts), plus
+per-category control over how each is delivered
 (in-app and/or email). Reinforces that every notification is strictly scoped to the
 viewer within this workspace and never leaks across members or workspaces.
 
@@ -35,7 +37,9 @@ viewer within this workspace and never leaks across members or workspaces.
 - **Priority:** `urgent` items (e.g., credits exhausted, task halted) carry a red accent
   and may have surfaced as a toast when live.
 - **Deep-link:** clicking a row marks it read and navigates to the originating resource
-  via its payload (e.g., the document, the credits page, the invite, the task run).
+  via its payload (e.g., the document, the credits page, the invite, the task run). An
+  `approval_requested` row deep-links to the **pending approval card** — the paused
+  long-horizon run on Agents, or the inline gate in Chat — so the viewer can act on it.
 - **Per-item actions:** mark read/unread; the list supports **Mark all read**.
 - **Grouping:** day separators ("Today", "Yesterday", date) for scannability.
 
@@ -43,7 +47,9 @@ viewer within this workspace and never leaks across members or workspaces.
 - A table: one row per **category**, two channel toggles — **In-app** and **Email** —
   each independent.
 - Categories: Ingestion, Invites & membership, Credits, **Billing & payments** *(Phase 2)*,
-  Agent / long-horizon tasks, Shares & clearance, Admin broadcasts.
+  Agent / long-horizon tasks, **Approvals** (human-in-the-loop gates awaiting you —
+  in-app **and** email on by default, since a paused action is actionable and
+  time-sensitive), Shares & clearance, Admin broadcasts.
 - **Billing & payments** *(Phase 2)* covers `payment_succeeded`, `payment_failed`,
   `subscription_renewed`, `subscription_canceled`. It is delivered to **owners and admins
   only** — members neither cause nor can act on a billing event, so the row states its
