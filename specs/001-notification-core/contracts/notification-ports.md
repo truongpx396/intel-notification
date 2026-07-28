@@ -12,7 +12,7 @@ The Phase 1 notification machinery is already production-grade on its *operation
 |---|---|---|---|
 | 1 | Recipient is welded to `(workspace_id, user_id)` | `notifications`/`notification_preferences` columns, RLS `user_id = current_setting('app.user_id')`, Redis `notify:user:<id>`, subject `notify.<ws>` ([data-model.md](../data-model.md) K, [nats-subjects.md](./nats-subjects.md)) — a reusing host whose recipient is an org, a device, a Slack channel, or an external contact (no `user_id`) needs a schema + RLS rewrite | `Recipient` + `Tenant` — two opaque identities the engine never interprets |
 | 2 | Delivery channels are hard-coded to in-app + email | The fan-out handler branches `in-app: PUBLISH notify:user:<id>` / `email? → notify.email.<ws>` inline ([README.md](../../../README.md#L657)); the only provider port is `kernel/mailer.go` — there is no push / SMS / Slack / webhook seam | `Channel` + `ChannelRegistry` — a pluggable delivery target; the fan-out iterates a registry, never an `if` ladder |
-| 3 | `category` is a fixed Postgres enum | `category` carries 12 baked-in values in the `notifications` table + `notification_preferences` ([data-model.md](../data-model.md) K); every new event type is an `ALTER TYPE` migration | `Topic` + `TopicRegistry` — a registered string with data-driven defaults (channels, priority, template) |
+| 3 | `category` is a fixed Postgres enum | `category` carries 13 baked-in values in the `notifications` table + `notification_preferences` ([data-model.md](../data-model.md) K); every new event type is an `ALTER TYPE` migration | `Topic` + `TopicRegistry` — a registered string with data-driven defaults (channels, priority, template) |
 | 4 | Copy + rendering are welded to the email worker | "renders + sends via the `kernel/mailer.go` port" ([nats-subjects.md](./nats-subjects.md)); no localization, per-tenant branding, or template-override seam exists | `TemplateRenderer` — the one home for copy, locale, and branding, per channel |
 
 The rule: **the notification kernel is generic; only the `Channel` set, the `Topic` registry, the `Recipient`/`Tenant` binding, and the templates are product-specific.** Everything that is release-blocking today (recipient-scoping, exactly-once, DLQ discipline, retention) is preserved verbatim — it just stops assuming "workspace/user," "in-app+email," and a fixed category list.
@@ -384,7 +384,7 @@ The Phase 1 system is these ports bound to *this* app — nothing in the kernel 
 |---|---|
 | `Tenant` | `{Kind: "workspace", ID: workspace_id}` → Phase 2 `{Kind: "organization", …}` — a binding change, no kernel edit |
 | `Recipient` | `{Kind: "user", ID: user_id}` — RLS `app.user_id`; a device/slack recipient is just another `Kind` |
-| `Topic` | the 12 registered topics: `ingestion_complete`/`ingestion_failed`/`invite_received`/…/`admin_broadcast` — a `TopicRegistry`, not a Postgres enum |
+| `Topic` | the 13 registered topics: `ingestion_complete`/`ingestion_failed`/`invite_received`/…/`approval_requested`/…/`admin_broadcast` — a `TopicRegistry`, not a Postgres enum |
 | `Channel` (registry) | `InAppChannel` (Redis pub/sub → SSE relay) + `EmailChannel` (`kernel/mailer.go` → Resend) — two of N |
 | `PreferenceStore` | `notification_preferences` rows over topic defaults (in-app on; email on for `credit_*`, `invite_received`, `task_halted`) |
 | `TemplateRenderer` | per-topic Go/HTML templates (email) + inbox item copy (in-app); i18n/branding seam ready |
