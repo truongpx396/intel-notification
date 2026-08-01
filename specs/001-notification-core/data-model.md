@@ -45,6 +45,7 @@ erDiagram
     WORKSPACE ||--o{ CREDIT_LEDGER : "records"
     WORKSPACE ||--o{ AGENT_POLICY : "defines"
     WORKSPACE ||--o{ AGENT_AUDIT_LOG : "audits"
+    WORKSPACE ||--o{ SANDBOX_RUN : "runs"
     WORKSPACE ||--o{ LLM_CALL_LOG : "meters"
     USER ||--o{ CHAT_SESSION : "starts"
     USER ||--o{ DEVICE : "registers"
