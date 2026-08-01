@@ -25,7 +25,7 @@ description: "Task list for AISAT-INTEL MVP (Phase 1) implementation"
 
 ### Tests for User Story 1 ⚠️ (write first, must fail)
 
-- [ ] T037 [P] [US1] Contract test for ingestion + enrich NATS subjects (`ingestion.pdf/docx/image`, `enrich.note` → SSRF-guarded crawl → `ingestion.crawl` internal step, `audio`→501 stub, embed-outage→`ingestion.dlq`) in `backend-python/tests/contract/test_ingestion_subjects.py` per [nats-subjects.md](./contracts/nats-subjects.md)
+- [ ] T037 [P] [US1] Contract test for ingestion + enrich NATS subjects (`ingestion.pdf/docx/image`, `enrich.note` → SSRF-guarded crawl **executed in a `tmpl-crawl` sandbox** → `ingestion.crawl` internal step, `audio`→501 stub, embed-outage→`ingestion.dlq`) in `backend-python/tests/contract/test_ingestion_subjects.py` per [nats-subjects.md](./contracts/nats-subjects.md)
 - [ ] T037a [P] [US1] Contract test for `ingestion.dlq` drain via `dlq.sweep.tick` — a parked chunk under the cap is re-driven to the embed step with the original model only and re-embeds idempotently (no duplicate Qdrant point); a chunk reaching `MAX_DLQ_ATTEMPTS` lands in `dead_letters` with a `dlq.dead.count` emit and is not re-driven again in `backend-go/tests/contract/dlq_ingestion_test.go` per [nats-subjects.md](./contracts/nats-subjects.md) (research §18, FR-029)
 
 ### Implementation for User Story 1
