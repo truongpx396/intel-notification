@@ -31,6 +31,34 @@
 
 **Scale/Scope**: Phase 1 capacity — Go BFF 2 replicas, 3 Python worker pods per NATS subject (plus the standalone LLM gateway (LiteLLM) and the standalone **sandbox tier** as their **own deployments** — the `crawl` role is now a thin orchestrator that runs crawl4ai inside a hardened sandbox pod), single Qdrant/NATS cluster, Postgres primary + 1 read replica; 8 user stories, 41 functional requirements (FR-001…FR-041), 15 success criteria (SC-001…SC-015), 18 key entities, 10 MCP tools (8 read-only across Categories A–C + 2 HITL-gated Category-D actions). **Scale-forward seams locked in Phase 1 (rework-risk, research §14–§15):** NATS runs in **JetStream** mode (durable pull consumers + per-subject queue groups); the SSE relay is a logically separable tier from the request-handling BFF; the Redis credit outbox is workspace-partitionable; Qdrant stays payload-isolated with a documented re-shard/replication trigger; scheduled/background work runs single-owner in a dedicated `cmd/worker` role (external CronJob → NATS tick → queue group, idempotent atomic claims — no in-process timers). Horizontal-scale *provisioning* (KEDA autoscaling, PgBouncer, Redis/Qdrant HA, SSE connection ceilings, load testing) is deferred to **Phase 4** ([draft-plan.md — Phase 4](../draft-plan.md#phase-4-scalability-and-resilience-hardening)).
 
+### Documentation (this feature)
+
+```text
+specs/001-contextengine-mvp/
+├── plan.md              # This file (/speckit.plan command output)
+├── spec.md              # Feature specification (with Clarifications)
+├── research.md          # Phase 0 output (/speckit.plan command)
+├── data-model.md        # Phase 1 output (/speckit.plan command)
+├── quickstart.md        # Phase 1 output (/speckit.plan command)
+├── contracts/           # Phase 1 output (/speckit.plan command)
+│   ├── README.md             # Contract index + conventions
+│   ├── bff-rest.md           # Go BFF public REST + SSE endpoints
+│   ├── sse-events.md         # SSE event taxonomy (BFF ↔ frontend)
+│   ├── auth-flow.md          # Casdoor OIDC login + session/PAT auth flow
+│   ├── nats-subjects.md      # NATS subject schema (ingestion/query/billing)
+│   ├── mcp-tools.md          # 10 MCP tools across 4 categories
+│   ├── agent-graph.md        # LangGraph node/edge contract (durable + inline forms)
+│   ├── llm-gateway.md        # LLM gateway service (LiteLLM/Bifrost-swappable) + per-runtime client
+│   ├── sandbox-runtime.md    # Sandbox tier (hardened pod default; gVisor/microVM-swappable) + Sandbox port
+│   ├── authorizer-ports.md   # Go Authorizer port (SingleAxisPolicy + SQL/Qdrant lowerers)
+│   ├── approval-ports.md     # Human-in-the-loop gate (HumanGate/ApprovalStore) port
+│   ├── metering-ports.md     # Credits/metering port (billing.deduct ledger writer)
+│   └── notification-ports.md # Notification fan-out ports (ChannelRegistry/topics)
+├── checklists/
+│   └── requirements.md  # Spec quality checklist
+└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
+```
+
 ### Source Code (repository root)
 
 ```text
