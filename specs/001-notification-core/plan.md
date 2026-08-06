@@ -48,12 +48,14 @@ specs/001-contextengine-mvp/
 │   ├── nats-subjects.md      # NATS subject schema (ingestion/query/billing)
 │   ├── mcp-tools.md          # 10 MCP tools across 4 categories
 │   ├── agent-graph.md        # LangGraph node/edge contract (durable + inline forms)
+│   ├── agent-runtime.md      # Self-contained agent runtime — AgentManifest + DomainPlugin, swap matrix, deployment profiles (A full / B single-container)
 │   ├── llm-gateway.md        # LLM gateway service (LiteLLM/Bifrost-swappable) + per-runtime client
 │   ├── sandbox-runtime.md    # Sandbox tier (hardened pod default; gVisor/microVM-swappable) + Sandbox port
 │   ├── authorizer-ports.md   # Go Authorizer port (SingleAxisPolicy + SQL/Qdrant lowerers)
 │   ├── approval-ports.md     # Human-in-the-loop gate (HumanGate/ApprovalStore) port
 │   ├── metering-ports.md     # Credits/metering port (billing.deduct ledger writer)
-│   └── notification-ports.md # Notification fan-out ports (ChannelRegistry/topics)
+│   ├── notification-ports.md # Notification fan-out ports (ChannelRegistry/topics)
+│   └── audit-ports.md        # Append-only tamper-evident audit ports (Recorder/Sink/HashChain)
 ├── checklists/
 │   └── requirements.md  # Spec quality checklist
 └── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
