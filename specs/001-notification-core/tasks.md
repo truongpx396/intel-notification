@@ -36,12 +36,17 @@ description: "Task list for AISAT-INTEL MVP (Phase 1) implementation"
 
 ### Implementation for User Story 2
 
+- [ ] T076c [US2] Implement **chat-attachment endpoints + the same-turn fast path** (`POST/GET /chat/sessions/{id}/attachments`) in `backend-go/internal/query/service/attachment.go` + transport, and the `chat_session_attachment` link table in the T063 migration (FR-043). An attachment reuses `/ingest/presign` with `scope='personal'` — same size ceiling, same `501` unsupported types, same pipeline, same library visibility, **no hidden copy**. Resolve `doc_ids` authorization **at the BFF**, mapping an unreadable or unknown id to **`404`** so the graph never receives an id the caller cannot read (FR-042). Small attachments (under the configured token ceiling) pass converted text into the same turn while indexing continues in the background; larger ones stream ingestion progress and answer at `indexed` — without this split an attachment inherits the 5-minute library budget (SC-004), which is correct for the library and unusable in a conversation
 - [ ] T077a [P] [US2] Implement follow-up question generator (the `suggest` node, post-generate) in `backend-python/src/services/agent/suggestions.py`; emits `suggestions` SSE event with 2–3 clearance-scoped question strings after `done`; suppressed on moderation block or zero-source answer (FR-031)
 - [ ] T077b [P] [US2] Contract test for `suggestions` SSE event — correct shape `{ questions: string[] }`, exactly 2–3 items, suppressed when `source_count == 0` or answer was refused, in `backend-go/tests/contract/query_sse_suggestions_test.go` (FR-031)
 
 ### Implementation for User Story 3
 
 - [ ] T084 [US3] Implement invite service (invite by email, accept assigns role+clearance, revoke) in `backend-go/internal/invite/service/invite.go` (FR-015)
+
+### Implementation for User Story 5
+
+- [ ] T101a [US5] Implement **grounding + cost assembly** in `generate` (extends T101): map each answer claim to the chunk ids supporting it (`used[]` with `cited`/`citation_markers`), record chunks that entered the prompt and were **never cited** (`unused_chunks` — usually retrieval was right and the prompt was wrong), and report a claim with no support as **`supported_by: []`**, counted in `unsupported_claim_count` and never silently equivalent to a cited claim: that is the hallucination signal and suppressing it defeats the panel's purpose. Emit the `cost` section from **every gateway call site** (`rewrite`/`rerank`/`generate`/`vision`) with tokens, credits, `duration_ms`, `image_tokens` for vision, and `fallback_hops` — `total_credits` MUST equal `done.credits_deducted` and reconcile to the ledger (FR-021, SC-005, SC-006)
 
 ### Implementation for User Story 7
 
