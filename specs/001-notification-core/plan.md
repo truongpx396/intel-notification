@@ -46,13 +46,14 @@ specs/001-contextengine-mvp/
 │   ├── sse-events.md         # SSE event taxonomy (BFF ↔ frontend)
 │   ├── auth-flow.md          # Casdoor OIDC login + session/PAT auth flow
 │   ├── nats-subjects.md      # NATS subject schema (ingestion/query/billing)
-│   ├── mcp-tools.md          # 10 MCP tools across 4 categories
-│   ├── agent-graph.md        # LangGraph node/edge contract (durable + inline forms)
-│   ├── agent-runtime.md      # Self-contained agent runtime — AgentManifest + DomainPlugin, swap matrix, deployment profiles (A full / B single-container)
+│   ├── agent-integration.md  # ⤴ How AISAT satisfies the extracted runtime's host contract (pinned version, 5 obligations, port map, conformance)
+│   ├── mcp-tools.md          # ⤴ stub → intel-agent (port upstream; tool BODIES stay here as the DomainPlugin)
+│   ├── agent-graph.md        # ⤴ stub → intel-agent (LangGraph node/edge contract)
+│   ├── agent-runtime.md      # ⤴ stub → intel-agent (AgentManifest + DomainPlugin, swap matrix, Profiles A/B)
 │   ├── llm-gateway.md        # LLM gateway service (LiteLLM/Bifrost-swappable) + per-runtime client
 │   ├── sandbox-runtime.md    # Sandbox tier (hardened pod default; gVisor/microVM-swappable) + Sandbox port
 │   ├── authorizer-ports.md   # Go Authorizer port (SingleAxisPolicy + SQL/Qdrant lowerers)
-│   ├── approval-ports.md     # Human-in-the-loop gate (HumanGate/ApprovalStore) port
+│   ├── approval-ports.md     # ⤴ stub → intel-agent (ports upstream; the approval_request TABLE stays here — it also backs ingestion gates)
 │   ├── metering-ports.md     # Credits/metering port (billing.deduct ledger writer)
 │   ├── notification-ports.md # Notification fan-out ports (ChannelRegistry/topics)
 │   └── audit-ports.md        # Append-only tamper-evident audit ports (Recorder/Sink/HashChain)
@@ -98,9 +99,13 @@ backend-python/                  # ML/AI workers, agent, ingestion, MCP server
 │   │   ├── llm_gateway.py       # thin client to the standalone LLM gateway (LiteLLM/Bifrost): clearance-cache, PII scrub, budget gate, spend emit, trace; Headroom pre-send seam (research.md §12, §21)
 │   │   ├── sandbox/             # thin client to the standalone sandbox tier (hardened pod default; gVisor/microVM-swappable): stage-files·run·metered·audited (research §24)
 │   │   ├── ingestion/           # pipeline, chunker, captioner, markitdown, web_distill, enrich, tagger, crawl_orchestrator (crawl4ai fetch + markitdown convert run inside sandboxes, never in-process)
-│   │   ├── retrieval/           # hybrid, reranker, hot_cold, filter
-│   │   └── agent/               # graph (guard·route·rewrite·retrieve·rerank·assemble·memory·generate·suggest — contracts/agent-graph.md), memory (Mem0), cache (semantic), suggestions (FR-031); long-horizon worker + stale-heartbeat janitor (deployed as a single-owner janitor role, research §15)
-│   ├── mcp_server/              # server.py + tools/{knowledge,structured,utility}; spend emitted via services/billing (Go kernel is the sole credit_ledger writer)
+│   │   ├── retrieval/           # hybrid, reranker, hot_cold, filter — BINDS intel-agent's RetrievalService port (retrieval.kind=qdrant)
+│   │   └── agent/               # ⤴ BINDING layer, not the graph. The graph itself is `intel-agent` (pinned dep).
+│   │                            #   Here: AgentDeps assembly, the AISAT DomainPlugin (tool bodies + SingleAxisPolicy),
+│   │                            #   port impls (StreamWriter→Redis pub/sub, Meter→billing.deduct, Recorder→agent_audit_log,
+│   │                            #   ApprovalStore→approval_request), cache (semantic), long-horizon worker + janitor.
+│   │                            #   See contracts/agent-integration.md.
+│   ├── mcp_server/              # server.py + tools/{knowledge,structured,utility} — the tool BODIES (this repo's DomainPlugin), exposed outward over MCP; the ToolRegistry port + dispatch wrapper are upstream. Spend emitted via services/billing (Go kernel is the sole credit_ledger writer)
 │   ├── baml_client/             # generated BAML client
 │   └── schemas/                 # ingest, query, agent, billing
 ├── prompts/                     # query_rewrite/, metadata_extract/, image_caption/, response_format/, retrieval/
