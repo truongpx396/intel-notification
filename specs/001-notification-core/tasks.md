@@ -6,6 +6,10 @@
 description: "Task list for AISAT-INTEL MVP (Phase 1) implementation"
 ---
 
+## ⤴ Delegated to `intel-agent` (32 tasks)
+
+- [ ] **T156** Drive every agent-dependent test from `intel_agent.testing.FakeAgentRuntime` — SSE relay, debug panel, chat UI, credit deduction, notifications. No model, no Qdrant, no NATS, deterministic. **Do not hand-roll a mock agent here**: the double is versioned upstream with the event vocabulary it emits, and a local copy would drift silently the moment the runtime adds an event.
+
 ## Format: `[ID] [P?] [Story] Description`
 
 - **[Story]**: Which user story this task belongs to (US1–US8); omitted for Setup / Foundational / Polish
