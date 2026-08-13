@@ -38,11 +38,14 @@ description: "Task list for AISAT-INTEL MVP (Phase 1) implementation"
 
 - [ ] T055 [US1] Implement embed + Qdrant upsert with full payload (incl. `access_level`, `hot`); embed-provider outage → `ingestion.dlq.<ws>` carrying `dlq_attempts`/`first_failed_at` (no model substitution); a sweeper re-drive re-embeds the **same chunk id** idempotently (upsert, not duplicate point) in `backend-python/src/services/ingestion/embed_index.py` (FR-029, research §18)
 
+### Tests for User Story 2 ⚠️ (write first, must fail)
+
+- [ ] T077b [P] [US2] Contract test for `suggestions` SSE event — correct shape `{ questions: string[] }`, exactly 2–3 items, suppressed when `source_count == 0` or answer was refused, in `backend-go/tests/contract/query_sse_suggestions_test.go` (FR-031)
+
 ### Implementation for User Story 2
 
 - [ ] T076c [US2] Implement **chat-attachment endpoints + the same-turn fast path** (`POST/GET /chat/sessions/{id}/attachments`) in `backend-go/internal/query/service/attachment.go` + transport, and the `chat_session_attachment` link table in the T063 migration (FR-043). An attachment reuses `/ingest/presign` with `scope='personal'` — same size ceiling, same `501` unsupported types, same pipeline, same library visibility, **no hidden copy**. Resolve `doc_ids` authorization **at the BFF**, mapping an unreadable or unknown id to **`404`** so the graph never receives an id the caller cannot read (FR-042). Small attachments (under the configured token ceiling) pass converted text into the same turn while indexing continues in the background; larger ones stream ingestion progress and answer at `indexed` — without this split an attachment inherits the 5-minute library budget (SC-004), which is correct for the library and unusable in a conversation
 - [ ] T077a [P] [US2] Implement follow-up question generator (the `suggest` node, post-generate) in `backend-python/src/services/agent/suggestions.py`; emits `suggestions` SSE event with 2–3 clearance-scoped question strings after `done`; suppressed on moderation block or zero-source answer (FR-031)
-- [ ] T077b [P] [US2] Contract test for `suggestions` SSE event — correct shape `{ questions: string[] }`, exactly 2–3 items, suppressed when `source_count == 0` or answer was refused, in `backend-go/tests/contract/query_sse_suggestions_test.go` (FR-031)
 
 ### Implementation for User Story 3
 
