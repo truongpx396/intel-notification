@@ -1,8 +1,8 @@
 # Contract: Notification & Multi-Channel Delivery (reusable ports)
 
-**Plan**: [../plan.md](../plan.md) | **Status**: Design addition — the reusability seam for the notification backbone (US8, FR-032–FR-039; SC-012, SC-013). It factors the existing persist + fan-out + in-app-push + email + DLQ + retention machinery into a small set of ports so the *same* engine drops into other systems without touching their tenancy model, their event vocabulary, or their delivery channels. **One Phase 1 behavior changes** — the unsafe `SET NX`-short-circuit fan-out is replaced by a transactional outbox (a correctness fix for SC-013 / FR-035, see the callout below); everything else is a pure repackaging of existing behavior behind ports.
+**Plan**: [../plan.md](../plan.md) · **Spec**: [../spec.md](../spec.md) · **Status**: normative. This is the core contract — the domain types, every port, the twelve invariants, the contract-test suites, the module layout and the lint gates that keep it standalone. It was written as a reusability seam *inside* the product this engine was extracted from, and carried here with its git history; see [PROVENANCE.md](../../../PROVENANCE.md) for what changed in the lift and how the originating `FR-0NN`/`SC-0NN` ids map onto this repository's `NR-0NN`/`NS-0NN`.
 
-The Phase 1 notification machinery is already production-grade on its *operational* axes (exactly-once, recipient-scoped, DLQ, retention, suppression), but it is packaged as an app-internal kernel module welded to four of *this* app's assumptions. This contract names the seam that removes that welding — the same treatment [metering-ports.md](./metering-ports.md) gave the credit backbone. Ports are given in Go (the kernel language); ContextEngine's in-app + email delivery is presented at the end as **two implementations** of the `Channel` port, not as the core.
+**One behaviour changed during the lift.** The originating fan-out did a durable `INSERT` *and* an in-app publish *and* an email enqueue that were **not transactional**, guarded by a Redis `SET NX` that short-circuited the entire handler — so a crash between the guard and the email lost that email permanently. This contract replaces it with a transactional outbox (NR-003, NR-004). Everything else is a repackaging of behaviour that was already production-grade on its operational axes — exactly-once, recipient-scoped, dead-lettered, retained — but welded to four of that product's assumptions. Naming the seam that removes the welding is what this contract is for; it is the same treatment [intel-payment's metering-ports.md](https://github.com/truongpx396/intel-payment/blob/main/specs/001-metering-billing-core/contracts/metering-ports.md) gave the credit backbone. Ports are given in Go; in-app and email appear at the end as **two implementations** of the `Channel` port, never as the core.
 
 ---
 
@@ -10,14 +10,14 @@ The Phase 1 notification machinery is already production-grade on its *operation
 
 | # | Today's coupling | Evidence it is a coupling | The port that removes it |
 |---|---|---|---|
-| 1 | Recipient is welded to `(workspace_id, user_id)` | `notifications`/`notification_preferences` columns, RLS `user_id = current_setting('app.user_id')`, Redis `notify:user:<id>`, subject `notify.<ws>` ([data-model.md](../data-model.md) K, [nats-subjects.md](./nats-subjects.md)) — a reusing host whose recipient is an org, a device, a Slack channel, or an external contact (no `user_id`) needs a schema + RLS rewrite | `Recipient` + `Tenant` — two opaque identities the engine never interprets |
-| 2 | Delivery channels are hard-coded to in-app + email | The fan-out handler branches `in-app: PUBLISH notify:user:<id>` / `email? → notify.email.<ws>` inline ([README.md](../../../README.md#L657)); the only provider port is `kernel/mailer.go` — there is no push / SMS / Slack / webhook seam | `Channel` + `ChannelRegistry` — a pluggable delivery target; the fan-out iterates a registry, never an `if` ladder |
-| 3 | `category` is a fixed Postgres enum | `category` carries 13 baked-in values in the `notifications` table + `notification_preferences` ([data-model.md](../data-model.md) K); every new event type is an `ALTER TYPE` migration | `Topic` + `TopicRegistry` — a registered string with data-driven defaults (channels, priority, template) |
-| 4 | Copy + rendering are welded to the email worker | "renders + sends via the `kernel/mailer.go` port" ([nats-subjects.md](./nats-subjects.md)); no localization, per-tenant branding, or template-override seam exists | `TemplateRenderer` — the one home for copy, locale, and branding, per channel |
+| 1 | Recipient is welded to `(workspace_id, user_id)` | `notifications`/`notification_preferences` columns, RLS `user_id = current_setting('app.user_id')`, Redis `notify:user:<id>`, subject `notify.<ws>` ([data-model.md](../data-model.md), [bus-subjects.md](./bus-subjects.md)) — a reusing host whose recipient is an org, a device, a Slack channel, or an external contact (no `user_id`) needs a schema + RLS rewrite | `Recipient` + `Tenant` — two opaque identities the engine never interprets |
+| 2 | Delivery channels are hard-coded to in-app + email | The fan-out handler branches `in-app: PUBLISH notify:user:<id>` / `email? → notify.email.<ws>` inline ([the originating README](https://github.com/truongpx396/aisat-intel/blob/main/README.md)); the only provider port is `kernel/mailer.go` — there is no push / SMS / Slack / webhook seam | `Channel` + `ChannelRegistry` — a pluggable delivery target; the fan-out iterates a registry, never an `if` ladder |
+| 3 | `category` is a fixed Postgres enum | `category` carries 13 baked-in values in the `notifications` table + `notification_preferences` ([data-model.md](../data-model.md)); every new event type is an `ALTER TYPE` migration | `Topic` + `TopicRegistry` — a registered string with data-driven defaults (channels, priority, template) |
+| 4 | Copy + rendering are welded to the email worker | "renders + sends via the `kernel/mailer.go` port" ([bus-subjects.md](./bus-subjects.md)); no localization, per-tenant branding, or template-override seam exists | `TemplateRenderer` — the one home for copy, locale, and branding, per channel |
 
 The rule: **the notification kernel is generic; only the `Channel` set, the `Topic` registry, the `Recipient`/`Tenant` binding, and the templates are product-specific.** Everything that is release-blocking today (recipient-scoping, exactly-once, DLQ discipline, retention) is preserved verbatim — it just stops assuming "workspace/user," "in-app+email," and a fixed category list.
 
-> **One correctness fix travels with this refactor.** Today's fan-out does a durable `INSERT` *and* an in-app publish *and* an email enqueue that are **not transactional**, guarded by a Redis `SET NX notify:applied:{idem_key}` that "short-circuits the *entire* handler" ([README.md](../../../README.md#L648)). That gate is unsafe: if attempt #1 sets the guard, inserts the row, then crashes **before** enqueuing email, the JetStream redelivery hits the guard and short-circuits — the email is **lost**. This contract closes the hole the same way [metering-ports.md](./metering-ports.md) closed billing's: a **transactional outbox** — the row and one outbox entry per channel are written in one DB transaction; a `Dispatcher` drains the outbox at-least-once; the fast Redis guard gates only the *durable write*, never channel delivery (invariant 3).
+> **One correctness fix travels with this refactor.** Today's fan-out does a durable `INSERT` *and* an in-app publish *and* an email enqueue that are **not transactional**, guarded by a Redis `SET NX notify:applied:{idem_key}` that "short-circuits the *entire* handler" ([the originating README](https://github.com/truongpx396/aisat-intel/blob/main/README.md)). That gate is unsafe: if attempt #1 sets the guard, inserts the row, then crashes **before** enqueuing email, the JetStream redelivery hits the guard and short-circuits — the email is **lost**. This contract closes the hole the same way [intel-payment's metering-ports.md](https://github.com/truongpx396/intel-payment/blob/main/specs/001-metering-billing-core/contracts/metering-ports.md) closed billing's: a **transactional outbox** — the row and one outbox entry per channel are written in one DB transaction; a `Dispatcher` drains the outbox at-least-once; the fast Redis guard gates only the *durable write*, never channel delivery (invariant 3).
 
 ---
 
@@ -94,7 +94,7 @@ type ChannelKind string // "in_app" | "email" | "sms" | "push" | "slack" | "webh
 
 // Notification is one durable, recipient-scoped record — the inbox row AND the unit the
 // engine dedupes on. IdemKey is REQUIRED: it is the retry/dedup identity that makes the
-// whole fan-out exactly-once (one row, at-most-one delivery per channel), per SC-013/FR-032.
+// whole fan-out exactly-once (one row, at-most-one delivery per channel), per NS-002/NR-002.
 type Notification struct {
 	Tenant     Tenant
 	Recipient  Recipient
@@ -169,7 +169,7 @@ type DeliverySchedule struct {
 	Digest     time.Duration // 0 ⇒ immediate; >0 ⇒ coalesce same-topic into a window
 }
 
-// Shard is the tenant/recipient partition key for the outbox. Phase 1 runs N queue-group
+// Shard is the recipient partition key for the outbox. The reference deployment runs N queue-group
 // drainers; the shard lets them scale with no key-space redesign and no double-deliver.
 type Shard string
 
@@ -188,7 +188,7 @@ type OutboxEntry struct {
 ## Port: `Channel` — the pluggable delivery target (the load-bearing seam)
 
 ```go
-// Channel is ONE delivery target. in_app and email are the two Phase 1 implementations;
+// Channel is ONE delivery target. in_app and email are the two reference implementations;
 // sms, push, slack, and webhook are added by REGISTERING another Channel — never by editing
 // the fan-out. This is the notification analogue of metering's Pricer: the one place a new
 // product plugs in its own behavior.
@@ -241,7 +241,7 @@ type Notifier interface {
 
 	// Broadcast expands an audience into per-recipient Notifications OFF the request path:
 	// one enqueue returns immediately so delivery to a large membership never blocks or
-	// times out the caller (FR-037). Each expanded notification carries a deterministic
+	// times out the caller (NR-020). Each expanded notification carries a deterministic
 	// IdemKey so a retried broadcast does not double-notify.
 	Broadcast(ctx context.Context, b BroadcastRequest) (BroadcastReceipt, error)
 }
@@ -348,17 +348,17 @@ type Dispatcher interface {
 
 ## Invariants every implementation MUST uphold
 
-1. **Recipient-scoping at the data layer (release blocker).** Every `notifications` read is constrained to `recipient` within `tenant` by an RLS policy (`user_id = current_setting('app.user_id')` within `workspace_id`). A notification is never visible or delivered to another recipient or across tenants, regardless of clearance (FR-036, **SC-012**). Scoping is enforced in the store, not in application code.
-2. **The durable row is always written; preferences gate only channels.** `Notify` always persists the inbox row (it is both the inbox and the dedup backstop). `PreferenceStore` decides which *delivery channels* are enqueued; disabling `in_app` for a topic hides it from the inbox/badge but the row still exists for dedup + audit. Producers publish authoritative `Recipient`/`Tenant` — never taken from untrusted content (FR-036).
+1. **Recipient-scoping at the data layer (release blocker).** Every `notifications` read is constrained to `recipient` within `tenant` by an RLS policy (`user_id = current_setting('app.user_id')` within `workspace_id`). A notification is never visible or delivered to another recipient or across tenants, regardless of clearance (NR-008, **NS-001**). Scoping is enforced in the store, not in application code.
+2. **The durable row is always written; preferences gate only channels.** `Notify` always persists the inbox row (it is both the inbox and the dedup backstop). `PreferenceStore` decides which *delivery channels* are enqueued; disabling `in_app` for a topic hides it from the inbox/badge but the row still exists for dedup + audit. Producers publish authoritative `Recipient`/`Tenant` — never taken from untrusted content (NR-008).
 3. **Dual idempotency guard, gating only the durable write.** Every `Notify` carries an `IdemKey`. A Redis `SET NX notify:applied:{tag}:{idem}` is a fast pre-check to skip the DB round-trip on an obvious duplicate; the durable `UNIQUE(recipient, idem_key)` is the correctness backstop. **The guard MUST gate only `PersistAndEnqueue`, never channel delivery** — channel sends are driven off the durable outbox, so a crash between the guard and a channel send cannot lose a delivery (closes the `SET NX` short-circuit hole). `Receipt.Applied=false` reports a replay.
 4. **Transactional persist + enqueue.** `PersistAndEnqueue` writes the inbox row and one outbox entry per target channel in **one** transaction — never as an INSERT followed by best-effort publishes. A crash after commit leaves durable outbox work the `Dispatcher` will drive; a crash before commit leaves nothing (the redelivery re-runs cleanly against the UNIQUE constraint).
 5. **At-least-once channel delivery with an idempotent terminal.** The `Dispatcher` re-drives a claimed entry after a crash; each `Channel.Deliver` is idempotent on `IdemKey` (the provider dedupes), so a re-drive collapses to one send. `Suppressed=true` and `AddressBook` miss are **terminal, not retryable**.
-6. **Poison messages terminate in `dead_letters`, never loop forever.** After `MaxAttempts` (default 5) an outbox entry parks in `dead_letters` with `last_error` and emits a `dlq.dead.count` alarm; it is admin-inspectable + replayable (research §18, FR-035).
-7. **The unread badge is authoritative from the store.** Redis pub/sub (`notify:user:<id>`) is at-most-once — a relay that missed a publish must not diverge permanently. The badge is always recomputable via `Store.Unread`, and the SSE relay reconciles it from the store on (re)connect. Pub/sub is an optimization, never the source of truth (FR-034).
-8. **Storm coalescing is a policy, not a per-event send.** High-volume same-`(recipient, topic)` bursts collapse into a digest / rate-limited summary per `DeliverySchedule.Digest`, rather than one push + one email per event (FR-038). Coalescing decisions read the schedule; channels stay dumb.
-9. **Broadcast fans out off the request path.** `Broadcast` enqueues one job and returns; per-recipient expansion + delivery happen in the worker, recorded in the audit trail. A large membership never blocks or times out the caller (FR-037).
-10. **Compliant email is a channel property, not the core's.** The email `Channel` checks the suppression list (`hard_bounce`/`complaint`/`unsubscribe`), adds rows from provider bounce/complaint webhooks, and appends an unsubscribe link to every non-`Essential` topic. The kernel knows nothing about email compliance — it lives in the email `Channel` impl (FR-035).
-11. **Bounded growth.** Read notifications past the retention window (default 90d) are pruned via `Store.Retention`, backed by `PARTITION BY RANGE (created_at)` so expiry is a partition `DROP` and inbox + unread-count queries stay fast (FR-039).
+6. **Poison messages terminate in `dead_letters`, never loop forever.** After `MaxAttempts` (default 5) an outbox entry parks in `dead_letters` with `last_error` and emits a `dlq.dead.count` alarm; it is admin-inspectable + replayable (research §18, NR-011).
+7. **The unread badge is authoritative from the store.** Redis pub/sub (`notify:user:<id>`) is at-most-once — a relay that missed a publish must not diverge permanently. The badge is always recomputable via `Store.Unread`, and the SSE relay reconciles it from the store on (re)connect. Pub/sub is an optimization, never the source of truth (NR-024).
+8. **Storm coalescing is a policy, not a per-event send.** High-volume same-`(recipient, topic)` bursts collapse into a digest / rate-limited summary per `DeliverySchedule.Digest`, rather than one push + one email per event (NR-014). Coalescing decisions read the schedule; channels stay dumb.
+9. **Broadcast fans out off the request path.** `Broadcast` enqueues one job and returns; per-recipient expansion + delivery happen in the worker, recorded in the audit trail. A large membership never blocks or times out the caller (NR-020).
+10. **Compliant email is a channel property, not the core's.** The email `Channel` checks the suppression list (`hard_bounce`/`complaint`/`unsubscribe`), adds rows from provider bounce/complaint webhooks, and appends an unsubscribe link to every non-`Essential` topic. The kernel knows nothing about email compliance — it lives in the email `Channel` impl (NR-011).
+11. **Bounded growth.** Read notifications past the retention window (default 90d) are pruned via `Store.Retention`, backed by `PARTITION BY RANGE (created_at)` so expiry is a partition `DROP` and inbox + unread-count queries stay fast (NR-022).
 12. **Topic + Recipient opacity.** The kernel never parses, ranks, or special-cases a `Topic`, `Recipient`, or `Tenant`. Re-anchoring the recipient (user→device→slack_channel) or the tenant (workspace→organization) changes only what the host constructs + the RLS predicate — never a kernel signature.
 
 ---
@@ -376,11 +376,11 @@ Both satisfy invariants 1–7; they differ only in *when* a channel delivery bec
 
 ---
 
-## Reference wiring: ContextEngine notifications as implementations of these ports
+## Reference wiring: the originating product notifications as implementations of these ports
 
-The Phase 1 system is these ports bound to *this* app — nothing in the kernel knows that:
+The originating product is these ports bound to *one* app — nothing in the engine knows that. Kept as a worked example of a full binding:
 
-| Generic port / type | ContextEngine (Phase 1) binding |
+| Generic port / type | The originating product's binding |
 |---|---|
 | `Tenant` | `{Kind: "workspace", ID: workspace_id}` → Phase 2 `{Kind: "organization", …}` — a binding change, no kernel edit |
 | `Recipient` | `{Kind: "user", ID: user_id}` — RLS `app.user_id`; a device/slack recipient is just another `Kind` |
@@ -392,21 +392,21 @@ The Phase 1 system is these ports bound to *this* app — nothing in the kernel 
 | `Store` | Postgres `notifications` (RLS, range-partitioned) + `notification_outbox` + Redis `notify:applied` guard |
 | `Dispatcher` | the Go `cmd/worker` queue-group consumers on `notify.<ws>` / outbox lag; DLQ sweep + `dead_letters` |
 
-Swapping ContextEngine for, say, an incident-alerting product = register a `PagerDutyChannel` + `SlackChannel`, set `Recipient.Kind="oncall"`, register the alert `Topic`s and their templates. The persistence, preferences, idempotency, outbox, DLQ, and retention code are untouched.
+Swapping the originating product for, say, an incident-alerting product = register a `PagerDutyChannel` + `SlackChannel`, set `Recipient.Kind="oncall"`, register the alert `Topic`s and their templates. The persistence, preferences, idempotency, outbox, DLQ, and retention code are untouched.
 
 ---
 
 ## Reference `Channel`s: `InAppChannel` and `EmailChannel`
 
-The two concrete implementations behind the wiring table. Both live in the product/adapter tier and depend only on `kernel/notify`.
+The two concrete implementations behind the wiring table. Both live in `adapters/driven/channel/` and depend only on `domain` + `ports`.
 
 ```go
-package channel // backend-go/internal/notification/channel
+package channel // adapters/driven/channel
 
 import (
 	"context"
 
-	"github.com/aisat/backend-go/kernel/notify"
+	"github.com/truongpx396/intel-notification"
 )
 
 // InAppChannel delivers to the browser via Redis pub/sub → SSE relay. Idempotent by nature:
@@ -450,7 +450,7 @@ func (c EmailChannel) Deliver(ctx context.Context, d notify.Delivery) (notify.De
 	def, _ := c.topics.Lookup(d.Notification.Topic)
 	body := d.Content.Body
 	if !def.Essential {
-		body += renderUnsubscribeFooter(d.Notification) // FR-035: non-essential mail carries an unsubscribe link
+		body += renderUnsubscribeFooter(d.Notification) // NR-011: non-essential mail carries an unsubscribe link
 	}
 	// Idempotent on IdemKey: the mailer sets a provider Idempotency-Key so a Dispatcher re-drive is one send.
 	id, err := c.mailer.Send(ctx, notify.Mail{
@@ -529,7 +529,7 @@ func NotifierContract(t *testing.T, newNotifier func(t *testing.T) (notify.Notif
 		if r2.Applied { t.Fatal("replay must be a no-op (Applied=false)") }
 		if got := countRows(t, st, u1, ws); got != 1 { t.Fatalf("duplicated row: %d want 1", got) }
 	})
-	t.Run("recipient-scoping: u2 never sees u1's notification (SC-012)", func(t *testing.T) {
+	t.Run("recipient-scoping: u2 never sees u1's notification (NS-001)", func(t *testing.T) {
 		nf, st := newNotifier(t)
 		_, _ = nf.Notify(ctx, n(u1, "e2"))
 		if got, _ := st.Unread(ctx, u2, ws); got != 0 {
@@ -561,9 +561,9 @@ func NotifierContract(t *testing.T, newNotifier func(t *testing.T) (notify.Notif
 
 ## Deployment topology: embedded library **or** standalone runtime service
 
-**Yes — the notification engine can run as its own runtime service, and the ports are what make it a config+wiring change rather than a rewrite** (the same library↔service move metering and the LLM gateway make). Two shapes, one set of interfaces:
+**Yes — the notification engine can run as its own runtime service, and the ports are what make it a config+wiring change rather than a rewrite** (the same library↔service move [intel-payment](https://github.com/truongpx396/intel-payment) made). Two shapes, one set of interfaces:
 
-1. **Embedded library (Phase 1 default).** Callers import `kernel/notify`; producers call `Notify`/`Broadcast` in-process (a fast DB tx + Redis pre-check). The delivery half is *already* its own runtime: the `Dispatcher` runs in the `cmd/worker` role, event-driven over NATS/outbox lag.
+1. **Embedded library (the default).** Callers import this module; producers call `Notify`/`Broadcast` in-process (a fast DB tx + Redis pre-check). The delivery half is *already* its own runtime: the `Dispatcher` runs in a worker role, event-driven over NATS/outbox lag.
 2. **Standalone notification service.** Wrap the *same* ports behind a thin gRPC facade (`NotificationService`), hand producers a client stub, and the service owns the notifications DB + outbox + channel registry. Only the `Notifier` binding changes (in-process impl → client stub); producer logic does not.
 
 | Concern | Extract as a service? | Note |
@@ -573,7 +573,7 @@ func NotifierContract(t *testing.T, newNotifier func(t *testing.T) (notify.Notif
 | `Notify` call path | ✅ but adds one hop | keep the API coarse (one call persists + enqueues); co-locate the DB |
 | `Recipient`/`Tenant` context | ✅ | already passed explicitly — no ambient RLS needed at the port |
 | Templates / channels | ✅ | the `TemplateRenderer` + `Channel` registry live inside the service; adding a channel is a service deploy |
-| Recipient-scoping (SC-012) | ✅ preserved | the service owns the RLS'd store; callers pass opaque ids, never query the inbox directly |
+| Recipient-scoping (NS-001) | ✅ preserved | the service owns the RLS'd store; callers pass opaque ids, never query the inbox directly |
 
 What makes it **not free** (decide before extracting):
 - **Fan-in vs latency** — `Notify` is off the request's critical path already (producers fire-and-forget), so a hop is cheap; keep `Broadcast` a single coarse call, never per-recipient RPCs.
@@ -647,14 +647,14 @@ var _ notify.Notifier = (*Client)(nil) // ← the swap is invisible to producer 
 
 ## Extraction-ready code organization
 
-Organize the module as **ports & adapters (hexagonal)** now, so lifting it into its own repo/service later is a `git mv` + `go mod init` — never a refactor. In this repo the unit lives at `backend-go/kernel/notify/`; the tree below is module-relative so it reads the same in-repo and after extraction. The litmus test:
+The module is organized as **ports & adapters (hexagonal)**. This repository **is** the extraction unit, so the tree below is its root. The litmus test, which now runs as a CI gate rather than as a hypothetical:
 
-> **Could I `git mv notify/ ../notify-service/ && cd ../notify-service && go mod init && go build ./...` and have it compile with zero edits?**
-> It compiles iff nothing under `notify/` imports the product, its schema + config travel with it, and the only product-specific things are *injected* (the `Channel`s, the `TopicRegistry` entries, the `TemplateRenderer`, and how a `Recipient`/`Tenant` is built).
+> **Does `go build ./... && go test ./...` pass in a checkout containing only this module — no host, no replace directives?**
+> It does iff nothing here imports a host product, the schema + config travel with it, and the only product-specific things are *injected*: the `Channel`s, the `TopicRegistry` entries, the `TemplateRenderer`, the `AudienceResolver`, and how a `Recipient`/`Tenant` is built. Asked in the other direction once, it compiled — which is why this repository exists.
 
 ```text
-notify/                            # THE EXTRACTION UNIT — self-contained, zero inbound product deps
-  go.mod                           #   (optional today; the dir is already `go mod init`-ready)
+./                                 # THE EXTRACTION UNIT — self-contained, zero inbound product deps
+  go.mod                           #   module github.com/truongpx396/intel-notification
   domain/                          #   pure types + invariants — imports NO infra, NO product
     tenant.go recipient.go topic.go notification.go delivery.go receipt.go
   ports/                           #   the interfaces = the hexagon's edges
@@ -683,7 +683,7 @@ notify/                            # THE EXTRACTION UNIT — self-contained, zer
 **Dependency rule (one direction only):** `adapters → app → ports → domain`. `domain`/`ports` import nothing outside the module; `app` imports only `ports`+`domain`; `adapters` may import infra SDKs (pgx/redis/nats/grpc) but **never** the product. The product-specific bindings — the `Channel` impls, the `TopicRegistry` entries, the `TemplateRenderer`, and how a `Recipient`/`Tenant` is built from a request — are supplied by the **host at wire time**, in `cmd/`:
 
 ```go
-// backend-go/cmd/api/main.go — the host wires product specifics INTO the generic module
+// cmd/notifyd/main.go — the host wires product specifics INTO the generic module
 reg := notifyapp.NewRegistry()
 reg.Register(channel.NewInApp(redisPub))                 // product channel (injected driven port)
 reg.Register(channel.NewEmail(mailer, suppression, topics))
@@ -702,7 +702,7 @@ nf, _ := notifyapp.New(notify.Config{/* … */}, notifyapp.Deps{  // generic cor
 
 Enforcement + hygiene that keep the boundary honest:
 
-- **`depguard`/`go-arch-lint`** rule: `notify/**` may not import `backend-go/internal/**` (product). CI fails the moment someone reaches across.
+- **`depguard`/`go-arch-lint`** rule: nothing in this module may import a host product. CI fails the moment someone reaches across.
 - **Own the schema.** notifications/outbox/preferences/suppressions/dead_letters tables live in `notify/migrations/`; the inbox row is keyed by opaque `recipient_kind`/`recipient_id` + `tenant_tag`, not `workspace_id`/`user_id`.
 - **Own the config.** A `notify.Config` struct (PG DSN, Redis DSN, bus, shard count, delivery durability, retention window, max attempts) passed in — the core reads no global app config or env.
 - **Abstract the bus.** `app` depends on a `Bus` *port*, not NATS, so the extracted service can keep NATS or swap it.
@@ -719,31 +719,28 @@ Two linters make the extraction rules a CI gate. **go-arch-lint** enforces the i
 
 ```yaml
 version: 3
-workdir: backend-go
+workdir: .
 allow:
   depOnAnyVendor: true          # infra SDKs are gated by depguard below, not here
 
 components:
-  notify-domain:   { in: kernel/notify/domain }
-  notify-ports:    { in: kernel/notify/ports }
-  notify-app:      { in: kernel/notify/app }
-  notify-driven:   { in: kernel/notify/adapters/driven/** }
-  notify-driving:  { in: kernel/notify/adapters/driving/** }
-  product:         { in: internal/** }
-  cmd:             { in: cmd/** }
+  domain:   { in: domain }
+  ports:    { in: ports }
+  app:      { in: app/** }
+  driven:   { in: adapters/driven/** }
+  driving:  { in: adapters/driving/** }
+  cmd:      { in: cmd/** }
 
 deps:
-  notify-domain:   { mayDependOn: [] }                                  # pure — nothing
-  notify-ports:    { mayDependOn: [ notify-domain ] }
-  notify-app:      { mayDependOn: [ notify-domain, notify-ports ] }
-  notify-driven:   { mayDependOn: [ notify-domain, notify-ports ] }     # implements ports; NOT app
-  notify-driving:  { mayDependOn: [ notify-domain, notify-ports ] }     # drives via the Notifier port
-  product:         { mayDependOn: [ notify-ports ] }                    # ← product sees ONLY the interfaces
-  cmd:             { mayDependOn: [ notify-domain, notify-ports, notify-app,
-                                    notify-driven, notify-driving, product ] }
+  domain:   { mayDependOn: [] }                                  # pure — nothing
+  ports:    { mayDependOn: [ domain ] }
+  app:      { mayDependOn: [ domain, ports ] }
+  driven:   { mayDependOn: [ domain, ports ] }     # implements ports; NOT app
+  driving:  { mayDependOn: [ domain, ports ] }     # drives via the Notifier port
+  cmd:      { mayDependOn: [ domain, ports, app, driven, driving ] }
 ```
 
-The two load-bearing rows: `product → notify-ports` only (the product wires channels/templates but can't reach into `app`/adapters), and `cmd` is the *only* place allowed to assemble concrete impls.
+The two load-bearing rows: `driven`/`driving` may depend on `ports` but **not** on `app` (an adapter implements a port; it never smuggles in a use-case decision), and `cmd` is the *only* place allowed to assemble concrete impls.
 
 ### `.golangci.yml` — banned imports (depguard v2)
 
@@ -757,11 +754,11 @@ linters-settings:
       notify-core-pure:
         list-mode: lax
         files:
-          - "**/kernel/notify/domain/**"
-          - "**/kernel/notify/ports/**"
-          - "**/kernel/notify/app/**"
+          - "**/domain/**"
+          - "**/ports/**"
+          - "**/app/**"
         deny:
-          - { pkg: "github.com/aisat/backend-go/internal", desc: "core must not import the product tier — keep it extractable" }
+          - { pkg: "github.com/aisat", desc: "the core must not import the product it was extracted from" }
           - { pkg: "github.com/redis/go-redis",            desc: "no infra in the core; use the Store/Bus driven ports" }
           - { pkg: "github.com/jackc/pgx",                 desc: "no infra in the core; use the Store driven port" }
           - { pkg: "github.com/nats-io",                   desc: "no broker in the core; use the Bus driven port" }
@@ -769,19 +766,19 @@ linters-settings:
       # 2. The WHOLE module never depends on the product (the extraction guarantee).
       notify-no-product:
         list-mode: lax
-        files: [ "**/kernel/notify/**" ]
+        files: [ "**/*.go" ]
         deny:
-          - { pkg: "github.com/aisat/backend-go/internal", desc: "notify/** is the extraction unit — it may not import internal/** (product)" }
+          - { pkg: "github.com/aisat", desc: "this module is standalone — it may never import the originating product" }
       # 3. The PRODUCT touches notify only through ports (+ cmd wiring), never its guts.
       product-uses-ports-only:
         list-mode: lax
-        files: [ "**/internal/**" ]
+        files: [ "**/adapters/driven/**" ]
         deny:
-          - { pkg: "github.com/aisat/backend-go/kernel/notify/app",             desc: "wire via cmd/ + the Notifier port, not app internals" }
-          - { pkg: "github.com/aisat/backend-go/kernel/notify/adapters/driven", desc: "product must not reach into notify's infra adapters" }
+          - { pkg: "github.com/truongpx396/intel-notification/app",             desc: "wire via cmd/ + the Notifier port, not app internals" }
+          - { pkg: "github.com/truongpx396/intel-notification/adapters/driven", desc: "product must not reach into notify's infra adapters" }
 ```
 
-Rule 2 *is* the litmus test as a lint: if nothing under `notify/**` imports `internal/**`, the `git mv … && go mod init` extraction compiles.
+Rule 3 *is* the litmus test as a lint: if nothing in the module imports a host product, the module builds standalone.
 
 ### `config.go` — the module's only configuration surface
 
@@ -869,7 +866,7 @@ func (c Config) Validate() error {
 ### `Deps` + `New` — product specifics injected, nothing reached into
 
 ```go
-package app // kernel/notify/app
+package app // app/
 
 // Deps are the ports the core needs. The host supplies them in cmd/ — the product-specific
 // ones are Channels, Renderer, Topics; the rest are generic infra adapters.
@@ -914,14 +911,14 @@ Copy-paste and tick per new host system:
 - [ ] **AddressBook wired** — resolve each `Recipient` to a channel `Address`; a miss is terminal, not a retry.
 - [ ] **Delivery durability chosen** — `outbox` (default, crash-safe multi-channel) vs `direct` (in-app-only / dev); document the choice in the runbook.
 - [ ] **Dispatcher wired** — worker role drains the outbox; DLQ sweep + `dead_letters` + `MaxAttempts` alarm present; retention prune scheduled.
-- [ ] **Recipient-scoping enforced** — RLS on the store restricts the inbox to `recipient` within `tenant`; verified by the `NotifierContract` leak test (SC-012).
+- [ ] **Recipient-scoping enforced** — RLS on the store restricts the inbox to `recipient` within `tenant`; verified by the `NotifierContract` leak test (NS-001).
 - [ ] **Idempotency backstop present** — `UNIQUE(recipient, idem_key)` on the store; every producer supplies an `IdemKey`; the Redis guard gates only the durable write.
 - [ ] **Badge is store-authoritative** — the unread count is recomputed from the store and reconciled on SSE (re)connect; pub/sub is an optimization only.
 
 Extraction-readiness (so it lifts into its own service later without a refactor):
 
 - [ ] **Import-clean module** — nothing under `notify/` imports the product (`internal/**`); a `depguard`/`go-arch-lint` rule enforces it in CI.
-- [ ] **Litmus passes** — `git mv notify/ …/ && go mod init && go build ./...` compiles with zero edits.
+- [ ] **Litmus passes** — the module builds and tests green with no host present, asserted in CI.
 - [ ] **Schema travels** — notifications/outbox/preferences/suppressions/dead_letters live in `notify/migrations/`; inbox keyed by opaque `recipient` + `tenant_tag`, not `workspace_id`/`user_id`.
 - [ ] **Config self-contained** — a `notify.Config` struct is passed in; the core reads no global app config or env.
 - [ ] **Bus abstracted** — `app` depends on a `Bus` port, not a concrete broker.

@@ -2197,13 +2197,13 @@
       "link": null,
       "locked": false,
       "type": "text",
-      "text": "FR-032..FR-037  notification create/list/read + per-category channel preferences  -  SC-011 in-app < 5s p95  -  SC-012 email best-effort, DLQ on exhaustion\nEvery notification carries recipient_user_id; RLS scopes reads to the recipient only. Email is opt-in per category; in-app is always delivered.",
+      "text": "NR-001..NR-020  notification create/list/read + per-(topic,channel) preferences  -  NS-004 in-app < 5s p95  -  NS-006 delivery retried, dead-lettered on exhaustion\nEvery notification carries an opaque recipient; RLS scopes reads to that recipient only. Channels are opt-in per topic; the durable row is always written.",
       "fontSize": 13,
       "fontFamily": 5,
       "textAlign": "left",
       "verticalAlign": "top",
       "containerId": null,
-      "originalText": "FR-032..FR-037  notification create/list/read + per-category channel preferences  -  SC-011 in-app < 5s p95  -  SC-012 email best-effort, DLQ on exhaustion\nEvery notification carries recipient_user_id; RLS scopes reads to the recipient only. Email is opt-in per category; in-app is always delivered.",
+      "originalText": "NR-001..NR-020  notification create/list/read + per-(topic,channel) preferences  -  NS-004 in-app < 5s p95  -  NS-006 delivery retried, dead-lettered on exhaustion\nEvery notification carries an opaque recipient; RLS scopes reads to that recipient only. Channels are opt-in per topic; the durable row is always written.",
       "autoResize": true,
       "lineHeight": 1.25
     }
