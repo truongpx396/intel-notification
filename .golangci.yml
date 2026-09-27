@@ -1,0 +1,64 @@
+# Banned imports. The point of these rules is that the extraction guarantee --
+# "this module stands alone" -- is checked by CI rather than promised in a README.
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - bodyclose
+    - contextcheck
+    - errorlint
+
+linters-settings:
+  depguard:
+    rules:
+      # 1. The CORE is pure: no infra, no transport. Swapping Postgres for
+      #    anything else must not touch a single line under these paths.
+      core-is-pure:
+        list-mode: lax
+        files:
+          - "**/domain/**"
+          - "**/ports/**"
+          - "**/app/**"
+        deny:
+          - pkg: "github.com/jackc/pgx"
+            desc: "no database driver in the core -- use the Store port"
+          - pkg: "github.com/redis/go-redis"
+            desc: "no cache client in the core -- use the Bus/Store ports"
+          - pkg: "github.com/nats-io"
+            desc: "no broker in the core -- use the Bus port"
+          - pkg: "google.golang.org/grpc"
+            desc: "no transport in the core -- grpc lives in adapters/driving"
+          - pkg: "net/http"
+            desc: "no transport in the core -- HTTP lives in adapters/driving"
+
+      # 2. Adapters implement ports; they do not reach into use-cases.
+      adapters-do-not-import-app:
+        list-mode: lax
+        files:
+          - "**/adapters/driven/**"
+        deny:
+          - pkg: "github.com/truongpx396/intel-notification/app"
+            desc: "a driven adapter implements a port; it must not depend on the use-cases that call it"
+
+      # 3. Nothing in the module imports a host product. This IS the extraction
+      #    guarantee -- if it holds, the module builds with no host present.
+      module-is-standalone:
+        list-mode: lax
+        files:
+          - "**/*.go"
+        deny:
+          - pkg: "github.com/aisat"
+            desc: "intel-notification is standalone -- it must never import the product it was extracted from"
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters: [ errcheck, bodyclose ]

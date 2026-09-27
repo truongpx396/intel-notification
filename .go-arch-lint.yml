@@ -1,0 +1,31 @@
+# The hexagon's dependency graph, enforced in CI.
+#
+# Two rows carry the weight:
+#   app may depend ONLY on ports + domain -- so the use-cases cannot reach infra.
+#   driven/driving implement ports and may NOT depend on app -- so an adapter
+#   cannot smuggle a use-case decision into itself.
+#
+# `cmd` is the only place allowed to assemble concrete implementations. That is
+# what keeps the wiring in one readable file instead of spread across the tree.
+version: 3
+workdir: .
+allow:
+  depOnAnyVendor: true      # infra SDKs are gated by depguard, not here
+
+components:
+  domain:   { in: domain }
+  ports:    { in: ports }
+  app:      { in: app/** }
+  driven:   { in: adapters/driven/** }
+  driving:  { in: adapters/driving/** }
+  api:      { in: api/** }
+  cmd:      { in: cmd/** }
+
+deps:
+  domain:  { mayDependOn: [] }                      # pure. Nothing.
+  ports:   { mayDependOn: [ domain ] }
+  app:     { mayDependOn: [ domain, ports ] }
+  driven:  { mayDependOn: [ domain, ports ] }       # implements ports; NOT app
+  driving: { mayDependOn: [ domain, ports, api ] }  # drives via the Notifier port
+  api:     { mayDependOn: [] }                      # generated protobuf only
+  cmd:     { mayDependOn: [ domain, ports, app, driven, driving, api ] }

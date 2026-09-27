@@ -1,0 +1,22 @@
+# Go
+*.exe
+*.test
+*.out
+/bin/
+/dist/
+vendor/
+
+# Env
+.env
+.env.local
+!.env.example
+
+# Tooling
+.golangci-cache/
+*.log
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

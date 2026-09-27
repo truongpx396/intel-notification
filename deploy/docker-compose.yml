@@ -1,0 +1,66 @@
+# Local service-mode stack. `docker compose -f deploy/docker-compose.yml up`
+#
+# Postgres and Redis are the only required infrastructure -- the bus defaults to
+# Redis Streams, so there is no broker to stand up. Swap to NATS by setting
+# NOTIFY_BUS=nats and uncommenting the nats service.
+
+name: intel-notification
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: notify
+    ports: [ "5432:5432" ]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Applied in filename order on first boot of an empty volume.
+      - ../migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d notify" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    # noeviction: the quota counters and the dedup pre-check must not be evicted
+    # under memory pressure. The pre-check losing entries is merely slow, but a
+    # quota counter losing entries silently raises a tenant's ceiling.
+    command: [ "redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes" ]
+    ports: [ "6379:6379" ]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  notifyd:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      NOTIFY_REALM: local
+      NOTIFY_PG_DSN: postgres://postgres:postgres@postgres:5432/notify?sslmode=disable
+      NOTIFY_REDIS_URL: redis://redis:6379/0
+      NOTIFY_DELIVERY: outbox
+      NOTIFY_SHARDS: "16"
+    ports:
+      - "8080:8080"   # REST, recipient-facing
+      - "9090:9090"   # gRPC, producer-facing -- internal network in production
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+
+  # notifyd runs the dispatcher in-process by default. Split it out when delivery
+  # volume needs to scale independently of the API tier.
+  # dispatcher:
+  #   build: { context: .., dockerfile: deploy/Dockerfile }
+  #   command: [ "--role=dispatcher" ]
+
+volumes:
+  pgdata:
+  redisdata:
