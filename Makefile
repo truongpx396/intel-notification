@@ -23,12 +23,15 @@ verify-schema: ## Apply migrations to a throwaway PG16 and assert the guarantees
 	trap '$(MAKE) --no-print-directory _pg-down' EXIT; \
 	$(MAKE) --no-print-directory _pg-up; \
 	echo "==> asserting the INHERITED constraint cannot be built (D2)"; \
-	if docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB) -v ON_ERROR_STOP=1 -q \
-	     < scripts/verify-inherited-constraint.sql 2>/dev/null; then \
-	  echo "FAIL: the inherited partitioned+unique shape was accepted."; \
+	if d2out=$$(docker exec -i $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB) -v ON_ERROR_STOP=1 -q \
+	              < scripts/verify-inherited-constraint.sql 2>&1); then \
+	  echo "FAIL: the inherited partitioned+unique shape was ACCEPTED."; \
 	  echo "      PostgreSQL behaviour changed -- revisit D2."; exit 1; \
+	elif ! printf '%s' "$$d2out" | grep -q 'must include all partitioning columns'; then \
+	  echo "FAIL: it failed, but NOT for the reason D2 claims. Actual error:"; \
+	  printf '%s\n' "$$d2out" | sed 's/^/      /'; exit 1; \
 	else \
-	  echo "    OK: rejected, as D2 documents"; \
+	  echo "    OK: rejected with the partitioning-columns error D2 documents"; \
 	fi; \
 	echo "==> applying migrations"; \
 	for f in migrations/*.sql; do \
@@ -46,10 +49,15 @@ _pg-up:
 	@docker run -d --name $(PG_CONTAINER) -e POSTGRES_PASSWORD=$(PG_PASS) \
 	   -e POSTGRES_DB=$(PG_DB) $(PG_IMAGE) >/dev/null
 	@printf "==> waiting for %s" "$(PG_IMAGE)"; \
-	for i in $$(seq 1 60); do \
-	  docker exec $(PG_CONTAINER) pg_isready -U $(PG_USER) -d $(PG_DB) >/dev/null 2>&1 && break; \
+	ready=0; \
+	for i in $$(seq 1 90); do \
+	  if docker exec $(PG_CONTAINER) psql -U $(PG_USER) -d $(PG_DB) -tAc 'select 1' >/dev/null 2>&1; then \
+	    ready=1; break; \
+	  fi; \
 	  printf "."; sleep 1; \
-	done; echo " ready"
+	done; \
+	if [ $$ready -ne 1 ]; then echo " FAILED: $(PG_DB) never became reachable"; exit 1; fi; \
+	echo " ready"
 
 .PHONY: _pg-down
 _pg-down:
