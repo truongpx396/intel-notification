@@ -1,8 +1,9 @@
 # Local service-mode stack. `docker compose -f deploy/docker-compose.yml up`
 #
-# Postgres and Redis are the only required infrastructure -- the bus defaults to
-# Redis Streams, so there is no broker to stand up. Swap to NATS by setting
-# NOTIFY_BUS=nats and uncommenting the nats service.
+# Postgres and Redis are the only required infrastructure. There is no broker:
+# a notification is accepted when Postgres commits, workers claim from the queue
+# table, and scheduled jobs are single-owner through row leases. NATS JetStream is
+# an optional ingest path only (NOTIFY_INGEST_NATS_URL).
 
 name: intel-notification
 
@@ -25,9 +26,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    # noeviction: the quota counters and the dedup pre-check must not be evicted
-    # under memory pressure. The pre-check losing entries is merely slow, but a
-    # quota counter losing entries silently raises a tenant's ceiling.
+    # noeviction: under memory pressure a quota counter must not be evicted, or a
+    # tenant's ceiling silently rises. The pre-check losing entries is merely slower,
+    # and the live stream is at-most-once by design; neither affects correctness.
     command: [ "redis-server", "--maxmemory-policy", "noeviction", "--appendonly", "yes" ]
     ports: [ "6379:6379" ]
     volumes:
@@ -43,10 +44,9 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     environment:
-      NOTIFY_REALM: local
       NOTIFY_PG_DSN: postgres://postgres:postgres@postgres:5432/notify?sslmode=disable
       NOTIFY_REDIS_URL: redis://redis:6379/0
-      NOTIFY_DELIVERY: outbox
+      NOTIFY_REALM_BINDINGS: local-producer=local
       NOTIFY_SHARDS: "16"
     ports:
       - "8080:8080"   # REST, recipient-facing
@@ -55,8 +55,9 @@ services:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
 
-  # notifyd runs the dispatcher in-process by default. Split it out when delivery
-  # volume needs to scale independently of the API tier.
+  # notifyd runs the dispatcher and the maintenance jobs in-process by default.
+  # Split them out when delivery volume needs to scale independently of the API
+  # tier; any number of dispatcher replicas is safe (leased, fenced claims).
   # dispatcher:
   #   build: { context: .., dockerfile: deploy/Dockerfile }
   #   command: [ "--role=dispatcher" ]
