@@ -1,52 +1,65 @@
-# Contract: Bus subjects
+# Contract: Bus subjects (optional ingest)
 
-The engine depends on a `Bus` **port**, not a broker. The reference default is Redis Streams — so a
-deployment needs no extra infrastructure beyond what the store already requires — and NATS JetStream
-is a drop-in swap for deployments wanting quorum replication or cross-region mirroring.
+**The engine needs no message bus.** A notification is accepted when PostgreSQL commits it
+([D23](../design-decisions.md#d23)); dispatchers find work by claiming from the queue table and are
+woken in memory or by polling; scheduled jobs are single-owner through row leases
+([D22](../design-decisions.md#d22)). The default deployment is PostgreSQL + Redis and nothing else.
 
-Subject tokens use `<realm>` and `<tenant_tag>`, where `tenant_tag` is `kind:id`. The realm is in
-every subject so two products sharing a bus cannot cross-deliver ([D1](../design-decisions.md#d1)).
+A bus is supported for one purpose: **producers that prefer to publish rather than call.** An ingest
+adapter — a *driving* adapter, `adapters/driving/natsingest` — consumes the subject below and calls
+`Notifier.Notify`. The core has no `Bus` port.
+
+## Durability requirement
+
+NS-003 ("no delivery lost to a crash") measures from acceptance. When a producer publishes instead of
+calling, acceptance moves to the bus, so the bus must not lose an acknowledged message:
+
+| Bus | Supported for ingest | Why |
+|---|---|---|
+| **NATS JetStream**, replicated stream (R3), publish acknowledged after quorum | Yes — the reference adapter | An acknowledged message survives the loss of a node |
+| Redis Streams | **No** | A primary acknowledges `XADD` before replicating; a failover in that window loses an acknowledged notification. The argument research §10 makes against `SET NX` applies unchanged |
+| Core NATS (no JetStream) | No | At-most-once |
 
 ## Subjects
 
+Tokens are `<realm>` — restricted to `[a-z0-9-]` by `Config.Validate`, so it is always a valid subject
+token — and `<tenant_token>`, the first 16 hex characters of `sha256(canonical(tenant_kind, tenant_id))`.
+Opaque tenant ids may contain `.`, `*` or `>`, which would break or wildcard a subject; the hash cannot.
+The token only routes; the payload carries the full identity.
+
 | Subject | Publisher | Consumer | Payload and semantics |
 |---|---|---|---|
-| `notify.<realm>.<tenant_tag>` | Any producer | Notifier, queue group | `{recipient:{kind,id}, topic, priority, title, body, payload, idem_key, occurred_at, attributes}`. Applies preferences, persists the inbox row and per-channel outbox rows in one transaction. Idempotent on `(realm, recipient, idem_key)` |
-| `notify.broadcast.<realm>.<tenant_tag>` | Admin surface | Broadcast expander, queue group | `{audience, topic, priority, title, body, payload, idem_key}`. Expands the audience in **pages** off the request path, deriving each per-recipient key deterministically from `idem_key` (NR-020) |
-| `notify.dispatch.<realm>.<shard>` | Notifier (or the drain ticker) | Dispatcher, queue group per shard | `{shard}` — a nudge that work is due. Carries no delivery data: the outbox is the source of truth, so a lost nudge costs latency, not a delivery |
-| `notify.dlq.<realm>` | Dispatcher | Dead-letter sweeper, single owner | Deliveries that exhausted their attempt ceiling or failed non-retryably. The sweeper re-drives those still under the cap and parks the rest in `dead_letters` with an alarm — never dropped, never looping (NR-007) |
-| `notify.retention.tick` | Scheduler | One worker, single owner | `{trace_id}` → retires aged inbox and dead-letter partitions per the configured windows (NR-022) |
-| `notify.digest.tick` | Scheduler | Dispatcher, queue group per shard | `{shard, trace_id}` → flushes `digest_buffer` windows whose `flush_at` has passed, one delivery per window (NR-014) |
-| `notify.quota.reset` | Scheduler | One worker, single owner | Rolls the quota counters' window ([D5](../design-decisions.md#d5)) |
+| `notify.ingest.<realm>.<tenant_token>` | A trusted producer | `natsingest`, durable queue group | `{tenant:{kind,id}, recipient:{kind,id}, topic, priority, data, title, body, payload, idem_key, occurred_at, deliver_after, deliver_before, attributes}`. The adapter calls `Notify` and acknowledges only after it returns — after commit. A replay is acknowledged like a success |
+| `notify.ingest.dlq.<realm>` | `natsingest` | Operators | A message that failed validation, or exceeded `MaxDeliver`. Also written to `dead_letters` with `source='bus'`, `reason='poison'` |
 
 ## Rules
 
-- **Producers are thin.** A producer publishes one notification and is done. It never reads
-  preferences, never picks channels, never touches the outbox. Only the engine knows those.
+- **The realm comes from the stream, not the payload.** Each realm's subjects are bound to that realm's
+  credentials; the adapter takes the realm from the subject it is configured for and ignores any in the
+  body (NR-009).
+- **Producers are thin.** A producer publishes one notification. It never reads preferences, never picks
+  channels, never touches the queue.
 - **Identity is authoritative from the publisher.** `recipient` and `tenant` come from the trusted
-  producer, never from notification content (NR-009). A producer that forwards a user-supplied
-  recipient id has created a delivery-redirection vulnerability.
-- **`idem_key` is required on every mutating subject.** A message without one is rejected rather
-  than delivered, because accepting it silently forfeits NR-002 for that notification.
-- **At-least-once everywhere.** Every consumer is idempotent; redelivery is normal operation, not an
-  error path.
-- **Queue groups for scale-out, single owner for ticks.** Fan-out and dispatch are N-replica queue
-  groups scaled on consumer lag. Scheduled ticks are single-owner: two workers retiring partitions
-  concurrently is a race with no upside.
-- **Dispatch nudges are advisory.** The dispatcher also polls its shard on an interval, so a dropped
-  nudge delays a delivery rather than losing it. Nudges exist to make the common case fast, not to be
-  reliable.
-- **Shards are stable.** `notify.dispatch.<realm>.<shard>` partitions by the recipient hash, fixed
-  for the deployment's life ([D11](../design-decisions.md#d11)). Changing the shard count requires
-  draining first; doing it live double-delivers.
+  producer, never from notification content. A producer that forwards a user-supplied recipient id has
+  created a delivery-redirection vulnerability.
+- **`idem_key` is required.** A message without one is dead-lettered as `poison`, never delivered
+  unguarded.
+- **At-least-once.** Redelivery is normal operation; `Notify` is idempotent on the key.
+
+## What moved off the bus, and why
+
+| Previously | Now | Reason |
+|---|---|---|
+| `notify.dispatch.<realm>.<shard>` nudges | In-memory wakeup after a local commit, adaptive polling otherwise, optional `LISTEN/NOTIFY` | A nudge carried no data; polling bounds latency without a broker ([D22](../design-decisions.md#d22)) |
+| `notify.broadcast.…` | A `notification_broadcasts` row | A durable record with a cursor resumes after a crash; a bus message restarts from page one ([D7](../design-decisions.md#d7)) |
+| `notify.retention.tick`, `notify.digest.tick`, `notify.quota.reset` | Workers take a `notify_job_leases` lease | Single-owner without a broker, and a record of when each job last ran |
+| `notify.dlq.<realm>` | `dead_letters`, written atomically by the terminal transition | A dead letter is a row, queryable and replayable, written in the same transaction as the outcome |
 
 ## Observable assertions
 
 - A message redelivered with the same `idem_key` yields one inbox row and one delivery per channel.
-- A message whose recipient disabled a `(topic, channel)` pair produces the inbox row and **no**
-  outbox row for that channel.
-- A simulated channel-provider failure routes the delivery to `notify.dlq.<realm>`, and delivery on
-  every other channel is unaffected.
-- A broadcast to a large tenant returns to the caller before expansion completes, and a re-published
-  broadcast with the same `idem_key` does not double-notify anyone.
-- Two realms publishing the same `idem_key` for the same recipient id both deliver.
+- The adapter does not acknowledge a message until `Notify` has returned, so a crash before commit leaves
+  the message to be redelivered.
+- A message whose body names a different realm is delivered in the subject's realm, or rejected — never
+  delivered in the body's realm.
+- A message without `idem_key` reaches `dead_letters` as `poison`.

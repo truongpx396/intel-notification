@@ -9,135 +9,161 @@ Stages map to [plan.md § Phasing](plan.md#phasing). Stages 1–6 are the releas
 
 ## Stage 1 — Schema
 
-- [x] **T001** `migrations/0001_notification_core.sql`: inbox (partitioned, RLS forced), `notify_idem`,
-      outbox, preferences, schedules (NR-001, NR-003, NR-008, [D2](design-decisions.md#d2))
-- [x] **T002** `migrations/0002_channels_delivery.sql`: suppressions, dead letters (partitioned),
-      digest buffer, quotas (NR-006, NR-007, NR-014, NR-023)
-- [x] **T003** `scripts/verify-schema.sql` + `make verify-schema`: the seven assertions, including the
-      proof that the inherited constraint cannot be constructed (NS-001, NS-002)
-- [ ] **T004** `migrations/0003_partition_provisioning.sql`: a function to provision the next N months
-      for both partitioned tables, plus the scheduled call (NR-022)
+- [x] **T001** `migrations/0001_notification_core.sql`: inbox (partitioned, RLS forced on the parent
+      and every partition), `notify_idem` (tenant in the key, hash-partitioned), the queue, the delivery
+      history, broadcasts, preferences (recipient and tenant), schedules, job leases (NR-001, NR-003,
+      NR-008, NR-010, NR-020, [D2](design-decisions.md#d2), [D17](design-decisions.md#d17),
+      [D20](design-decisions.md#d20))
+- [x] **T002** `migrations/0002_channels_delivery.sql`: hashed per-channel suppressions, dead letters
+      (genuine failures only, partitioned), sealing digest windows, quotas with a realm default (NR-006,
+      NR-007, NR-014, NR-023)
+- [x] **T003** `migrations/0003_catalog_compliance.sql`: topics, versioned templates, recipient addresses
+      (RLS), channel providers (credentials by reference), erasure record (NR-025, NR-028, NR-034)
+- [x] **T004** `migrations/0004_state_transitions.sql`: canonical encoding, the fenced claim, outcome
+      writes, the terminal transition, address binding, tenant backlog deferral, shard rehoming, digest
+      append and flush, cancel, bounded expiry, job leases, erasure (NR-004, NR-007, NR-021, NR-023,
+      NR-030, NR-034)
+- [x] **T005** `scripts/verify-schema.sql` + `make verify-schema`: 19 tests, run as the table owner,
+      each raising on failure, including the proof that the inherited constraint cannot be constructed
+      and mutation checks on the partition-scope and concurrent-claim tests (NS-001, NS-002)
+- [ ] **T006** Partition provisioning: `EnsurePartitions` creates the next N months of `notifications`,
+      `notification_deliveries` and `dead_letters`, and calls `notify_apply_recipient_scope()` on every
+      new `notifications` partition; the `notify.partition.missing` and `notify.partition.unscoped`
+      alarms (NR-008, NR-022)
 
 ## Stage 2 — Domain and ports
 
-- [ ] **T005** `domain/`: `Realm`, `Tenant`, `Recipient`, `Topic`, `Priority`, `ChannelKind`,
-      `Notification`, `Address`, `RenderedContent`, `Delivery`, `DeliveryResult`, `Receipt`,
-      `Preference`, `DeliverySchedule`, `Shard`, `OutboxEntry`. Imports nothing outside the module
-- [ ] **T006** `domain/shard.go`: `ShardFor(realm, recipient, n)` as a stable CRC32 hash, with a test
-      asserting stability against a frozen vector table ([D11](design-decisions.md#d11))
-- [ ] **T007** [P] `ports/driving.go`: `Notifier`, `Dispatcher`
-- [ ] **T008** [P] `ports/driven.go`: `Channel`, `ChannelRegistry`, `Store`, `PreferenceStore`,
-      `TemplateRenderer`, `AddressBook`, `TopicRegistry`, `AudienceResolver`, `Bus`, `Clock`, `IDSource`
-      (NR-016, NR-017, [D7](design-decisions.md#d7))
-- [ ] **T009** `config.go`: `Config` + `withDefaults` + `Validate`. `Realm` required with no default;
-      `Shards >= 1`; `Delivery` in `outbox|direct`; backoff base/ceiling ([D1](design-decisions.md#d1),
-      [D10](design-decisions.md#d10))
-- [ ] **T010** [P] `domain/backoff.go`: `min(base * 2^attempt, ceiling)` with full jitter, and a test
-      asserting the distribution is spread rather than synchronized ([D10](design-decisions.md#d10))
+- [ ] **T007** `domain/identity.go`: `Realm`, `Tenant`, `Recipient`, `Identity`, `Canonical`, tested
+      against the frozen vector shared with `notify_canonical()` ([D18](design-decisions.md#d18))
+- [ ] **T008** `domain/keys.go`: pre-check key, stream key, delivery idempotency key, address key,
+      broadcast member key — each with frozen vectors ([D16](design-decisions.md#d16),
+      [D25](design-decisions.md#d25))
+- [ ] **T009** [P] `domain/`: `Notification`, `Address`, `TopicDef`, `DeliverySchedule`, `DeliveryPlan`,
+      `Receipt`, `OutboxEntry`, `Claim`, `Delivery`, `DeliveryResult`, `UnreadCount`, broadcast, cancel and
+      status types. Imports nothing outside the module
+- [ ] **T010** [P] `domain/shard.go`: `ShardFor(identity, n)` over the canonical encoding, stable against
+      a frozen vector table ([D11](design-decisions.md#d11))
+- [ ] **T011** [P] `domain/backoff.go`: full jitter with a `RetryAfter` floor, and a test that the
+      distribution spreads rather than synchronizes ([D10](design-decisions.md#d10))
+- [ ] **T012** [P] `ports/driving.go`: `Notifier`, `Inbox`, `Admin`, `Dispatcher`, `Maintenance`
+- [ ] **T013** [P] `ports/driven.go`: every driven port in the contract (NR-016, NR-017,
+      [D7](design-decisions.md#d7))
+- [ ] **T014** `config.go`: `Config`, defaults and `Validate` with every rule in the contract
+      ([D1](design-decisions.md#d1), [D21](design-decisions.md#d21))
 
 ## Stage 3 — Store adapter
 
-- [ ] **T011** `adapters/driven/postgres/store.go`: `PersistAndEnqueue` — inbox row + `notify_idem` +
-      one outbox row per channel, in **one** transaction; replay returns `Applied=false` (NR-002, NR-003)
-- [ ] **T012** `ClaimOutbox` for a shard, riding the partial index; sets `claimed_at` (NR-004, NR-021)
-- [ ] **T013** `MarkDelivered` / `MarkFailed`, with `terminal_reason` distinct from `last_error`
-      ([D12](design-decisions.md#d12))
-- [ ] **T014** `Unread` recomputed from rows, never from a counter ([D15](design-decisions.md#d15))
-- [ ] **T015** `Retention`: retire aged inbox and dead-letter partitions independently (NR-022,
-      [D8](design-decisions.md#d8))
-- [ ] **T016** `adapters/driven/postgres/prefs.go`: `PreferenceStore` over topic defaults; absent row
-      means default (NR-011, [D3](design-decisions.md#d3))
-- [ ] **T017** **Contract test** `StoreContract`: replay, one-transaction atomicity, crash-after-commit
-      leaves drivable work, retention succeeds with a pending delivery outstanding (NS-002, NS-003)
-- [ ] **T018** **Contract test** RLS leak suite — asserts isolation holds *as the owning role*, because
-      that is the role a worker actually uses (NS-001, release blocker)
+- [ ] **T015** `postgres/store.go`: `PersistAndEnqueue` — scope, guard first, inbox row, queue rows,
+      digest appends, drop records, one transaction; `tx` for `NotifyTx` (NR-002, NR-003, NR-027)
+- [ ] **T016** `Claim`, `Load` (scoped from the queue row), `BindAddresses`, `RecordOutcome` over the
+      `0004` functions; `ok=false` on a lost lease (NR-004, [D19](design-decisions.md#d19))
+- [ ] **T017** [P] `postgres/inbox.go`: list, bounded unread, seen / read / archive — all scoped
+      (NR-024, NR-033)
+- [ ] **T018** [P] `postgres/prefs.go`: recipient → tenant (locked) → topic resolution with source
+      reporting (NR-011, [D30](design-decisions.md#d30))
+- [ ] **T019** [P] `postgres/suppressions.go`, `postgres/leases.go`
+- [ ] **T020** **Contract test** `StoreContract`: replay, atomicity, crash after commit leaves drivable
+      work, retention with a pending delivery outstanding, `NotifyTx` rollback leaves nothing (NS-002,
+      NS-003)
 
 ## Stage 4 — Notifier
 
-- [ ] **T019** `app/notifier.go`: resolve preferences → schedule → persist + enqueue. Always writes the
-      row; preferences gate only channels (NR-001, NR-012)
-- [ ] **T020** `adapters/driven/redis/precheck.go`: the fast duplicate pre-check. Gates the durable
-      write **only** — a test asserts delivery still happens when the pre-check is hot (NR-004)
-- [ ] **T021** `app/schedule.go`: quiet-hours and digest decisions; `critical` bypasses quiet hours and
-      the override is recorded (NR-013, [D9](design-decisions.md#d9))
-- [ ] **T022** **Contract test** `NotifierContract`: replay is a no-op, cross-recipient leak is
-      impossible, a disabled channel is not enqueued while the row still exists (NS-001, NS-002)
+- [ ] **T021** `app/planner.go`: topic lookup, preference resolution, inbox visibility from
+      `InboxBacked`, quiet hours (critical overrides), digest eligibility (never critical or essential),
+      quota peek, fallback chain, `DeliverAfter` (NR-011–NR-014, NR-029, NR-031)
+- [ ] **T022** `app/notifier.go`: `Notify`, `NotifyTx`, `Cancel`, `Status`; realm from config, never the
+      request (NR-009, NR-027, NR-030, NR-032)
+- [ ] **T023** `redis/precheck.go`: read before, write after commit, never for `NotifyTx`; a test that a
+      failed transaction leaves no entry ([D18](design-decisions.md#d18))
+- [ ] **T024** **Contract test** `NotifierContract` (NS-001, NS-002)
 
 ## Stage 5 — Channels
 
-- [ ] **T023** [P] `adapters/driven/channel/inapp`: Redis publish; idempotent by construction since the
-      badge is recomputed (NR-005, [D15](design-decisions.md#d15))
-- [ ] **T024** [P] `adapters/driven/channel/email`: renders via the template seam, checks suppressions,
-      appends an unsubscribe footer for non-essential topics, sets a provider idempotency key
-      (NR-005, NR-006, NR-015)
-- [ ] **T025** `adapters/driven/postgres/suppressions.go`: per-channel suppression store with expiry
-      ([D13](design-decisions.md#d13), [D14](design-decisions.md#d14))
-- [ ] **T026** **Contract test** `ChannelContract`, run against both channels: re-drive is one send,
-      suppressed is terminal and not retryable, transient failure reports retryable (NR-005, NR-006)
+- [ ] **T025** [P] `channel/inapp`: nudge-only publish on the identity stream key; `InboxBacked`
+      ([D16](design-decisions.md#d16))
+- [ ] **T026** [P] `channel/email`: template content, RFC 8058 headers and footer for non-essential
+      topics, provider idempotency key, truthful `Dedup` per provider (NR-005, NR-015,
+      [D34](design-decisions.md#d34))
+- [ ] **T027** [P] `channel/failover`: ordered providers, weakest `Dedup` of its members
+      ([D29](design-decisions.md#d29))
+- [ ] **T028** `redis/stream.go`: sharded pub/sub on hash-tagged keys
+- [ ] **T029** **Contract test** `ChannelContract` against both reference channels, and against the email
+      provider's sandbox under `-tags provider` (NR-005, [D32](design-decisions.md#d32))
 
 ## Stage 6 — Dispatcher
 
-- [ ] **T027** `app/dispatcher.go`: claim → render → resolve address → deliver → record outcome
-- [ ] **T028** Backoff and attempt ceiling; park in `dead_letters` with an alarm at the cap (NR-007)
-- [ ] **T029** Terminal handling: suppressed and address-miss end at attempt 1 (NR-006,
-      [D12](design-decisions.md#d12))
-- [ ] **T030** `app/dlq.go`: sweeper re-drives under the cap, parks above it, records `replayed_at`
-- [ ] **T031** **Contract test** dispatcher suite: no delivery lost across every crash point; poison
-      terminates; a suppressed address is attempted once (NS-003, NS-006)
+- [ ] **T030** `app/dispatcher.go`: the nine steps in the contract, adaptive polling, in-memory wakeup,
+      optional `LISTEN/NOTIFY` ([D22](design-decisions.md#d22))
+- [ ] **T031** Suppression check before every delivery; channel-reported suppressions recorded with
+      expiry (NR-006, [D13](design-decisions.md#d13))
+- [ ] **T032** Dead-letter replay (`Admin.ReplayDeadLetter`), once per dead letter
+- [ ] **T033** **Contract test** `DispatcherContract`: every crash point, poison terminates including
+      worker crashes, fan-out retries per address, expiry, fallback, fencing (NS-003, NS-006)
 
-## Stage 7 — Digest and quotas
+## Stage 7 — Digest, quotas, fairness
 
-- [ ] **T032** `app/digest.go`: open a window, append a member, flush at `flush_at` into one delivery
-      (NR-014, [D4](design-decisions.md#d4))
-- [ ] **T033** Burst test: N notifications in one window yield one delivery per digestible channel and
-      N persisted rows (NS-005)
-- [ ] **T034** `app/quota.go` + Redis counters: per-`(realm, tenant, channel)` budget, `defer` default
-      (NR-023, [D5](design-decisions.md#d5))
-- [ ] **T035** Noisy-neighbour test: one tenant exhausting its budget does not slow another (NS-007)
+- [ ] **T034** `app/digest.go`: append through `notify_digest_append`, leased flush job, render members
+      skipping canceled ones (NR-014)
+- [ ] **T035** Burst test: N notifications yield `ceil(N / DigestMax)` deliveries and N rows (NS-005)
+- [ ] **T036** `app/quota.go` + `redis/quota.go`: peek at enqueue, take at dispatch, backlog deferral,
+      `drop_non_essential` never for essential or critical (NR-023, [D24](design-decisions.md#d24))
+- [ ] **T037** Noisy-neighbour test measuring NS-007
 
-## Stage 8 — Retention
+## Stage 8 — Maintenance
 
-- [ ] **T036** `app/retention.go`: scheduled retirement for both partitioned tables, independently
-      windowed (NR-022)
-- [ ] **T037** Test: retention succeeds while a dead-lettered delivery references an aged partition —
-      the case a foreign key would have deadlocked ([D6](design-decisions.md#d6))
+- [ ] **T038** `app/maintenance.go`: leased jobs for retention (inbox, history, dead letters), partition
+      provisioning (T006), idempotency and digest expiry, completed-broadcast cleanup (NR-022,
+      [D33](design-decisions.md#d33))
+- [ ] **T039** Test: retention succeeds while a dead-lettered delivery references an aged partition
+      ([D6](design-decisions.md#d6))
+- [ ] **T040** `app/erasure.go` + `Admin.Erase`; test NS-012
 
 ## Stage 9 — Broadcast
 
-- [ ] **T038** `app/broadcast.go`: paged audience expansion off the request path, deterministic
-      per-recipient keys derived from the broadcast key (NR-020, [D7](design-decisions.md#d7))
-- [ ] **T039** Test: a large tenant returns promptly; a retried broadcast double-notifies nobody
+- [ ] **T041** `app/broadcast.go`: durable record, leased paging, cursor committed with each page,
+      inline recipients bounded by `MaxInlineRecipients` (NR-020, [D7](design-decisions.md#d7))
+- [ ] **T042** Test: a crash mid-broadcast resumes at the next page; a retried broadcast double-notifies
+      nobody
 
 ## Stage 10 — Transports
 
-- [ ] **T040** `adapters/driving/inprocess`: returns `ports.Notifier` directly (NR-025)
-- [ ] **T041** [P] `api/notifyv1`: the proto from
-      [notification-ports.md](contracts/notification-ports.md#service-surface-notificationservice-grpc-contract-locked)
-- [ ] **T042** [P] `adapters/driving/grpcserver`: serves `app` over `notifyv1`
-- [ ] **T043** [P] `adapters/driving/grpcclient`: satisfies `ports.Notifier`, with a compile-time
-      assertion that it does (NR-025)
-- [ ] **T044** Run `NotifierContract` through the gRPC transport — identical semantics is the claim, so
-      it gets the identical suite
+- [ ] **T043** `driving/inprocess`: returns the engine's ports (NR-025)
+- [ ] **T044** `driving/httpapi`: the REST surface and the SSE relay — subscription from the session
+      identity, per-nudge scoped re-read, bounded count first on connect ([rest-api.md](contracts/rest-api.md))
+- [ ] **T045** [P] `api/notifyv1`: the proto from the contract
+- [ ] **T046** [P] `driving/grpcserver`, `driving/grpcclient` (satisfies `ports.Notifier`;
+      `NotifyTx` returns `ErrTxUnsupported`)
+- [ ] **T047** **Contract tests** `NotifierContract` through gRPC, and `StreamIsolationContract` against
+      the relay (NS-001)
 
-## Stage 11 — Boundary gates
+## Stage 11 — Service mode
 
-- [ ] **T045** `.go-arch-lint.yml`: the component graph; `product` may depend only on `ports`
-- [ ] **T046** `.golangci.yml`: `depguard` — no infra in `domain`/`ports`/`app`, no host imports
-      anywhere in the module (NR-026)
-- [ ] **T047** CI job asserting the module builds and tests green with **no host present** (NS-009)
-- [ ] **T048** CI job running `make verify-schema` against PostgreSQL 16 on every migration change
+- [ ] **T048** `postgres/topics.go`, `postgres/templates.go` (Go templates, restricted function map,
+      locale fallback), `postgres/addresses.go` — the data-backed ports ([D31](design-decisions.md#d31))
+- [ ] **T049** `Catalog` gRPC service; realm bindings from producer principals; channels constructed
+      from `channel_providers` with credentials resolved from `secret_ref`
+- [ ] **T050** Recipient token verification (JWKS per realm); `Directory` callback client
+- [ ] **T051** NS-011 demonstration with a non-Go producer
+- [ ] **T052** [P] `driving/natsingest`: optional JetStream ingest, acknowledged after commit
+      ([D23](design-decisions.md#d23))
 
-## Stage 12 — Documentation and release
+## Stage 12 — Boundary gates
 
-- [ ] **T049** [P] Fill `docs/integration-guide.md` code samples against the built API
-- [ ] **T050** [P] `docs/operations.md`: shard-change runbook, dead-letter triage, retention, alarms
-- [ ] **T051** Tag `v0.1.0` once Stages 1–6 are green; the README status block moves from "designed" to
-      "core implemented"
+- [ ] **T053** Enable the `lint` CI job: `go-arch-lint` component graph and `depguard` bans (NR-026)
+- [ ] **T054** CI job asserting the module builds and tests green with **no host present** (NS-009)
+
+## Stage 13 — Load test and release
+
+- [ ] **T055** Load-test harness for every row of [plan.md § Capacity model](plan.md#capacity-model),
+      run against the reference configuration (NS-010)
+- [ ] **T056** [P] Fill `docs/integration-guide.md` code samples against the built API
+- [ ] **T057** Tag `v0.1.0` once Stages 1–6 are green; the README status block moves from "designed" to
+      "core implemented". A production-ready release additionally requires T055
 
 ---
 
 ## Not in this phase
 
 Acknowledgement, escalation chains, multi-step workflows and delivery-outcome webhooks are
-[Phase 2](../002-escalation-workflows/). Authoring UI, per-tenant branding UI and delivery analytics
-are Phase 3 and undesigned. See [ROADMAP.md](../../ROADMAP.md).
+[Phase 2](../002-escalation-workflows/). A template authoring UI, per-tenant branding UI and delivery
+analytics are Phase 3 and undesigned. See [ROADMAP.md](../../ROADMAP.md).

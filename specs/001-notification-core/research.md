@@ -12,6 +12,20 @@ seams, §10 Redis role separation, §4 provider fallback.
 Where a decision here was superseded during the extraction, the superseding entry in
 [design-decisions.md](design-decisions.md) is authoritative and is named inline.
 
+### Superseded in this repository
+
+The research below is the originating project's, kept as written. These points in it no longer
+describe this engine; the decision named is authoritative:
+
+| Research says | Now | Decision |
+|---|---|---|
+| The durable backstop is `notifications (user_id, idem_key) UNIQUE` (§10, §23) | A separate `notify_idem` guard keyed by realm, tenant and recipient, bounded by a window | [D2](design-decisions.md#d2), [D18](design-decisions.md#d18), [D21](design-decisions.md#d21) |
+| `SET NX notify:applied:{idem_key}` is the fast pre-check (§23) | A read-only check before the transaction, written only after commit, in the durable guard's key space | [D18](design-decisions.md#d18) |
+| In-app delivers via `PUBLISH notify:user:<id>` (§23) | A nudge carrying only an id, on a stream keyed by the hash of the full identity, re-read under RLS | [D16](design-decisions.md#d16) |
+| Scheduled work is triggered by an external cron → NATS tick → queue group (§14, §15) | Workers take a row lease in `notify_job_leases`; no broker is required | [D22](design-decisions.md#d22) |
+| Deliveries retry through DLQ subjects and a sweeper (§18) | The queue retries in place under a fenced lease; genuine failures are written to `dead_letters` by the terminal transition | [D19](design-decisions.md#d19), [D20](design-decisions.md#d20) |
+| The outbox is drained "at-least-once" with no claim protocol (§23) | `SKIP LOCKED` claims under a lease, with every outcome write fenced by a token | [D19](design-decisions.md#d19) |
+
 ## 4. Provider fallback strategy (one-hop)
 
 - **Decision**: LLM aliases (`fast`, `smart`, `embed`, `rerank`) resolve to `{primary, fallback}` (plus multi-key/deployment load-balancing) in the **standalone LLM gateway** (LiteLLM router config, Bifrost-swappable — §21), **not** in application code. Fail over on timeout / 5xx / rate-limit only, capped at one hop, with an `llm.fallback.count` metric and a circuit breaker. `embed` has **no per-call fallback**: the `embed` alias is pinned single-model (no fallback route), and a down primary embedder parks the chunk in `ingestion.dlq` for retry rather than embedding with a different model.
