@@ -16,10 +16,11 @@ jobs:
       - uses: actions/checkout@v4
       - name: Migration hygiene
         run: make lint-sql
-      # Applies every migration to a throwaway PG16, asserts the seven
-      # guarantees, and asserts the inherited constraint still cannot be built.
-      # If that last one ever passes, D2's premise changed and the build fails
-      # loudly rather than carrying a stale decision.
+      # Applies every migration to a throwaway PG16, runs the 19 schema tests
+      # as the table owner (each raises on failure), and asserts the inherited
+      # constraint still cannot be built. If that last one ever passes, D2's
+      # premise changed and the build fails loudly rather than carrying a stale
+      # decision.
       - name: Verify schema guarantees
         run: make verify-schema
 
@@ -51,7 +52,7 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
-    if: false   # enable with the first Go code (tasks T045-T046)
+    if: false   # enable with the first Go code (task T053)
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

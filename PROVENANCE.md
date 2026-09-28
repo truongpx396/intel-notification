@@ -121,9 +121,10 @@ the framing changed while the substance did not:
 
 ## Design work added during the lift
 
-15 decisions are recorded in
-[design-decisions.md](specs/001-notification-core/design-decisions.md). The ones that change
-behaviour rather than presentation:
+15 decisions were recorded during the lift in
+[design-decisions.md](specs/001-notification-core/design-decisions.md) (D16–D36 came later — see
+[the review](#architecture-review-after-the-extraction)). The ones that change behaviour rather than
+presentation:
 
 | # | Change | Why it mattered |
 |---|---|---|
@@ -157,10 +158,40 @@ as the inbox row. That keeps both properties and is better than either compromis
 is narrow and hot, and it **outlives inbox partitions** — so dropping an aged partition cannot
 resurrect the ability to double-notify an old key.
 
+*Since amended by the review:* the guard's key now includes the tenant, and it is bounded by an
+idempotency window rather than kept forever ([D18](specs/001-notification-core/design-decisions.md#d18),
+[D21](specs/001-notification-core/design-decisions.md#d21)).
+
 This is the same class of defect, in the same place, that
 [intel-payment](https://github.com/truongpx396/intel-payment) found in `credit_ledger`. Two
 independent subsystems of the originating design inherited one unconstructible pattern, which is
 itself the finding: the pattern was copied between specifications without either being applied.
+
+---
+
+## Architecture review after the extraction
+
+The design as first written here was reviewed against the bar of a production-grade, general-purpose
+engine. The review found defects in the carried contract and in this repository's own additions, and
+the fixes are recorded as decisions **D16–D36**, plus amendments to D2, D4, D5, D7, D8, D11, D12, D13
+and D15 in [design-decisions.md](specs/001-notification-core/design-decisions.md). The ones that were
+correctness bugs:
+
+| # | Defect | Consequence |
+|---|---|---|
+| **D16** | The reference in-app channel published rendered content to `notify:user:<id>` — no realm, no tenant | Two tenants with a user `u1` received each other's notifications on the live stream |
+| **D17** | Queue rows carried no recipient; RLS was on the partitioned parent only | Under `FORCE` RLS the dispatcher's read returned nothing (verified against PostgreSQL 16); a partition queried by name bypassed the policy |
+| **D18** | The pre-check was `SET NX` before the transaction, keyed without the recipient; the guard omitted the tenant | A failed transaction or a second recipient silently dropped a notification; one user in two tenants lost one tenant's notification |
+| **D22** | A `direct` delivery mode inserted then delivered in-line | A crash between the two lost the undelivered channels — the originating bug, reintroduced |
+| **D11** | Shards were fixed for life on a misdiagnosed double-delivery risk, while the claim itself was unspecified | An offline migration for a safe operation, and the real double-claim unguarded |
+| **D2, D20** | The guard and the outbox were never pruned | Two tables grew forever, against NR-022 |
+
+The review also added the claim protocol (D19), delivery history (D20), tenant fairness (D24),
+multi-address delivery (D25), templates that own copy (D27), `NotifyTx` (D28), lifecycle controls
+(D29), tenant preferences (D30), a service mode that needs no host code (D31), per-channel dedup
+guarantees (D32), RFC 8058 unsubscribe (D34), erasure (D35) and a stated capacity envelope (D36). The
+migrations were rewritten in place rather than amended, because nothing had been deployed; the schema
+suite grew from seven printed checks to 19 tests that raise on failure and run as the table owner.
 
 ---
 

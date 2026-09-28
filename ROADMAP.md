@@ -13,16 +13,22 @@ duplicated alert at 3am, and a notification leaking across a tenant boundary.
 
 Concretely, in scope and designed:
 
-- Durable recipient-scoped inbox with unread counts and read state.
-- Transactional outbox fan-out — a crash cannot lose a channel delivery.
-- A pluggable `Channel` registry: in-app and email as reference implementations; SMS, push, Slack
-  and webhook by registering one more.
-- Per-`(recipient, topic, channel)` preferences over registered topic defaults.
-- Quiet hours and digest coalescing, including what happens to a `critical` notification at 2am.
-- Dead-letter path with attempt caps, alarms, inspection and replay.
-- Per-tenant per-channel quotas so one noisy tenant cannot starve another's provider budget.
-- Bounded growth: range-partitioned inbox and dead letters, retention as a partition `DROP`.
-- Both deployment shapes: embedded Go library, or a container behind a gRPC facade.
+- Durable recipient-scoped inbox with a bounded unread count and seen, read and archived states.
+- Transactional outbox fan-out — a crash cannot lose a channel delivery — with `NotifyTx` to enqueue
+  inside the producer's own transaction.
+- A pluggable `Channel` registry: in-app and email as reference implementations; SMS, push, Slack and
+  webhook by registering one more. Every device of a recipient is its own delivery.
+- Preferences per `(recipient, topic, channel)`, with tenant defaults and locks over registered topic
+  defaults.
+- Quiet hours and bounded digest coalescing, including what happens to a `critical` notification at 2am.
+- Scheduled sends, expiry, cancellation, fallback channel chains and provider failover.
+- A delivery history that answers "was it delivered?" and correlates provider bounces.
+- Dead-letter path for genuine failures, with attempt caps, alarms, inspection and replay.
+- Per-tenant per-channel quotas that move an exhausted tenant's backlog aside, so one noisy tenant cannot
+  starve another.
+- Bounded growth for every table, and erasure of a recipient's personal data in one call.
+- Both deployment shapes: embedded Go library, or a service any language can call — with topics,
+  templates and addresses managed as data.
 
 ## What this is not
 
@@ -56,12 +62,21 @@ are properties of the schema, checkable by a test, rather than a vendor's assura
 → [specs/001-notification-core](specs/001-notification-core/)
 
 The durable inbox, preferences, the transactional outbox, the dispatcher, the channel registry, the
-template seam, digest coalescing, quotas, the dead-letter path, retention, and both transports
-(in-process library and gRPC service).
+template seam, digest coalescing, quotas and fairness, the dead-letter path, retention, erasure, and
+both transports (in-process library and a gRPC service with data-backed topics, templates and
+addresses).
 
-**Required infrastructure: PostgreSQL + Redis.** The bus is a port with a Redis Streams default, so
-there is no broker to stand up; NATS JetStream is a swap for deployments needing quorum replication
-or cross-region mirroring. Migrations are verified against PostgreSQL 16 by `make verify-schema`.
+**Required infrastructure: PostgreSQL + Redis.** No message broker: a notification is accepted when
+PostgreSQL commits, workers claim from the queue table, and scheduled jobs are single-owner through row
+leases. NATS JetStream is supported as an optional ingest path for producers that prefer to publish.
+The schema's guarantees are verified against PostgreSQL 16 by `make verify-schema`.
+
+The design went through an architecture review after the extraction, recorded as decisions D16–D36.
+It fixed a cross-tenant leak on the live stream, a worker that could not read what it delivered under
+row-level security, a pre-check that could drop notifications, and a delivery mode that reintroduced
+the bug the outbox exists to fix — and added what a general-purpose engine is expected to have. The
+capacity envelope for one PostgreSQL primary is stated in
+[plan.md](specs/001-notification-core/plan.md#capacity-model) and gates a production-ready release.
 
 ## Phase 2 — Escalation & delivery workflows
 
