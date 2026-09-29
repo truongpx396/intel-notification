@@ -32,8 +32,9 @@ canonical("aisat", "workspace", "w1", "user", "u1") = "5:aisat,9:workspace,2:w1,
 ```
 
 Joining opaque ids with a bare separator collides as soon as an id contains it, and a collision in a
-dedup key drops a notification while one in a stream key leaks it. `notify_canonical()` implements the
-encoding in SQL and the Go domain implements it against the same frozen vector (TEST 19).
+dedup key drops a notification while one in a stream key leaks it. `domain.Canonical` implements the
+encoding, and every derived value below is built on it, each with a frozen test vector computed
+independently of the code (`domain/keys_test.go`).
 
 | Derived value | Definition |
 |---|---|
@@ -113,7 +114,7 @@ written. Carries the inbox row's `notification_created_at`, so a replay or a can
 partition.
 
 A separate table because a unique index on the inbox **cannot be created** on a table partitioned by
-`created_at` ([D2](design-decisions.md#d2)). Bounded by the idempotency window: `notify_expire_idem()`
+`created_at` ([D2](design-decisions.md#d2)). Bounded by the idempotency window: `Maintenance.ExpireIdem`
 deletes older keys in batches ([D21](design-decisions.md#d21)). Hash-partitioned 16 ways on the identity
 so expiry and vacuum work one partition at a time.
 
@@ -190,7 +191,7 @@ error, and `replayed_at`. Partitioned, retained for `DeadLetterRetention`.
 One row per window; `member_ids` bounded by `DigestMax`. At most one window per
 `(recipient, topic, channel)` has `sealed_at IS NULL`; a full or due window is sealed, then flushed once
 ([D4](design-decisions.md#d4)). Flushed windows whose delivery finished are deleted by
-`notify_expire_digests()`.
+`Maintenance.ExpireDigests`.
 
 ### `channel_quotas` — per-tenant channel budget
 
@@ -209,32 +210,36 @@ is the realm-wide default ([D5](design-decisions.md#d5)). The hot counter lives 
 
 ### `notify_job_leases` — single-owner jobs
 
-One row per job; `notify_try_lease_job()` grants it to one owner at a time
+One row per job; `Maintenance.TryLeaseJob` grants it to one owner at a time
 ([D22](design-decisions.md#d22)).
 
 ---
 
-## State transitions (`0004`)
+## State transitions (the PostgreSQL adapter)
 
-The transitions whose correctness depends on several atomic writes or a fencing check are SQL
-functions, so every adapter and the verification suite share one implementation.
+The transitions whose correctness depends on several atomic writes or a fencing check are plain SQL in
+[`adapters/driven/postgres`](../../adapters/driven/postgres/), each one statement — data-modifying CTEs
+where several writes must land together — or one transaction ([D37](design-decisions.md#d37)). The store
+executes decisions; the dead-letter and fallback policy is `domain.DispositionOf`. The integration suite
+runs every transition against PostgreSQL 16 as the table owner.
 
-| Function | Transition |
-|---|---|
-| `notify_claim_outbox(shard, limit, lease)` | Lease due rows `FOR UPDATE SKIP LOCKED`; count the attempt; issue a token |
-| `notify_retry_delivery(id, token, next, error)` | Transient failure → due at `next`; releases the lease |
-| `notify_defer_delivery(id, token, until, reason)` | Quota / quiet hours → due at `until`; returns the attempt |
-| `notify_finish_delivery(id, token, outcome, …)` | Queue → history; dead-letter genuine failures; enqueue the next fallback |
-| `notify_bind_addresses(id, token, addresses)` | Bind one address in place, or fan out to one row per address |
-| `notify_defer_tenant_channel(…, until)` | Move a tenant's due backlog on one channel out of the claim range |
-| `notify_rehome_shards(n)` | After lowering `Shards`, fold retired shards into live ones |
-| `notify_digest_append(…)` / `notify_digest_flush(id)` | Join or open a window, sealing at max / flush once |
-| `notify_cancel(…, idem_key)` | Cancel pending deliveries; report in-flight ones |
-| `notify_expire_idem(before, batch)` / `notify_expire_digests(before, batch)` | Bounded expiry |
-| `notify_try_lease_job(job, owner, ttl)` | Single-owner lease |
-| `notify_erase_recipient(…)` | Erase one recipient everywhere; record by hash |
+| Port method | Transition | Test |
+|---|---|---|
+| `Queue.Claim(shard, limit, lease)` | Lease due rows `FOR UPDATE SKIP LOCKED`; count the attempt; issue a token | `TestClaimLeasesAndSkipsLockedRows` |
+| `Queue.Retry(claim, next, error)` | Transient failure → due at `next`; releases the lease | `TestRetryAndDefer`, `TestFencedWrites` |
+| `Queue.Defer(claim, until, reason)` | Quota / quiet hours → due at `until`; returns the attempt | `TestRetryAndDefer`, `TestFencedWrites` |
+| `Queue.Finish(claim, finish)` | Queue → history, plus the dead letter and next fallback channel the `Finish` carries, in one statement | `TestFinish`, `TestFencedWrites` |
+| `Queue.BindAddresses(claim, addrs, keys)` | Bind one address in place, or fan out to one row per address | `TestBindAddresses` |
+| `Queue.DeferTenantChannel(…, until)` | Move a tenant's due backlog on one channel out of the claim range | `TestDeferTenantChannel` |
+| `Queue.Cancel(identity, idem_key)` | Cancel pending deliveries; report in-flight ones | `TestCancel` |
+| `Digests.AppendDigest` / `FlushDigest` | Join or open a window, sealing at max / flush once | `TestDigestWindows`, `TestDigestAppendUnderConcurrency` |
+| `Maintenance.RehomeShards(n)` | After lowering `Shards`, fold retired shards into live ones | `TestRehomeShards` |
+| `Maintenance.ExpireIdem` / `ExpireDigests` | Bounded, batched expiry | `TestExpireIdem`, `TestExpireDigests` |
+| `Maintenance.TryLeaseJob(job, owner, ttl)` | Single-owner lease | `TestTryLeaseJob` |
+| `Maintenance.Erase(identity)` | Erase one recipient everywhere; record by hash | `TestErase` |
+| `Maintenance.EnsurePartitions(from, months)` | Create missing monthly partitions; scope every new `notifications` partition | `TestEnsurePartitions` |
 
-Every outcome write takes the claim's lease token and changes nothing without it.
+Every state change on a claim takes its lease token and changes nothing without it.
 
 ---
 

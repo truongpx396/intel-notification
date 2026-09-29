@@ -7,12 +7,13 @@ as a self-contained service that any language can call.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> ## ⚠️ Status: design complete, **implementation not started**
-> This repository contains the **specification**: ports, data model, and migrations whose guarantees
-> are verified against PostgreSQL 16 by 19 executable tests, plus deployment scaffolding. There is
-> **no Go code yet**, so the snippets below describe the intended interface rather than something you
-> can `go get` today. [ROADMAP.md](ROADMAP.md) says what exists, what is designed and what is
-> deliberately absent; [tasks.md](specs/001-notification-core/tasks.md) is the build order.
+> ## ⚠️ Status: design complete, **implementation started** (Go 1.26)
+> This repository contains the **specification** — ports, data model, migrations — and the first of
+> the implementation: the domain rules and the **PostgreSQL adapter for the delivery queue**, proven
+> against a real PostgreSQL 16 by an integration suite. The notifier, dispatcher, channels and
+> transports are not built yet, so most snippets below still describe the intended interface.
+> [ROADMAP.md](ROADMAP.md) says what exists, what is designed and what is deliberately absent;
+> [tasks.md](specs/001-notification-core/tasks.md) is the build order.
 >
 > **Scope, stated honestly:** this is a *delivery* engine — it decides who gets told what, on which
 > channel, once, and proves it never told the wrong person. It is **not** a marketing campaign tool
@@ -90,7 +91,8 @@ eng, err := app.New(notify.Config{
     RedisURL: os.Getenv("NOTIFY_REDIS_URL"),
 }, app.Deps{
     Channels: reg, Topics: topics, Renderer: pg.Templates, Addresses: pg.Addresses,
-    Store: pg.Store, Inbox: pg.Inbox, Maintenance: pg.Maintenance, Prefs: pg.Prefs,
+    Store: pg.Store, Queue: pg.Queue, Digests: pg.Digests, Maintenance: pg.Maintenance,
+    Inbox: pg.Inbox, Prefs: pg.Prefs,
     Suppressions: pg.Suppressions, Quotas: redis.NewQuota(rdb), Stream: redis.NewStream(rdb),
 })
 
@@ -115,15 +117,23 @@ Full walkthrough: [docs/integration-guide.md](docs/integration-guide.md).
 | **A notification reaches only its recipient** | One forced RLS policy on every scoped table **and every partition**; scope set per transaction; the live stream keyed by the identity's hash and re-read under RLS | [TEST 4–6](scripts/verify-schema.sql), stream contract test |
 | **Once per recipient** | `notify_idem` keyed by realm, tenant and recipient, written first in the same transaction, within a bounded window | [TEST 1–3](scripts/verify-schema.sql) |
 | **Once per channel, stated honestly** | Each channel declares provider, local or no deduplication on a per-address delivery key; the engine reports it | channel contract test |
-| **No delivery lost to a crash** | Inbox row + queue rows in one transaction; `SKIP LOCKED` leases; stale workers fenced by token | [TEST 7–8](scripts/verify-schema.sql), dispatcher contract test |
-| **Poison terminates** | Attempts counted at claim, so even a delivery that crashes its worker reaches the ceiling; genuine failures dead-lettered with a reason | [TEST 7, 9](scripts/verify-schema.sql) |
-| **A burst becomes bounded digests** | One open window per `(recipient, topic, channel)`, sealed at `DigestMax`, flushed once | [TEST 12](scripts/verify-schema.sql) |
-| **One noisy tenant cannot starve another** | Quotas with a realm default; an exhausted tenant's backlog leaves the claim range | [TEST 11](scripts/verify-schema.sql) |
-| **Storage stays bounded** | Partitioned inbox, history and dead letters; windowed idempotency; a queue that holds pending work only | [TEST 9, 14, 16](scripts/verify-schema.sql) |
-| **Erasable** | One call removes a recipient everywhere; suppressions survive as hashes | [TEST 18](scripts/verify-schema.sql) |
+| **No delivery lost to a crash** | Inbox row + queue rows in one transaction; `SKIP LOCKED` leases; stale workers fenced by token | [`TestClaimLeasesAndSkipsLockedRows`, `TestFencedWrites`](adapters/driven/postgres/queue_integration_test.go) |
+| **Poison terminates** | Attempts counted at claim, so even a delivery that crashes its worker reaches the ceiling; genuine failures dead-lettered with a reason | [`TestClaimLeasesAndSkipsLockedRows`, `TestFinish`](adapters/driven/postgres/queue_integration_test.go) |
+| **A burst becomes bounded digests** | One open window per `(recipient, topic, channel)`, sealed at `DigestMax`, flushed once | [TEST 7](scripts/verify-schema.sql), [`TestDigestAppendUnderConcurrency`](adapters/driven/postgres/digest_integration_test.go) |
+| **One noisy tenant cannot starve another** | Quotas with a realm default; an exhausted tenant's backlog leaves the claim range | [`TestDeferTenantChannel`](adapters/driven/postgres/queue_integration_test.go) |
+| **Storage stays bounded** | Partitioned inbox, history and dead letters; windowed idempotency; a queue that holds pending work only | [TEST 8–9](scripts/verify-schema.sql), [`TestFinish`, `TestExpireIdem`](adapters/driven/postgres/) |
+| **Erasable** | One call removes a recipient everywhere; suppressions survive as hashes | [TEST 11](scripts/verify-schema.sql), [`TestErase`](adapters/driven/postgres/maintenance_integration_test.go) |
 
-`make verify-schema` applies the migrations to a throwaway PostgreSQL 16 and runs those tests **as the
-table owner** — the role a worker actually uses — with every test raising on failure.
+Two suites prove these, both **as the table owner** — the role a worker actually uses, neither
+superuser nor BYPASSRLS:
+
+- `make verify-schema` applies the migrations to a throwaway PostgreSQL 16 and asserts what the schema
+  alone holds: constraints, forced row-level security, key spaces.
+- `make test-integration` runs every queue state transition — SQL in the Go adapter — against a real
+  PostgreSQL 16 started by Testcontainers, in parallel, one cloned database per test. Each guarantee was
+  mutation-checked: break it on purpose and a named test fails.
+
+`make test` runs the domain's unit tests with no infrastructure; `make ci` runs everything.
 
 ### The bug this fixes
 
@@ -143,7 +153,7 @@ commit, that can skip a database round-trip and can never skip a notification.
 | [ROADMAP.md](ROADMAP.md) | scope, phases, and when to use something else |
 | [specs/001-notification-core/](specs/001-notification-core/) | the normative specification |
 | [contracts/notification-ports.md](specs/001-notification-core/contracts/notification-ports.md) | every port, the 16 invariants, the dispatcher algorithm, contract tests, the gRPC surface |
-| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 36 decisions, each with what it prevents — D16–D36 from the architecture review |
+| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 37 decisions, each with what it prevents — D16–D37 from the architecture review |
 | [data-model.md](specs/001-notification-core/data-model.md) | tables, keys, RLS, state transitions, retention |
 | [plan.md](specs/001-notification-core/plan.md) | build order and the capacity model |
 | [research.md](specs/001-notification-core/research.md) | the originating research the design rests on, carried with its history |

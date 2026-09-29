@@ -66,19 +66,26 @@ An online operation ([D11](../specs/001-notification-core/design-decisions.md#d1
 
 - **Raising** `Shards`: change it and roll the workers. Existing rows keep their shard; new rows spread
   wider.
-- **Lowering** `Shards`: change it, roll the workers, then run `SELECT notify_rehome_shards(<new count>)`
-  so rows in retired shards move into live ones. Safe while workers run.
+- **Lowering** `Shards`: change it, roll the workers, then run `Maintenance.RehomeShards(<new count>)`
+  so rows in retired shards move into live ones — or its SQL by hand, in one transaction:
+  `UPDATE notification_outbox SET shard = shard % <n> WHERE shard >= <n>` and the same on
+  `digest_buffer`. Safe while workers run.
 
 Nothing is double-delivered either way: the claim locks rows, not shards.
 
 ### Partition provisioning
 
 `notifications`, `notification_deliveries` and `dead_letters` need next month's partition before the
-month rolls; the provisioning job creates several months ahead. It must call
-`notify_apply_recipient_scope()` on every new `notifications` partition — PostgreSQL does not carry a
-parent's row-level security to its partitions, and `make verify-schema` TEST 5 asserts every partition
-is scoped. There is deliberately no default partition: a missing one fails inserts loudly rather than
-filling a catch-all that can never be retired.
+month rolls. The provisioning job, `Maintenance.EnsurePartitions`, creates each missing month ahead of
+the clock and applies `notify_apply_recipient_scope()` to every new `notifications` partition —
+PostgreSQL does not carry a parent's row-level security to its partitions. Run it at startup as well as
+on its schedule: a fresh deployment whose bootstrap months have passed cannot accept a notification
+until it has run. Its role needs `CREATE` on the schema.
+
+`make verify-schema` TEST 5 asserts every existing partition is scoped, and `TestEnsurePartitions`
+asserts a provisioned one is. A partition created by hand without the policy is an isolation incident
+(`notify.partition.unscoped`). There is deliberately no default partition: a missing one fails inserts
+loudly rather than filling a catch-all that can never be retired.
 
 ### Retention
 

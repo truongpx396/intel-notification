@@ -11,8 +11,8 @@ The normative interfaces. Where a contract and prose elsewhere disagree, the con
 The gRPC surface is **not** a separate file — it lives in
 [notification-ports.md](./notification-ports.md#service-surface-grpc-contract-locked), because it is
 the same `Notifier` port over the wire and splitting it invites the two to drift. The schema's state
-transitions are contract too: they live in [`migrations/0004_state_transitions.sql`](../../../migrations/0004_state_transitions.sql)
-and are asserted by `make verify-schema`.
+transitions are implemented as SQL in the PostgreSQL adapter and held to their contract by its
+integration suite ([D37](../design-decisions.md#d37)).
 
 ## Reading order
 
@@ -31,7 +31,7 @@ and are asserted by `make verify-schema`.
 |---|---|
 | **Frozen** | The domain types, `Notifier`, `Channel`, `ChannelCapabilities`, `Store`, the 16 invariants, and the canonical encoding. Changing these breaks every host |
 | **Additive** | New driven ports, new channel kinds, new topics, new outcome values, new config fields with defaults |
-| **Internal** | Adapter implementations, SQL other than the `0004` functions' contracts, Redis key layout, shard arithmetic within a major version |
+| **Internal** | Adapter implementations and their SQL, Redis key layout, shard arithmetic within a major version |
 
 A host depends on the ports. A host that depends on an adapter has taken on a private interface and
 will be broken without notice — the lint rules in [`.golangci.yml`](../../../.golangci.yml) and

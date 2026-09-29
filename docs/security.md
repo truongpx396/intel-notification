@@ -83,7 +83,7 @@ empty body and mutates nothing.
 
 ## Personal data
 
-- **Erasure.** `notify_erase_recipient()` removes a recipient from every table in one transaction and
+- **Erasure.** `Maintenance.Erase` removes a recipient from every table in one transaction and
   records the erasure by hash ([D35](../specs/001-notification-core/design-decisions.md#d35)).
 - **Suppressions** store the hash of the normalized address, never the address, and survive erasure — so
   honoring an erasure request never resumes mailing someone who complained. A hash is minimization, not

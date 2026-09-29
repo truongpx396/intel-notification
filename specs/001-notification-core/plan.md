@@ -7,12 +7,12 @@
 
 | | |
 |---|---|
-| **Language** | Go 1.24 |
+| **Language** | Go 1.26 (toolchain `go1.26.8`) |
 | **Module** | `github.com/truongpx396/intel-notification` |
 | **Stores** | PostgreSQL 16 (durable: inbox, queue, history, catalog, state transitions), Redis 7 (pre-check, live stream, quota counters — all reconstructible) |
 | **Bus** | None required. Optional ingest adapter for NATS JetStream ([bus-subjects.md](contracts/bus-subjects.md)) |
 | **Transports** | in-process (library), REST + SSE (recipients), gRPC (producers, catalog) |
-| **Testing** | `make verify-schema` for schema guarantees; table-driven contract suites; Testcontainers for store-backed suites behind `//go:build integration`; provider sandboxes behind `//go:build provider` |
+| **Testing** | `make verify-schema` for schema guarantees; table-driven unit and contract suites; Testcontainers (v0.44) for store-backed suites behind `//go:build integration`, one cloned database per test; provider sandboxes behind `//go:build provider` |
 | **Lint** | `go-arch-lint` for the component graph, `golangci-lint` with `depguard` for banned imports |
 
 ## Architecture
@@ -62,7 +62,7 @@ average, one address per channel.
 | Unread count | p95 < 5 ms | Bounded count on the partial unread index |
 | Reconnect storm | 50,000 clients reconnecting within 60 s | Bounded count; relay backoff with jitter |
 | In-app end to end | p95 < 5 s (NS-004) | Commit → in-memory wakeup or poll → claim → nudge → relay |
-| Fairness | NS-007: an unexhausted tenant's p95 due-to-claimed within 10% while another is exhausted | `notify_defer_tenant_channel` |
+| Fairness | NS-007: an unexhausted tenant's p95 due-to-claimed within 10% while another is exhausted | `Queue.DeferTenantChannel` |
 
 **Sizing.** Steady-state row counts follow from rate × retention, and an operator can compute them
 before adopting:
@@ -95,9 +95,9 @@ later stage.
 
 | Stage | Delivers | Verifiable by |
 |---|---|---|
-| **1. Schema** | migrations, state-transition functions, `make verify-schema` | The 19 schema tests pass against PostgreSQL 16, as the table owner |
+| **1. Schema** | migrations, `make verify-schema` | The schema tests pass against PostgreSQL 16, as the table owner |
 | **2. Domain + ports** | types, canonical encoding, derived keys, backoff, config validation | Frozen test vectors shared with the SQL; `Config.Validate` table tests |
-| **3. Store adapter** | persist-and-enqueue, claim, outcomes, binding, inbox reads | `StoreContract`, including every crash point |
+| **3. Store adapter** | the queue's transitions (done), persist-and-enqueue, inbox reads | The queue's integration suite (done); `StoreContract`, including every crash point |
 | **4. Notifier** | planner, `Notify`, `NotifyTx`, pre-check, `Cancel`, `Status` | `NotifierContract` |
 | **5. Channels** | in-app + email reference implementations, failover composite | `ChannelContract` against both; provider sandbox for email |
 | **6. Dispatcher** | the nine-step algorithm | `DispatcherContract` |

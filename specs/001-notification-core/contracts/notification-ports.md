@@ -58,7 +58,7 @@ PRODUCERS — thin: build a Notification, call Notify (or NotifyTx inside their 
 │  AddressBook.Resolve → SuppressionStore filter → Store.BindAddresses (1 or N)  │
 │  QuotaCounter.Take → exhausted: defer row + move tenant backlog                │
 │  TemplateRenderer.Render → Channel.Deliver(Delivery{IdemKey per address})      │
-│  Store.RecordOutcome — delivered | retry | suppressed | rejected | max_attempts│
+│  Queue.Retry | Defer | Finish(domain.NewFinish(outcome)) — each one fenced     │
 │      → notification_deliveries (+ dead_letters, + next fallback channel)       │
 └───────────────────────────────────────────────────────────────────────────────┘
    in_app  → StreamPublisher nudge {id} on hash(identity) → relay re-reads under RLS
@@ -107,9 +107,8 @@ type Identity struct {
 }
 
 // Canonical encodes parts unambiguously: each as <octet length>:<part>, joined by
-// ",". It is the only way the engine turns identities into strings (D18). The
-// schema's notify_canonical() implements the same encoding, and both are tested
-// against one frozen vector:
+// ",". It is the only way the engine turns identities into strings (D18). It is
+// tested against a frozen vector computed independently of the code:
 //   Canonical("aisat","workspace","w1","user","u1") == "5:aisat,9:workspace,2:w1,4:user,2:u1"
 func Canonical(parts ...string) string
 
@@ -479,11 +478,12 @@ type Admin interface {
 	SetTenantPreference(ctx context.Context, realm Realm, p TenantPreference) error
 }
 
-// Maintenance runs the single-owner jobs — retention, partition provisioning,
-// idempotency and digest expiry, digest flush, quota rollover, broadcast expansion —
-// each under a notify_job_leases lease that it renews while it runs, so any number of
-// workers may call Run and each job still has one runner at a time (D22).
-type Maintenance interface {
+// Jobs runs the single-owner jobs — retention, partition provisioning, idempotency
+// and digest expiry, digest flush, quota rollover, broadcast expansion — each under a
+// notify_job_leases lease that it renews while it runs, so any number of workers may
+// call Run and each job still has one runner at a time (D22). It drives the driven
+// Maintenance and Digests ports.
+type Jobs interface {
 	Run(ctx context.Context) error
 }
 
@@ -506,7 +506,42 @@ type Dispatcher interface {
 ## Driven ports
 
 ```go
-// Store is the durable tier: the guard, the inbox row, the queue, the history.
+// Queue, Digests and Maintenance are implemented: ports/driven.go holds them and
+// adapters/driven/postgres implements them as plain SQL, tested against PostgreSQL
+// by the integration suite (D37). The Go declarations there are normative; they are
+// summarized here. Every method taking a Claim is FENCED: it changes state only
+// while the claim's lease token is current, and reports ok=false, having written
+// nothing, when the lease was lost (D19).
+type Queue interface {
+	Claim(ctx context.Context, shard Shard, max int, lease time.Duration) ([]Claim, error) // SKIP LOCKED lease; counts the attempt
+	Retry(ctx context.Context, c Claim, next time.Time, lastError string) (ok bool, err error)
+	Defer(ctx context.Context, c Claim, until time.Time, reason string) (ok bool, err error) // returns the attempt
+	// Finish is the terminal transition in ONE statement: queue → history, plus the
+	// dead letter and next fallback channel that f.Disposition carries. The store
+	// decides neither; f comes from domain.NewFinish, which applies DispositionOf.
+	Finish(ctx context.Context, c Claim, f Finish) (ok bool, err error)
+	BindAddresses(ctx context.Context, c Claim, addrs []Address, keys []string) (b Binding, ok bool, err error) // D25
+	DeferTenantChannel(ctx context.Context, realm Realm, t Tenant, ch ChannelKind, until time.Time) (int, error) // D24
+	Cancel(ctx context.Context, id Identity, idemKey string) (CancelReceipt, error)                              // D29
+}
+
+type Digests interface {
+	AppendDigest(ctx context.Context, m DigestMember, window time.Duration, max int) (windowID string, err error)
+	DueDigests(ctx context.Context, shard Shard, max int) ([]string, error)
+	FlushDigest(ctx context.Context, windowID string) (queued bool, err error) // idempotent (D4)
+}
+
+type Maintenance interface {
+	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error) // D22
+	RehomeShards(ctx context.Context, shards int) (int, error)                           // D11
+	ExpireIdem(ctx context.Context, olderThan time.Time, batch int) (int, error)         // D21
+	ExpireDigests(ctx context.Context, olderThan time.Time, batch int) (int, error)      // D4
+	Erase(ctx context.Context, id Identity) (map[string]int, error)                      // D35
+	EnsurePartitions(ctx context.Context, from time.Time, months int) ([]string, error)  // scopes new partitions (D17)
+	// Still to come: RetirePartitions (T038), ReplayDeadLetter (T032).
+}
+
+// Store is the persist and read path, still to be implemented (T015–T017).
 type Store interface {
 	// PersistAndEnqueue writes, in ONE transaction and under the identity's
 	// transaction-local scope (D17): the notify_idem guard first (a conflict ⇒ replay,
@@ -517,25 +552,10 @@ type Store interface {
 	// rolled back here (D28).
 	PersistAndEnqueue(ctx context.Context, tx Tx, id Identity, n Notification, plan DeliveryPlan) (Receipt, error)
 
-	// Claim leases up to max due entries in one shard (notify_claim_outbox, D19).
-	Claim(ctx context.Context, shard Shard, max int, lease time.Duration) ([]Claim, error)
-
 	// Load reads what a claim delivers — the notification, or a digest's members —
 	// scoped to the claim's identity. Canceled members are omitted.
 	Load(ctx context.Context, c Claim) (n *Notification, digest []Notification, canceled bool, err error)
 
-	// BindAddresses pins the claim to its addresses (notify_bind_addresses, D25): one
-	// binds in place and the claim stays valid; several fan out and the claim is spent.
-	BindAddresses(ctx context.Context, c Claim, addrs []Address, keys []string) (bound int, stillHeld bool, err error)
-
-	// RecordOutcome is the ONLY way a claim changes state. ok=false ⇒ the lease was lost
-	// and nothing was written (D19).
-	RecordOutcome(ctx context.Context, c Claim, o RecordedOutcome) (ok bool, err error)
-
-	// DeferTenantChannel moves a tenant's due backlog on one channel to until (D24).
-	DeferTenantChannel(ctx context.Context, realm Realm, t Tenant, ch ChannelKind, until time.Time) (int, error)
-
-	Cancel(ctx context.Context, id Identity, idemKey string) (CancelReceipt, error)
 	Status(ctx context.Context, id Identity, idemKey string) (NotificationStatus, error)
 
 	// Broadcast jobs: create (idempotent on the broadcast key), lease the next page,
@@ -547,13 +567,6 @@ type Store interface {
 	RecordProviderStatus(ctx context.Context, ch ChannelKind, providerMessageID, status string) error
 }
 
-type RecordedOutcome struct {
-	Kind              OutcomeKind // retry | defer | delivered | suppressed | no_address | max_attempts | rejected | expired | dropped_quota
-	NextAttemptAt     time.Time   // retry, defer
-	ProviderMessageID string      // delivered
-	Detail            string
-}
-
 // InboxStore is the recipient read/write path. Every call runs under the identity's scope.
 type InboxStore interface {
 	List(ctx context.Context, id Identity, q ListQuery) (Page, error)
@@ -563,20 +576,6 @@ type InboxStore interface {
 	MarkRead(ctx context.Context, id Identity, ids []string) error
 	MarkAllRead(ctx context.Context, id Identity) error
 	Archive(ctx context.Context, id Identity, ids []string, archived bool) error
-}
-
-// MaintenanceStore holds the single-owner jobs' operations (D21, D22, D33).
-type MaintenanceStore interface {
-	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error)
-	RetirePartitions(ctx context.Context, table string, olderThan time.Time) (retired []string, err error)
-	EnsurePartitions(ctx context.Context, monthsAhead int) (created []string, err error) // applies the scope policy to each
-	ExpireIdem(ctx context.Context, olderThan time.Time, batch int) (int, error)
-	ExpireDigests(ctx context.Context, olderThan time.Time, batch int) (int, error)
-	DueDigests(ctx context.Context, shard Shard, max int) ([]string, error)
-	FlushDigest(ctx context.Context, windowID string) (queued bool, err error) // idempotent (D4)
-	RehomeShards(ctx context.Context, shards int) (int, error)                 // after lowering Shards (D11)
-	Erase(ctx context.Context, id Identity) (map[string]int, error)
-	ReplayDeadLetter(ctx context.Context, realm Realm, id string) error
 }
 
 // PreferenceStore resolves recipient → tenant → topic default (D30).
@@ -668,7 +667,7 @@ type IDSource interface{ New() string } // UUIDv7
 
 The algorithm every `Dispatcher` implements. Each numbered step names the outcome it can record.
 
-1. **Claim** a batch from a shard (`notify_claim_outbox`). Attempts are counted here (D19).
+1. **Claim** a batch from a shard (`Queue.Claim`). Attempts are counted here (D19).
 2. **Expired?** `DeliverBefore` passed → `expired`.
 3. **Load** the notification or the digest's members under the claim's scope (D17). Canceled →
    `canceled`. A digest whose members are all canceled → `canceled`.
@@ -682,11 +681,13 @@ The algorithm every `Dispatcher` implements. Each numbered step names the outcom
 6. **Render** in the address's locale, falling back to the tenant default and `DefaultLocale`.
    `ErrNoTemplate` → the notification's fallback copy; no fallback → `rejected`.
 7. **Deliver** with `Delivery.IdemKey` (D25).
-8. **Record.** `Delivered` → `delivered` with the provider message id. `Retry` or an error → if
-   `Attempts >= MaxAttempts`, `max_attempts`; else retry at full-jitter backoff, floored by
-   `RetryAfter` (D10). `Suppressed` → write the suppression (with `SuppressFor` as expiry), then
-   `suppressed`. `Rejected` → `rejected`. The terminal write also dead-letters genuine failures and
-   enqueues the next fallback channel, atomically (`notify_finish_delivery`).
+8. **Record.** `Delivered` → finish `delivered` with the provider message id. `Retry` or an error →
+   if `Attempts >= MaxAttempts`, finish `max_attempts`; else `Queue.Retry` at full-jitter backoff,
+   floored by `RetryAfter` (D10). `Suppressed` → write the suppression (with `SuppressFor` as expiry),
+   then finish `suppressed`. `Rejected` → finish `rejected`. Every finish is
+   `Queue.Finish(domain.NewFinish(outcome, …))`: the domain's `DispositionOf` decides whether it is a
+   dead letter and whether the fallback chain continues, and the store writes all of it in one
+   statement (D37).
 9. **Fenced?** Any write returning `ok=false` means the lease was lost: count
    `notify.lease.lost`, record nothing, move on. The row's current holder owns it.
 
@@ -840,9 +841,14 @@ one, tries the next inside the same attempt; it declares the weakest `Dedup` of 
 ## Contract tests
 
 These validate *any* implementation of the ports against the invariants. The `Channel` suite is
-table-driven; the `Store`, `Notifier`, `Dispatcher` and stream suites run against real PostgreSQL and
-Redis via Testcontainers (`//go:build integration`). Schema-level guarantees are asserted separately
-by `make verify-schema`, and the suites below do not re-test them.
+table-driven; the store-backed suites run against real PostgreSQL and Redis via Testcontainers
+(`//go:build integration`, one cloned database per test). Schema-level guarantees are asserted
+separately by `make verify-schema`.
+
+The queue, digest and maintenance transitions already have their integration suite in
+[`adapters/driven/postgres`](../../../adapters/driven/postgres/) — every transition, real concurrency
+for the claim, and a mutation check behind each guarantee ([D37](../design-decisions.md#d37)). The
+suites below are the ones still to be written, with their shape fixed now.
 
 ```go
 package notify_test
@@ -1148,11 +1154,11 @@ module — no host, no replace directives?**
   domain/                  pure types, canonical encoding, keys, backoff, shard. Imports nothing
     identity.go notification.go delivery.go outcome.go plan.go keys.go backoff.go shard.go
   ports/
-    driving.go             Notifier, Inbox, Admin, Dispatcher, Maintenance
-    driven.go              Channel, ChannelRegistry, Store, InboxStore, MaintenanceStore,
-                           PreferenceStore, TopicRegistry, TemplateRenderer, AddressBook,
-                           AudienceResolver, SuppressionStore, QuotaCounter, PreCheck,
-                           StreamPublisher, Clock, IDSource
+    driving.go             Notifier, Inbox, Admin, Dispatcher, Jobs
+    driven.go              Queue, Digests, Maintenance (implemented) · Channel, ChannelRegistry,
+                           Store, InboxStore, PreferenceStore, TopicRegistry, TemplateRenderer,
+                           AddressBook, AudienceResolver, SuppressionStore, QuotaCounter,
+                           PreCheck, StreamPublisher, Clock, IDSource
   app/                     use-cases; own the invariants
     notifier.go planner.go broadcast.go dispatcher.go digest.go quota.go inbox.go
     maintenance.go erasure.go
@@ -1169,7 +1175,8 @@ module — no host, no replace directives?**
       natsingest/          optional: JetStream subject → Notifier (D23)
   api/notifyv1/            generated protobuf
   cmd/notifyd/             the service binary: the only place concrete adapters are assembled
-  migrations/              owns the schema — travels with the module
+  migrations/              owns the schema — travels with the module; migrations.go embeds it
+  internal/pgtest/         integration-test support: Testcontainers, one cloned database per test
 ```
 
 **Dependency rule:** `adapters → app → ports → domain`. `domain` and `ports` import nothing outside
@@ -1250,7 +1257,9 @@ type Deps struct {
 	Audience     ports.AudienceResolver // nil ⇒ Broadcast accepts inline recipients only
 	Store        ports.Store
 	Inbox        ports.InboxStore
-	Maintenance  ports.MaintenanceStore
+	Queue        ports.Queue
+	Digests      ports.Digests
+	Maintenance  ports.Maintenance
 	Prefs        ports.PreferenceStore
 	Suppressions ports.SuppressionStore
 	Quotas       ports.QuotaCounter
@@ -1264,17 +1273,17 @@ type Deps struct {
 func New(cfg notify.Config, d Deps) (*Engine, error)
 
 type Engine struct {
-	Notifier    ports.Notifier
-	Inbox       ports.Inbox
-	Admin       ports.Admin
-	Dispatcher  ports.Dispatcher
-	Maintenance ports.Maintenance
+	Notifier   ports.Notifier
+	Inbox      ports.Inbox
+	Admin      ports.Admin
+	Dispatcher ports.Dispatcher
+	Jobs       ports.Jobs
 }
 ```
 
-`postgres.NewAll(pool)` returns every PostgreSQL-backed port at once (store, inbox, maintenance,
-prefs, suppressions, and the data-backed topics, templates and addresses), so the common wiring is a
-handful of lines — see [quickstart.md](../quickstart.md).
+`postgres.NewAll(pool)` returns every PostgreSQL-backed port at once (store, queue, digests,
+maintenance, inbox, prefs, suppressions, and the data-backed topics, templates and addresses), so the
+common wiring is a handful of lines — see [quickstart.md](../quickstart.md).
 
 ---
 

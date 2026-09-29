@@ -12,7 +12,7 @@ settings, listed separately below.
 | `Realm` | **none — required in library mode** | The product identity, `^[a-z0-9][a-z0-9-]{0,62}$`. `Validate` rejects empty, because a wrong-but-plausible default silently merges two products' idempotency key spaces ([D1](../specs/001-notification-core/design-decisions.md#d1)). Service mode ignores it — see `NOTIFY_REALM_BINDINGS` |
 | `StoreDSN` | **none — required** | PostgreSQL connection string |
 | `RedisURL` | **none — required** | Pre-check, live stream, quota counters |
-| `Shards` | `16` | Claim contention hint. **Changeable online** — raising needs nothing; after lowering, run `notify_rehome_shards()` ([D11](../specs/001-notification-core/design-decisions.md#d11)) |
+| `Shards` | `16` | Claim contention hint. **Changeable online** — raising needs nothing; after lowering, run the rehome step (`Maintenance.RehomeShards`) ([D11](../specs/001-notification-core/design-decisions.md#d11)) |
 | `ClaimLease` | `5m` | How long a claim hides a delivery. Must exceed the slowest channel's send timeout, or a slow send is re-driven while in progress |
 | `ClaimBatch` | `100` | Deliveries per claim |
 | `PollInterval` | `500ms` | The idle ceiling on claim latency. A full batch re-polls at once ([D22](../specs/001-notification-core/design-decisions.md#d22)) |

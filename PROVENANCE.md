@@ -191,7 +191,12 @@ multi-address delivery (D25), templates that own copy (D27), `NotifyTx` (D28), l
 (D29), tenant preferences (D30), a service mode that needs no host code (D31), per-channel dedup
 guarantees (D32), RFC 8058 unsubscribe (D34), erasure (D35) and a stated capacity envelope (D36). The
 migrations were rewritten in place rather than amended, because nothing had been deployed; the schema
-suite grew from seven printed checks to 19 tests that raise on failure and run as the table owner.
+suite grew from seven printed checks to tests that raise on failure and run as the table owner.
+
+The queue's state transitions were first written as PL/pgSQL functions, then moved into the Go adapter
+as plain SQL with the domain owning the dead-letter and fallback policy (D37), together with the first
+Go code — the domain rules and the PostgreSQL queue adapter on Go 1.26 — and an integration suite that
+runs every transition against a real PostgreSQL through Testcontainers.
 
 ---
 

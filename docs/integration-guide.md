@@ -112,7 +112,8 @@ eng, err := app.New(cfg, app.Deps{
     Renderer:  pg.Templates,               // or yours
     Addresses: directory.New(db),          // yours: Identity → []Address, or pg.Addresses
     Audience:  directory.NewAudience(db),  // yours: audience selector → recipients, paged
-    Store: pg.Store, Inbox: pg.Inbox, Maintenance: pg.Maintenance, Prefs: pg.Prefs,
+    Store: pg.Store, Queue: pg.Queue, Digests: pg.Digests, Maintenance: pg.Maintenance,
+    Inbox: pg.Inbox, Prefs: pg.Prefs,
     Suppressions: pg.Suppressions,
     Quotas: redis.NewQuota(rdb), Stream: redis.NewStream(rdb), PreCheck: redis.NewPreCheck(rdb),
 })
@@ -143,7 +144,7 @@ from your own outbox or job queue until it succeeds. Retries are safe; that is w
 ```go
 http.Handle("/notifications/", httpapi.New(eng.Inbox, eng.Admin, identityFromSession)) // library mode
 go eng.Dispatcher.Run(ctx)
-go eng.Maintenance.Run(ctx)
+go eng.Jobs.Run(ctx)
 ```
 
 `identityFromSession` builds the `Identity` from **your** authenticated session — never from a request
