@@ -7,25 +7,35 @@
 #
 # `cmd` is the only place allowed to assemble concrete implementations. That is
 # what keeps the wiring in one readable file instead of spread across the tree.
+#
+# go-arch-lint refuses a component whose directory does not exist, so the layers
+# not built yet are written below as comments: the graph is decided now, and each
+# line is uncommented in the change that creates its directory.
 version: 3
 workdir: .
 allow:
   depOnAnyVendor: true      # infra SDKs are gated by depguard, not here
 
-components:
-  domain:   { in: domain }
-  ports:    { in: ports }
-  app:      { in: app/** }
-  driven:   { in: adapters/driven/** }
-  driving:  { in: adapters/driving/** }
-  api:      { in: api/** }
-  cmd:      { in: cmd/** }
+excludeFiles:
+  - "^.*_test\\.go$"        # tests may reach across layers to set up fixtures
 
+components:
+  domain:     { in: domain }
+  ports:      { in: ports }
+  driven:     { in: adapters/driven/** }
+  migrations: { in: migrations }         # the embedded schema
+  testing:    { in: internal/pgtest }    # integration-test support only
+  # app:      { in: app/** }             # uncomment with the first use-case
+  # driving:  { in: adapters/driving/** }
+  # api:      { in: api/** }             # generated protobuf
+  # cmd:      { in: cmd/** }
+
+# A component absent from `deps` may depend on nothing in the project: domain is
+# pure, and migrations (like api, later) is data.
 deps:
-  domain:  { mayDependOn: [] }                      # pure. Nothing.
-  ports:   { mayDependOn: [ domain ] }
-  app:     { mayDependOn: [ domain, ports ] }
-  driven:  { mayDependOn: [ domain, ports ] }       # implements ports; NOT app
-  driving: { mayDependOn: [ domain, ports, api ] }  # drives via the Notifier port
-  api:     { mayDependOn: [] }                      # generated protobuf only
-  cmd:     { mayDependOn: [ domain, ports, app, driven, driving, api ] }
+  ports:      { mayDependOn: [ domain ] }
+  driven:     { mayDependOn: [ domain, ports, migrations ] }       # implements ports; NOT app
+  testing:    { mayDependOn: [ migrations ] }
+  # app:      { mayDependOn: [ domain, ports ] }
+  # driving:  { mayDependOn: [ domain, ports, api ] }
+  # cmd:      { mayDependOn: [ domain, ports, app, driven, driving, api, migrations ] }

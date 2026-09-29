@@ -8,56 +8,75 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   schema:
     name: schema (PostgreSQL 16)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Migration hygiene
         run: make lint-sql
-      # Applies every migration to a throwaway PG16, runs the 19 schema tests
-      # as the table owner (each raises on failure), and asserts the inherited
+      # Applies every migration to a throwaway PG16, runs the schema tests as
+      # the table owner (each raises on failure), and asserts the inherited
       # constraint still cannot be built. If that last one ever passes, D2's
       # premise changed and the build fails loudly rather than carrying a stale
       # decision.
       - name: Verify schema guarantees
         run: make verify-schema
 
-  docs:
-    name: docs
+  unit:
+    name: unit tests (no host present)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Relative links resolve
-        run: make docs-links
-
-  standalone:
-    name: builds with no host present
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.24'
-          cache: false
-      # The extraction guarantee, as a gate. Once Go code exists this runs
-      # `go build ./... && go test ./...` in a checkout containing only this
-      # module -- no host, no replace directives.
+          go-version-file: go.mod   # the toolchain directive: go1.26.8
+      # The extraction guarantee, as a gate: the module builds and its tests
+      # pass in a checkout containing only this module -- no host, no replace
+      # directives (NS-009).
       - name: Build
         run: make build
-      - name: Test
+      - name: Test (race detector, shuffled)
         run: make test
+
+  integration:
+    name: integration tests (Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # Starts PostgreSQL with Testcontainers; every test gets its own database
+      # cloned from a migrated template, and runs as the non-superuser owner.
+      - name: Test against PostgreSQL 16
+        run: make test-integration
 
   lint:
     name: lint
     runs-on: ubuntu-latest
-    if: false   # enable with the first Go code (task T053)
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
-          go-version: '1.24'
-      - uses: golangci/golangci-lint-action@v6
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.14.0
       - name: Architecture graph
-        run: make arch-lint
+        run: |
+          go install github.com/fe3dback/go-arch-lint@v1.19.0
+          make arch-lint
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Relative links resolve
+        run: make docs-links
