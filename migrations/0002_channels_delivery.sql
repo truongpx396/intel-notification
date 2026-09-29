@@ -76,11 +76,11 @@ CREATE TABLE dead_letters (
 ) PARTITION BY RANGE (created_at);
 
 CREATE TABLE dead_letters_2026m09 PARTITION OF dead_letters
-    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+    FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00');
 CREATE TABLE dead_letters_2026m10 PARTITION OF dead_letters
-    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+    FOR VALUES FROM ('2026-10-01 00:00:00+00') TO ('2026-11-01 00:00:00+00');
 CREATE TABLE dead_letters_2026m11 PARTITION OF dead_letters
-    FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+    FOR VALUES FROM ('2026-11-01 00:00:00+00') TO ('2026-12-01 00:00:00+00');
 
 CREATE INDEX dead_letters_unreplayed_idx
     ON dead_letters (realm, tenant_kind, tenant_id, channel, reason, created_at DESC)
@@ -95,7 +95,7 @@ CREATE INDEX dead_letters_recipient_idx
 -- window, but the inherited design had nowhere to HOLD a deferred notification
 -- (D4). One row per window. A window accepts members while sealed_at IS NULL;
 -- it seals when it reaches Config.DigestMax members or its flush_at passes, and
--- notify_digest_flush() enqueues exactly one delivery for it.
+-- the adapter's Digests.FlushDigest enqueues exactly one delivery for it.
 --
 -- One OPEN window per (recipient, topic, channel) is a partial unique index --
 -- a constraint the database holds, not a convention every code path has to

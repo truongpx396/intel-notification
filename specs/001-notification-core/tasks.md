@@ -19,35 +19,35 @@ Stages map to [plan.md § Phasing](plan.md#phasing). Stages 1–6 are the releas
       NR-007, NR-014, NR-023)
 - [x] **T003** `migrations/0003_catalog_compliance.sql`: topics, versioned templates, recipient addresses
       (RLS), channel providers (credentials by reference), erasure record (NR-025, NR-028, NR-034)
-- [x] **T004** `migrations/0004_state_transitions.sql`: canonical encoding, the fenced claim, outcome
-      writes, the terminal transition, address binding, tenant backlog deferral, shard rehoming, digest
-      append and flush, cancel, bounded expiry, job leases, erasure (NR-004, NR-007, NR-021, NR-023,
-      NR-030, NR-034)
-- [x] **T005** `scripts/verify-schema.sql` + `make verify-schema`: 19 tests, run as the table owner,
-      each raising on failure, including the proof that the inherited constraint cannot be constructed
-      and mutation checks on the partition-scope and concurrent-claim tests (NS-001, NS-002)
-- [ ] **T006** Partition provisioning: `EnsurePartitions` creates the next N months of `notifications`,
-      `notification_deliveries` and `dead_letters`, and calls `notify_apply_recipient_scope()` on every
-      new `notifications` partition; the `notify.partition.missing` and `notify.partition.unscoped`
-      alarms (NR-008, NR-022)
+- [x] **T004** `migrations/migrations.go`: embed the schema (`migrations.FS`) so hosts, the service and
+      the integration tests apply the same files. *(Replaces the PL/pgSQL state-transition functions,
+      which moved into the Go adapter — [D37](design-decisions.md#d37).)*
+- [x] **T005** `scripts/verify-schema.sql` + `make verify-schema`: the schema tests, run as the table
+      owner, each raising on failure, including the proof that the inherited constraint cannot be
+      constructed and a mutation check on the partition-scope test (NS-001, NS-002)
+- [x] **T006** Partition provisioning: `Maintenance.EnsurePartitions` creates each missing month of
+      `notifications`, `notification_deliveries` and `dead_letters` and scopes every new `notifications`
+      partition; `TestEnsurePartitions` (NR-008, NR-022). *Still to do: the `notify.partition.missing`
+      and `notify.partition.unscoped` alarms, with T038.*
 
 ## Stage 2 — Domain and ports
 
-- [ ] **T007** `domain/identity.go`: `Realm`, `Tenant`, `Recipient`, `Identity`, `Canonical`, tested
-      against the frozen vector shared with `notify_canonical()` ([D18](design-decisions.md#d18))
-- [ ] **T008** `domain/keys.go`: pre-check key, stream key, delivery idempotency key, address key,
-      broadcast member key — each with frozen vectors ([D16](design-decisions.md#d16),
-      [D25](design-decisions.md#d25))
-- [ ] **T009** [P] `domain/`: `Notification`, `Address`, `TopicDef`, `DeliverySchedule`, `DeliveryPlan`,
-      `Receipt`, `OutboxEntry`, `Claim`, `Delivery`, `DeliveryResult`, `UnreadCount`, broadcast, cancel and
-      status types. Imports nothing outside the module
-- [ ] **T010** [P] `domain/shard.go`: `ShardFor(identity, n)` over the canonical encoding, stable against
+- [x] **T007** `domain/identity.go`: `Realm`, `Tenant`, `Recipient`, `Identity`, `Canonical`, tested
+      against a frozen vector computed independently of the code ([D18](design-decisions.md#d18))
+- [x] **T008** `domain/keys.go`: pre-check key, stream key, delivery idempotency key, address key,
+      broadcast member key, suppression and subject hashes — each with a frozen vector
+      ([D16](design-decisions.md#d16), [D25](design-decisions.md#d25))
+- [ ] **T009** [P] `domain/`: `Notification`, `TopicDef`, `DeliverySchedule`, `DeliveryPlan`, `Receipt`,
+      `Delivery`, `DeliveryResult`, `UnreadCount`, broadcast and status types. *(Done: `Address`,
+      `OutboxEntry`, `Claim`, `TerminalOutcome`, `Disposition` and the dead-letter/fallback policy,
+      `Finish`, `Binding`, `CancelReceipt`, `DigestMember`.)* Imports nothing outside the module
+- [x] **T010** [P] `domain/shard.go`: `ShardFor(identity, n)` over the canonical encoding, stable against
       a frozen vector table ([D11](design-decisions.md#d11))
-- [ ] **T011** [P] `domain/backoff.go`: full jitter with a `RetryAfter` floor, and a test that the
+- [x] **T011** [P] `domain/backoff.go`: full jitter with a `RetryAfter` floor, and a test that the
       distribution spreads rather than synchronizes ([D10](design-decisions.md#d10))
-- [ ] **T012** [P] `ports/driving.go`: `Notifier`, `Inbox`, `Admin`, `Dispatcher`, `Maintenance`
-- [ ] **T013** [P] `ports/driven.go`: every driven port in the contract (NR-016, NR-017,
-      [D7](design-decisions.md#d7))
+- [ ] **T012** [P] `ports/driving.go`: `Notifier`, `Inbox`, `Admin`, `Dispatcher`, `Jobs`
+- [ ] **T013** [P] `ports/driven.go`: the remaining driven ports in the contract (NR-016, NR-017,
+      [D7](design-decisions.md#d7)). *(Done: `Queue`, `Digests`, `Maintenance`.)*
 - [ ] **T014** `config.go`: `Config`, defaults and `Validate` with every rule in the contract
       ([D1](design-decisions.md#d1), [D21](design-decisions.md#d21))
 
@@ -55,8 +55,11 @@ Stages map to [plan.md § Phasing](plan.md#phasing). Stages 1–6 are the releas
 
 - [ ] **T015** `postgres/store.go`: `PersistAndEnqueue` — scope, guard first, inbox row, queue rows,
       digest appends, drop records, one transaction; `tx` for `NotifyTx` (NR-002, NR-003, NR-027)
-- [ ] **T016** `Claim`, `Load` (scoped from the queue row), `BindAddresses`, `RecordOutcome` over the
-      `0004` functions; `ok=false` on a lost lease (NR-004, [D19](design-decisions.md#d19))
+- [x] **T016** The queue's transitions as SQL in the adapter — `Claim`, `Retry`, `Defer`, `Finish`,
+      `BindAddresses`, `DeferTenantChannel`, `Cancel`, the digest windows, and the maintenance
+      operations — each fenced where it takes a claim, with an integration suite against PostgreSQL 16
+      and a mutation check behind every guarantee (NR-004, [D19](design-decisions.md#d19),
+      [D37](design-decisions.md#d37)). *Still to do: `Load`, with T015.*
 - [ ] **T017** [P] `postgres/inbox.go`: list, bounded unread, seen / read / archive — all scoped
       (NR-024, NR-033)
 - [ ] **T018** [P] `postgres/prefs.go`: recipient → tenant (locked) → topic resolution with source
@@ -102,7 +105,7 @@ Stages map to [plan.md § Phasing](plan.md#phasing). Stages 1–6 are the releas
 
 ## Stage 7 — Digest, quotas, fairness
 
-- [ ] **T034** `app/digest.go`: append through `notify_digest_append`, leased flush job, render members
+- [ ] **T034** `app/digest.go`: append through `Digests.AppendDigest`, leased flush job, render members
       skipping canceled ones (NR-014)
 - [ ] **T035** Burst test: N notifications yield `ceil(N / DigestMax)` deliveries and N rows (NS-005)
 - [ ] **T036** `app/quota.go` + `redis/quota.go`: peek at enqueue, take at dispatch, backlog deferral,
@@ -149,8 +152,8 @@ Stages map to [plan.md § Phasing](plan.md#phasing). Stages 1–6 are the releas
 
 ## Stage 12 — Boundary gates
 
-- [ ] **T053** Enable the `lint` CI job: `go-arch-lint` component graph and `depguard` bans (NR-026)
-- [ ] **T054** CI job asserting the module builds and tests green with **no host present** (NS-009)
+- [x] **T053** Enable the `lint` CI job: `go-arch-lint` component graph and `depguard` bans (NR-026)
+- [x] **T054** CI job asserting the module builds and tests green with **no host present** (NS-009)
 
 ## Stage 13 — Load test and release
 

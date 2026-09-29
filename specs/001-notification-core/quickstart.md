@@ -1,13 +1,16 @@
 # Quickstart
 
-> **Implementation not started.** These commands describe the intended interface. What runs today is
-> `make verify-schema`, which is real and worth running — it applies the migrations to a throwaway
-> PostgreSQL 16 and asserts the schema's guarantees as the table owner.
+> **Implementation started.** The domain rules and the PostgreSQL queue adapter exist and are tested;
+> the notifier, dispatcher, channels and transports do not, so most snippets below describe the
+> intended interface. What runs today is below.
 
 ## What works today
 
 ```bash
-make verify-schema     # apply migrations to a throwaway PG16, run the 19 schema tests
+make test              # domain unit tests: no Docker, race detector, shuffled
+make test-integration  # the queue adapter against PostgreSQL 16 via Testcontainers (needs Docker)
+make verify-schema     # apply migrations to a throwaway PG16, run the schema tests
+make lint arch-lint    # import boundaries and the hexagon's dependency graph
 make lint-sql          # migration hygiene
 ```
 
@@ -49,7 +52,8 @@ eng, err := app.New(notify.Config{
 }, app.Deps{
     Channels: reg, Topics: topics, Renderer: pg.Templates, Addresses: pg.Addresses,
     Audience: directory.NewAudience(db),
-    Store: pg.Store, Inbox: pg.Inbox, Maintenance: pg.Maintenance, Prefs: pg.Prefs,
+    Store: pg.Store, Queue: pg.Queue, Digests: pg.Digests, Maintenance: pg.Maintenance,
+    Inbox: pg.Inbox, Prefs: pg.Prefs,
     Suppressions: pg.Suppressions, Quotas: redis.NewQuota(rdb), Stream: redis.NewStream(rdb),
     PreCheck: redis.NewPreCheck(rdb),
 })
@@ -84,7 +88,7 @@ Run the dispatcher and the maintenance jobs in your worker process:
 
 ```go
 go eng.Dispatcher.Run(ctx)   // claims across all shards; safe with any number of replicas
-go eng.Maintenance.Run(ctx)  // retention, partitions, expiry — single-owner through leases
+go eng.Jobs.Run(ctx)  // retention, partitions, expiry — single-owner through leases
 ```
 
 ## Intended: as a service

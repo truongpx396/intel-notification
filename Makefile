@@ -1,7 +1,4 @@
 # intel-notification — see ROADMAP.md for what is built vs designed.
-#
-# Implementation has not started, so the Go targets are declared but have nothing
-# to compile yet. The schema targets are real and CI runs them.
 
 SHELL       := /usr/bin/env bash
 PG_IMAGE    ?= postgres:16-alpine
@@ -12,7 +9,7 @@ PG_PASS     ?= verify
 
 .PHONY: help
 help: ## Show available targets
-	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-26s\033[0m %s\n", $$1, $$2}'
 
 # ---------------------------------------------------------------- schema ------
@@ -74,21 +71,27 @@ lint-sql: ## Migration hygiene: transactional, commented, sequentially named
 	[ $$fail -eq 0 ] && echo "migrations OK" || exit 1
 
 # ------------------------------------------------------------------- go -------
+# Tests run shuffled and under the race detector, so order-dependence and data
+# races fail the build.
+GOTEST := go test -race -shuffle=on -count=1
 
-.PHONY: build test lint arch-lint
-build: ## Build the module (no Go code yet)
-	@echo "no Go code yet -- see specs/001-notification-core/tasks.md"
+.PHONY: build test test-integration lint arch-lint
+build: ## Build every package
+	go build ./...
 
-test: ## Unit + contract tests (no Go code yet)
-	@echo "no Go code yet -- see specs/001-notification-core/tasks.md"
+test: ## Unit tests: no Docker, no network
+	$(GOTEST) ./...
 
-lint: ## golangci-lint, incl. the depguard import bans
-	@command -v golangci-lint >/dev/null || { echo "golangci-lint not installed"; exit 1; }
-	@golangci-lint run ./... || true
+test-integration: ## Integration tests against PostgreSQL via Testcontainers (needs Docker)
+	$(GOTEST) -tags integration ./...
+
+lint: ## golangci-lint: depguard boundaries and formatting
+	@command -v golangci-lint >/dev/null || { echo "golangci-lint not installed: https://golangci-lint.run/docs/welcome/install/"; exit 1; }
+	golangci-lint run ./...
 
 arch-lint: ## go-arch-lint: the hexagonal dependency graph
-	@command -v go-arch-lint >/dev/null || { echo "go-arch-lint not installed"; exit 1; }
-	@go-arch-lint check || true
+	@command -v go-arch-lint >/dev/null || { echo "go-arch-lint not installed: go install github.com/fe3dback/go-arch-lint@v1.19.0"; exit 1; }
+	go-arch-lint check
 
 .PHONY: docs-links
 docs-links: ## Fail on a relative markdown link with no target on disk
@@ -99,8 +102,8 @@ docs-links: ## Fail on a relative markdown link with no target on disk
 	  [ -z "$$base" ] && continue; \
 	  target="$$(dirname "$$f")/$$base"; \
 	  [ -e "$$target" ] || { echo "  $$f -> $$link"; fail=1; }; \
-	done < <(grep -roE '\]\([^)]+\)' --include='*.md' . | sed -E 's/:\]\(/|/; s/\)$$//'); \
+	done < <(grep -roE --exclude-dir=node_modules '\]\([^)]+\)' --include='*.md' . | sed -E 's/:\]\(/|/; s/\)$$//'); \
 	if [ $$fail -eq 0 ]; then echo "links OK"; else echo "dangling links above"; exit 1; fi
 
 .PHONY: ci
-ci: lint-sql verify-schema docs-links ## Everything CI runs today
+ci: lint-sql verify-schema docs-links build test test-integration lint arch-lint ## Everything CI runs today

@@ -1,17 +1,19 @@
 # Service-mode container. Multi-stage so the runtime image carries no toolchain.
 #
-# There is no Go code yet, so `go build` has nothing to compile -- this file is
-# the intended shape, kept in the repository so the deployment story is reviewable
-# alongside the design rather than invented later under time pressure.
+# cmd/notifyd does not exist yet (tasks T043-T049), so this image cannot build
+# today -- the file is the intended shape, kept in the repository so the
+# deployment story is reviewable alongside the design rather than invented later
+# under time pressure.
 
-FROM golang:1.24-bookworm AS build
+# Pinned to the toolchain go.mod names, so the image builds what CI tests.
+FROM golang:1.26.8-trixie AS build
 WORKDIR /src
 COPY go.* ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/notifyd ./cmd/notifyd
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 WORKDIR /
 COPY --from=build /out/notifyd /notifyd
 COPY --from=build /src/migrations /migrations

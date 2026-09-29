@@ -125,11 +125,11 @@ CREATE INDEX notifications_unread_idx
 -- (see migrations/README.md); a missing partition makes INSERT fail loudly rather
 -- than silently routing to a default partition that can never be dropped.
 CREATE TABLE notifications_2026m09 PARTITION OF notifications
-    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+    FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00');
 CREATE TABLE notifications_2026m10 PARTITION OF notifications
-    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+    FOR VALUES FROM ('2026-10-01 00:00:00+00') TO ('2026-11-01 00:00:00+00');
 CREATE TABLE notifications_2026m11 PARTITION OF notifications
-    FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+    FOR VALUES FROM ('2026-11-01 00:00:00+00') TO ('2026-12-01 00:00:00+00');
 
 -- Recipient-scoping is enforced at the DATA layer, not in application code
 -- (NR-008 / NS-001 -- a release blocker): on the parent AND on each partition.
@@ -154,7 +154,7 @@ END $$;
 -- workspace's `weekly_digest:W39` is swallowed as a replay of the first.
 --
 -- Bounded (D21): a key guards replays for Config.IdempotencyWindow, then
--- notify_expire_idem() removes it. Hash-partitioned on the identity -- every
+-- the adapter's Maintenance.ExpireIdem removes it. Hash-partitioned on the identity -- every
 -- identity column is in the PK, which is what makes that legal -- so expiry
 -- and vacuum work one partition at a time rather than across one table
 -- holding every key in the window.
@@ -183,7 +183,7 @@ BEGIN
     END LOOP;
 END $$;
 
--- Expiry scans by age (notify_expire_idem).
+-- Expiry scans by age (Maintenance.ExpireIdem).
 CREATE INDEX notify_idem_expiry_idx ON notify_idem (created_at);
 
 -- ---------------------------------------------------------------------------
@@ -193,7 +193,7 @@ CREATE INDEX notify_idem_expiry_idx ON notify_idem (created_at);
 -- after commit always leaves durable work.
 --
 -- A row lives only while its delivery is pending (D20). The terminal
--- transition (notify_finish_delivery) moves it to notification_deliveries in
+-- transition (the adapter's Queue.Finish) moves it to notification_deliveries in
 -- one transaction, so this table holds in-flight work only: its size tracks
 -- the backlog, not history, and its indexes stay small and hot.
 --
@@ -266,7 +266,7 @@ CREATE UNIQUE INDEX notification_outbox_one_per_digest_address
     ON notification_outbox (digest_id, address_key)
     WHERE digest_id IS NOT NULL;
 
--- The claim: due work in one shard, oldest first (notify_claim_outbox). Every
+-- The claim: due work in one shard, oldest first (Queue.Claim). Every
 -- row in this table is pending, so the index needs no partial predicate.
 CREATE INDEX notification_outbox_claim_idx
     ON notification_outbox (shard, next_attempt_at);
@@ -330,11 +330,11 @@ CREATE INDEX notification_deliveries_recipient_idx
     ON notification_deliveries (realm, tenant_kind, tenant_id, recipient_kind, recipient_id);
 
 CREATE TABLE notification_deliveries_2026m09 PARTITION OF notification_deliveries
-    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+    FOR VALUES FROM ('2026-09-01 00:00:00+00') TO ('2026-10-01 00:00:00+00');
 CREATE TABLE notification_deliveries_2026m10 PARTITION OF notification_deliveries
-    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+    FOR VALUES FROM ('2026-10-01 00:00:00+00') TO ('2026-11-01 00:00:00+00');
 CREATE TABLE notification_deliveries_2026m11 PARTITION OF notification_deliveries
-    FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+    FOR VALUES FROM ('2026-11-01 00:00:00+00') TO ('2026-12-01 00:00:00+00');
 
 -- ---------------------------------------------------------------------------
 -- notification_broadcasts — a durable broadcast job and its progress.
@@ -445,7 +445,7 @@ DO $$ BEGIN PERFORM notify_apply_recipient_scope('notification_schedules'); END 
 -- notify_job_leases — single-owner scheduled work without a broker (D22).
 --
 -- Retention, digest flush, idempotency expiry and quota rollover each take a
--- lease here (notify_try_lease_job) before running. A row lease, not a session
+-- lease here (Maintenance.TryLeaseJob) before running. A row lease, not a session
 -- advisory lock, because advisory locks do not survive transaction-pooling
 -- proxies, and a lease also records when each job last ran.
 -- ---------------------------------------------------------------------------

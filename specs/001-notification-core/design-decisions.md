@@ -8,13 +8,16 @@ Two kinds of entry carry a tag:
 - **inherited-gap** resolves something the originating design left open, contradictory, or
   unimplementable: D1, D2, D3, D4, D5, D6, D7, D9, D10, D11.
 - **review** fixes a defect found by the architecture review of this repository after the
-  extraction, in the design as first written here: D16–D36, plus the amendments marked on D2, D4,
+  extraction, in the design as first written here: D16–D37, plus the amendments marked on D2, D4,
   D5, D7, D8, D11, D12, D13 and D15. Several were real correctness bugs in the normative contract —
   D16 (a cross-tenant leak on the live stream), D17 (a worker that could not read what it delivers),
   D18 (a pre-check that dropped notifications) and D22 (a delivery mode that reintroduced the bug the
   outbox exists to fix). Read those first.
 
-Every entry that claims a schema property names the `make verify-schema` test that asserts it.
+Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
+[`scripts/verify-schema.sql`](../../scripts/verify-schema.sql), `make verify-schema`), an integration
+test (`TestX` in [`adapters/driven/postgres`](../../adapters/driven/postgres/), `make test-integration`,
+against a real PostgreSQL), or a unit test (in [`domain`](../../domain/), `make test`).
 
 ---
 
@@ -89,7 +92,7 @@ as the registry.
 **Decision.** A `digest_buffer` row holds one window per `(realm, tenant, recipient, topic, channel)`.
 At most one window is **open** (accepting members) at a time, enforced by a partial unique index on
 `sealed_at IS NULL`. A window seals when it reaches `DigestMax` members or its `flush_at` passes;
-`notify_digest_flush()` then enqueues exactly one delivery for it, conditionally on
+`Digests.FlushDigest` then enqueues exactly one delivery for it, conditionally on
 `flushed_at IS NULL`. The digest's queue row names the window (`digest_id`), not a notification.
 
 **Alternative.** Coalesce in memory in the dispatcher, or at render time.
@@ -108,10 +111,12 @@ unique on `(notification_id, channel)`, and a digest has no single notification.
 **seals** and the next member opens a fresh one, so a burst of N yields `ceil(N / DigestMax)` digests
 (NS-005 says so), a flush is idempotent under duplicate ticks, and a queue row is for exactly one
 notification or one window (a check constraint). Flushed windows are deleted by
-`notify_expire_digests()` once their delivery finishes.
+`Maintenance.ExpireDigests` once their delivery finishes.
 
-Verified: TEST 12 — a second open window is rejected; a full window seals and the next member opens
-another; a duplicate flush is a no-op; one window yields one delivery.
+Verified: TEST 7 — a second open window is rejected. `TestDigestWindows` — a full window seals and
+the next member opens another; a duplicate flush is a no-op; one window yields one delivery.
+`TestDigestAppendUnderConcurrency` — 32 concurrent appenders produce `ceil(32 / 10)` windows holding
+every member once, never more than one open. `TestExpireDigests`.
 
 ## D5 — `channel_quotas` bounds per-tenant channel spend · *inherited-gap* · *amended by review*
 
@@ -147,7 +152,7 @@ row inside it, so one stuck delivery blocks retention indefinitely. Retention is
 keeps the inbox queryable (NR-022), so the constraint turns routine maintenance into an outage whose
 cause sits three layers away from its symptom.
 
-Verified: TEST 16 — no foreign key references a partitioned table or a partition.
+Verified: TEST 9 — no foreign key references a partitioned table or a partition.
 
 ## D7 — `AudienceResolver` is a port · *inherited-gap* · *amended by review*
 
@@ -196,8 +201,8 @@ possible recovery on the busiest possible table.
 that means "a user was not told something" would drown. The runbook grouped dead letters by a
 `terminal_reason` column the table did not have. See [D12](#d12).
 
-Verified: TEST 9, TEST 17 — a genuine failure is dead-lettered with its reason; a correct outcome
-cannot be.
+Verified: `TestFinish` — a genuine failure is dead-lettered with its reason. TEST 10 — the schema
+refuses a correct outcome as a dead letter.
 
 ## D9 — Quiet hours yield to `critical` · *inherited-gap*
 
@@ -238,7 +243,7 @@ herd across the window, which is the whole reason to prefer it over plain expone
 queue row at insert and never recomputed. A shard only tells claimers where to look first so that N
 workers do not all contend for the head of one index. Correctness comes from the row claim
 ([D19](#d19)), so **changing `Shards` is an online operation**: raising it needs nothing; lowering it
-needs one `notify_rehome_shards()` call to fold rows from retired shards into live ones.
+needs one `Maintenance.RehomeShards` call to fold rows from retired shards into live ones.
 
 **Alternative.** The first version of this decision: shards fixed for the deployment's life, with
 changing the count documented as requiring a full drain because "the old drainer's claim and the new
@@ -256,7 +261,9 @@ delivery is re-queued behind later ones. Ordering is not guaranteed and nothing 
 shard still hashes the recipient rather than the tenant, so the largest tenant is spread across every
 shard instead of confined to one.
 
-Verified: TEST 7 — a concurrent claimer on the same shard skips the rows another holds.
+Verified: `TestClaimLeasesAndSkipsLockedRows` — a concurrent claimer on the same shard skips the rows
+another holds. `TestRehomeShards` — after lowering the count, every row is in a live shard and still
+claimable.
 
 ## D12 — Terminal outcomes are a constrained vocabulary · *amended by review*
 
@@ -282,7 +289,8 @@ webhook could not be traced back to its delivery. `rejected` (a permanent provid
 the address, such as a malformed payload) is new: without it such a failure burned all five attempts
 before parking.
 
-Verified: TEST 9, TEST 17.
+Verified: `TestDispositionOf` (the policy, in `domain`), `TestFinish` (the store records each outcome
+and does exactly what the disposition says), TEST 10 (the vocabulary is a check constraint).
 
 ## D13 — Suppressions are per channel, and checked by the dispatcher · *amended by review*
 
@@ -395,7 +403,7 @@ even without `FORCE`, so it never tested the case its own documentation said mat
 - The durable guard's key includes the **tenant** ([D2](#d2)).
 - Every derived key — pre-check, pub/sub, shard, delivery idempotency key — is built from one
   **canonical encoding**: each part written as `<octet length>:<part>`, joined by `,`
-  (`notify_canonical()`; the Go domain implements the same encoding against a frozen vector).
+  (`domain.Canonical`, tested against a frozen vector computed independently of the code).
 - The Redis pre-check key is `notify:applied:<realm>:<hex sha256(canonical(realm, tenant, recipient, idem_key))>`
   — exactly the durable guard's key space. It is **read** before the transaction and **written only
   after commit**, with a TTL no longer than the idempotency window. `NotifyTx` reads it and never
@@ -417,15 +425,16 @@ kinds of false hit, each a silently dropped notification:
 In the other direction the durable guard lacked the tenant, so a user in two workspaces lost the second
 workspace's `weekly_digest:W39` as a "replay" — [D1](#d1)'s failure mode one axis down.
 
-Verified: TEST 2 (tenant in the key), TEST 19 (encoding unambiguous; frozen vector); the pre-check's
+Verified: TEST 2 (tenant in the key); `TestCanonical`, `TestCanonicalIsUnambiguous` and
+`TestDerivedKeys` (frozen vectors; no collision across the axes each key must separate); the pre-check's
 ordering is `NotifierContract` "a failed transaction leaves no pre-check entry".
 
 ## D19 — The claim is a fenced lease · *review*
 
-**Decision.** `notify_claim_outbox(shard, limit, lease)` selects due rows `FOR UPDATE SKIP LOCKED`,
+**Decision.** `Queue.Claim(shard, limit, lease)` selects due rows `FOR UPDATE SKIP LOCKED`,
 increments `attempts`, issues a fresh `lease_token`, and moves `next_attempt_at` to `now() + lease`.
-Every outcome write (`notify_retry_delivery`, `notify_defer_delivery`, `notify_finish_delivery`,
-`notify_bind_addresses`) must present the current token and affects nothing otherwise.
+Every state change (`Retry`, `Defer`, `Finish`, `BindAddresses`) must present the current token and
+affects nothing otherwise, reporting `ok=false`.
 
 **Alternative.** The first version specified `ClaimOutbox` as "pops up to max due entries" with a
 `claimed_at` column and no lease, lock or fence.
@@ -437,16 +446,18 @@ dead worker's late "delivered" overwrites the live one's outcome. Counting the a
 what makes a delivery that crashes its worker every time — a poison payload that panics the renderer —
 reach the attempt ceiling instead of looping forever; counting on failure never counts a crash.
 
-Verified: TEST 7 (a concurrent session skips locked rows; leased rows are invisible until the lease
-lapses; each claim counts), TEST 8 (a stale token cannot record an outcome). Mutation-checked: with
-`SKIP LOCKED` removed, TEST 7 fails.
+Verified: `TestClaimLeasesAndSkipsLockedRows` — a second session claims only the row the first does
+not hold; leased rows are invisible until the lease lapses; each claim counts. `TestFencedWrites` —
+every state change, with a forged token and with the token of a lapsed lease, changes nothing.
+Mutation-checked: removing `SKIP LOCKED`, the fence on any write, or the attempt count each fails a
+test.
 
 ## D20 — The queue holds pending work only; history is a separate log · *review*
 
 **Decision.** `notification_outbox` is a queue: a row exists only while its delivery is pending.
-`notify_finish_delivery()` removes it and appends it to `notification_deliveries` — range-partitioned
-by completion time, retired by partition — in one transaction, together with any dead letter and the
-next fallback channel.
+`Queue.Finish` removes it and appends it to `notification_deliveries` — range-partitioned by
+completion time, retired by partition — in one statement, together with any dead letter and the next
+fallback channel.
 
 **Alternative.** The first version kept every row in the outbox forever, marked `delivered_at`.
 
@@ -457,14 +468,15 @@ hot table as small as the work in flight, and puts history where the producer's 
 provider's bounce callback need it: `notification_deliveries` is indexed by notification id and by
 `(channel, provider_message_id)`.
 
-Verified: TEST 9 — finished deliveries leave the queue; a provider callback finds its delivery by
-provider message id.
+Verified: `TestFinish` — finished deliveries leave the queue; a provider callback finds its delivery
+by provider message id; a refused dead letter leaves the row queued and no history written, because the
+transition is one statement.
 
 ## D21 — Idempotency is guaranteed for a window, not forever · *review*
 
 **Decision.** A key guards replays for `Config.IdempotencyWindow` (default 7 days, minimum 24 hours).
-`notify_expire_idem()` deletes older keys in batches, run as a single-owner job. Exactly-once is stated
-as holding *within the window*.
+`Maintenance.ExpireIdem` deletes older keys in batches, run as a single-owner job. Exactly-once is
+stated as holding *within the window*.
 
 **Alternative.** The first version kept every key forever and called it a feature.
 
@@ -475,7 +487,8 @@ buses redeliver within hours; a key's useful life is bounded, and the industry n
 Stripe prunes idempotency keys after 24 hours. Hash-partitioning the table on the identity keeps each
 expiry batch and each vacuum inside one partition.
 
-Verified: TEST 14.
+Verified: TEST 8 (16 hash partitions, an index by age), `TestExpireIdem` (batches drain aged keys and
+keep fresh ones).
 
 ## D22 — One delivery path, and no broker required · *review*
 
@@ -502,7 +515,7 @@ database-wide lock, which becomes the bottleneck at exactly the write rates this
 Leases rather than advisory locks, because session advisory locks do not survive transaction-pooling
 proxies.
 
-Verified: TEST 15 (a live job lease cannot be taken; a lapsed one can).
+Verified: `TestTryLeaseJob` (a live job lease cannot be taken; a lapsed one passes to another worker).
 
 ## D23 — A notification is accepted when PostgreSQL commits · *review*
 
@@ -527,9 +540,9 @@ needs no broker at all.
 - **At enqueue**, the `Notifier` reads the tenant's counters; if the channel's budget is already spent,
   the delivery is written due at the window's reset (or dropped under `drop_non_essential`, recorded as
   `dropped_quota`).
-- **At dispatch**, a delivery that finds the budget spent is deferred (`notify_defer_delivery`, which
-  returns its attempt), and `notify_defer_tenant_channel()` moves that tenant's entire due backlog on
-  that channel to the reset in one statement.
+- **At dispatch**, a delivery that finds the budget spent is deferred (`Queue.Defer`, which returns
+  its attempt), and `Queue.DeferTenantChannel` moves that tenant's entire due backlog on that channel to
+  the reset in one statement.
 
 **Alternative.** The first version checked quota at dispatch only, deferring one row at a time.
 
@@ -540,13 +553,14 @@ else's delivery rate — NS-007, violated by the mechanism meant to uphold it. M
 the due range costs one indexed statement per exhaustion, after which the claim goes straight to other
 tenants.
 
-Verified: TEST 11 — the noisy tenant holds the head of the shard; one statement moves its backlog; the
-next claim goes to the quiet tenant.
+Verified: `TestDeferTenantChannel` — one statement moves the noisy tenant's 50 due deliveries; the next
+claim goes to the quiet tenant; the tenant's other channel and a delivery under a live lease are left
+alone.
 
 ## D25 — Addresses are plural, and each is its own delivery · *review*
 
 **Decision.** `AddressBook.Resolve` returns `[]Address`. On first claim the dispatcher binds the
-delivery (`notify_bind_addresses`): one address binds in place; several replace the row with one row
+delivery (`Queue.BindAddresses`): one address binds in place; several replace the row with one row
 per address, each with its own attempts, backoff and outcome. A channel dedupes on
 `Delivery.IdemKey = hex(sha256(canonical(realm, tenant, recipient, idem_key | "digest:"+id, channel, address_key)))`,
 which is stable across re-drives and distinct per address.
@@ -560,7 +574,8 @@ retry. Deduping on the notification's key made every address and every digest co
 and made the key identical across realms. Binding the address at first claim also keeps the key stable
 if the recipient changes their address between a send and its re-drive.
 
-Verified: TEST 10 — three devices bind as three unleased rows; binding is fenced and happens once.
+Verified: `TestBindAddresses` — three devices bind as three unleased rows, each then claimed on its
+own; binding is fenced and happens once; `TestDerivedKeysSeparate` — two devices never share a key.
 
 ## D26 — The inbox is a capability, with three states · *review*
 
@@ -632,8 +647,8 @@ worse than no push. A "your cart is waiting" email after the purchase completed 
 every host builds it by watching outcomes and calling `Notify` again, with its own idempotency bugs.
 Keeping provider failover inside a channel keeps the core channel-agnostic.
 
-Verified: TEST 9 (fallback enqueues on an undelivered outcome), TEST 13 (cancel stops pending
-deliveries and leaves an in-flight one to its worker).
+Verified: `TestFinish` (fallback enqueues on an undelivered outcome, never on expiry or cancel),
+`TestCancel` (pending deliveries stop; an in-flight one is left to its worker and reported).
 
 ## D30 — Preferences resolve recipient, then tenant, then topic · *review*
 
@@ -715,7 +730,7 @@ CAN-SPAM's 30-day requirement.
 
 ## D35 — Personal data is erasable, and suppressions survive erasure · *review*
 
-**Decision.** `notify_erase_recipient()` removes a recipient's rows from every table that holds them —
+**Decision.** `Maintenance.Erase` removes a recipient's rows from every table that holds them —
 inbox, guard, queue, delivery log, dead letters, digests, preferences, schedules, addresses — in one
 transaction under the recipient's own scope, and records the erasure in `erasure_requests` by the hash
 of the identity. `channel_suppressions` is keyed by `address_hash`, never the address, and is kept. Redis
@@ -729,8 +744,9 @@ tables, some partitioned. Deleting a person who complained would also delete the
 resume mailing them — the one outcome worse than not erasing. A hash is minimization, not anonymity, and
 is retained on the legitimate basis of honoring the objection.
 
-Verified: TEST 18 — erasure removes u9 from all nine tables, leaves u1 untouched, keeps the suppression,
-and records the erasure by hash.
+Verified: `TestErase` — no table that can hold a recipient, read from the catalog rather than from
+the code's own list, keeps a row of u9; u1 is untouched; the suppression survives; the erasure is
+recorded by hash. TEST 11 — suppressions and erasure records hold hashes, not identities.
 
 ## D36 — The capacity envelope is stated, and so is the next step · *review*
 
@@ -744,6 +760,43 @@ tenant to separate databases, or distribute on `(realm, tenant_id)`, without a s
 **What goes wrong without it.** An unfalsifiable scalability claim is adopted by a team whose load is ten
 times what the design can carry, and discovered in production. Stated targets make the claim checkable
 and the gap to the next step visible.
+
+
+## D37 — State transitions are SQL in the Go adapter; policy is in the domain · *review*
+
+**Decision.** Every queue state transition — the claim, its fence, retry, defer, the terminal move,
+address binding, tenant deferral, digest append and flush, cancel, expiry, erasure, partition
+provisioning — is plain SQL in [`adapters/driven/postgres`](../../adapters/driven/postgres/), executed
+as one statement (data-modifying CTEs where several writes must be atomic) or inside one transaction.
+What a terminal outcome *means* — whether it is a dead letter, whether the fallback chain continues — is
+pure Go in `domain.DispositionOf`, and the store executes whatever a `domain.Finish` says. The SQL is
+tested against a real PostgreSQL 16 by an integration suite that runs in CI as the non-superuser table
+owner, in parallel, one cloned database per test. The only function left in the schema is
+`notify_apply_recipient_scope`, a DDL helper that keeps the row-level security predicate defined once.
+
+**Alternative.** The first version of the review put these transitions in the schema as PL/pgSQL
+functions (`0004_state_transitions.sql`), including the dead-letter and fallback policy.
+
+**What goes wrong without it.** Three things:
+
+- **Policy buried in the database.** Which failures page an operator and when a fallback channel is
+  tried are domain rules. In PL/pgSQL they sat outside `app/` and `domain/`, which the hexagon says own
+  the invariants, where Go tooling cannot read, debug, profile or trace them.
+- **Deploy coupling.** Changing the claim or the policy was a migration, not a code deploy, and during a
+  rolling deploy two binaries had to agree on whichever function version was live.
+- **A reference implementation other stores could not read.** A second `Store` adapter still has to
+  reimplement the semantics, but now against readable Go and SQL strings and a named test suite, not a
+  PL/pgSQL body.
+
+The functions had one real advantage: they were testable before any Go existed. That is why this
+decision came with the Go that holds the SQL and the integration suite that proves it — including real
+concurrency (two sessions claiming one shard) and 13 mutation checks, each of which removes one
+guarantee (`SKIP LOCKED`, a fence, the attempt count, the disposition, a table from erasure, the scope on
+a new partition, …) and fails a named test. Without the suite, moving SQL into application code would
+only have moved it out of sight.
+
+Verified: the integration suite (`make test-integration`); `TestFinish` "the store executes the
+disposition it is given, and decides nothing"; `TestDispositionOf`.
 
 ---
 
