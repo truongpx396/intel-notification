@@ -12,7 +12,7 @@
 | **Stores** | PostgreSQL 16 (durable: inbox, queue, history, catalog, state transitions), Redis 7 (pre-check, live stream, quota counters — all reconstructible) |
 | **Bus** | None required. Optional ingest adapter for NATS JetStream ([bus-subjects.md](contracts/bus-subjects.md)) |
 | **Transports** | in-process (library), REST + SSE (recipients), gRPC (producers, catalog) |
-| **Testing** | `make verify-schema` for schema guarantees; table-driven unit and contract suites; Testcontainers (v0.44) for store-backed suites behind `//go:build integration`, one cloned database per test; provider sandboxes behind `//go:build provider` |
+| **Testing** | [docs/testing.md](../../docs/testing.md): `make verify-schema` for schema guarantees; table-driven, parallel unit and contract suites; Testcontainers (v0.44) for store-backed suites behind `//go:build integration`, one cloned database per test; Playwright (1.63, Node 24) end to end against the compose stack; provider sandboxes behind `//go:build provider` |
 | **Lint** | `go-arch-lint` for the component graph, `golangci-lint` with `depguard` for banned imports |
 
 ## Architecture
@@ -104,7 +104,7 @@ later stage.
 | **7. Digest, quotas, fairness** | windows, budgets, backlog deferral | Burst yields `ceil(N / DigestMax)`; NS-007 measured |
 | **8. Maintenance** | retention, partition provisioning with scope, idempotency and digest expiry, erasure | Retention with a pending delivery; TEST 5 green after provisioning |
 | **9. Broadcast** | durable, paged, resumable expansion | Crash mid-broadcast resumes; nobody notified twice |
-| **10. Transports** | in-process, REST + SSE relay, gRPC server and client | `NotifierContract` over the wire; `StreamIsolationContract` |
+| **10. Transports** | in-process, REST + SSE relay, gRPC server and client | `NotifierContract` over the wire; `StreamIsolationContract`; the Playwright suite switched on |
 | **11. Service mode** | data-backed ports, `Catalog`, `Directory` client, recipient tokens, realm bindings | NS-011 with a non-Go producer |
 | **12. Boundary gates** | `go-arch-lint` + `depguard` + no-host build | CI fails on an inbound host import |
 | **13. Load test** | the capacity model above, scripted | NS-010 |

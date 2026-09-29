@@ -66,7 +66,15 @@ leaked link disables one preference, not everything), and valid for at least 60 
 | GET | `/admin/notifications/dead-letters` | Inspect dead letters | Filter by tenant, channel, `reason` (`max_attempts \| rejected \| poison`). Correct outcomes (suppressed, no address) are not here — see `/admin/notifications/deliveries` |
 | POST | `/admin/notifications/dead-letters/{id}/replay` | Re-drive one | Enqueues a fresh delivery and records `replayed_at`, once per dead letter |
 | GET | `/admin/notifications/deliveries` | Delivery history | Filter by tenant, channel, outcome, time |
+| PUT | `/admin/recipients/addresses` | Replace one recipient's addresses on one channel | Body `{tenant, recipient, channel, addresses: [{value, locale?, timezone?}]}`. The REST twin of `Catalog.PutAddresses`, for operators and the e2e suite |
 | POST | `/admin/erasure` | Erase a recipient | Body `{tenant, recipient}`. Returns rows removed per table; the erasure is recorded by hash ([D35](../design-decisions.md#d35)) |
+
+## Health
+
+| Method | Path | Purpose | Notes |
+|---|---|---|---|
+| GET | `/healthz` | Liveness | `200` while the process serves requests. No dependencies checked, so an orchestrator never restarts a healthy process because the database blinked |
+| GET | `/readyz` | Readiness | `200` when PostgreSQL answers and the current month's partitions exist; `503` otherwise, with the failing check named. The e2e suite and deploy tooling wait on this |
 
 ## Provider callbacks
 

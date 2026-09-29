@@ -73,6 +73,41 @@ jobs:
           go install github.com/fe3dback/go-arch-lint@v1.19.0
           make arch-lint
 
+  e2e-suite:
+    name: e2e suite compiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: e2e/.nvmrc
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      # Typechecks every spec and lists them, without starting the stack, so the
+      # pending suite cannot rot before the service it tests exists.
+      - name: Typecheck and list
+        run: make e2e-list
+
+  e2e:
+    name: e2e (Playwright)
+    runs-on: ubuntu-latest
+    if: false   # enable with the REST surface and service mode (tasks T044, T049)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: e2e/.nvmrc
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+      - name: Run against the compose stack
+        run: make e2e
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: playwright-report
+          path: e2e/playwright-report
+          retention-days: 14
+
   docs:
     name: docs
     runs-on: ubuntu-latest
