@@ -1,5 +1,6 @@
-# golangci-lint v2. Keeps the extraction guarantee — "this module stands alone" —
-# checked by CI rather than promised in a README.
+# golangci-lint v2. Two jobs: keep the extraction guarantee — "this module stands
+# alone" — checked by CI rather than promised in a README, and hold the test
+# conventions in docs/testing.md without relying on review to notice.
 version: "2"
 
 run:
@@ -21,6 +22,10 @@ linters:
     - bodyclose
     - contextcheck
     - errorlint
+    - usetesting   # t.Context(), t.TempDir(), t.Setenv() over hand-rolled versions
+    - paralleltest # every test and subtest calls t.Parallel() (docs/testing.md)
+    - tparallel    # ...and calls it correctly, so subtests actually run in parallel
+    - thelper      # test helpers call t.Helper(), so failures point at the caller
 
   settings:
     depguard:
@@ -76,6 +81,10 @@ linters:
           deny:
             - pkg: "github.com/testcontainers"
               desc: "Testcontainers belongs to integration tests and internal/pgtest"
+
+    paralleltest:
+      # Table-driven subtests must be parallel too, not only top-level tests.
+      ignore-missing-subtests: false
 
   exclusions:
     rules:
