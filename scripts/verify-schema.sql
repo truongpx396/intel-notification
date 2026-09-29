@@ -17,19 +17,16 @@
 --   TEST 4   RLS scopes the inbox as the OWNER; unscoped reads see nothing NS-001
 --   TEST 5   every recipient-scoped relation, partitions included, is forced NS-001
 --   TEST 6   the worker reads what it delivers; scope dies with the txn    D17
---   TEST 7   the claim leases rows; concurrent claimers skip locked rows   D19
---   TEST 8   a stale lease cannot record an outcome                        D19
---   TEST 9   terminal transition: history, dead letters, fallback          D12 / D20 / D29
---   TEST 10  per-address fan-out, fenced and one-shot                      D25
---   TEST 11  a noisy tenant's backlog leaves the due range in one step     D24
---   TEST 12  digest: one open window, sealed at max, flush is idempotent   D4 / NS-005
---   TEST 13  cancel stops pending deliveries and never an in-flight one    D29
---   TEST 14  the idempotency window is bounded                             D21
---   TEST 15  single-owner jobs: a live lease cannot be taken               D22
---   TEST 16  no foreign key references a partitioned table                 D6
---   TEST 17  constrained vocabularies                                      D5 / D9 / D12
---   TEST 18  erasure removes a recipient everywhere, keeps suppressions    D35
---   TEST 19  the canonical identity encoding is unambiguous                D16 / D18
+--   TEST 7   at most one open digest window per (recipient, topic, channel) D4
+--   TEST 8   the idempotency guard is hash-partitioned and indexed by age  D21
+--   TEST 9   no foreign key references a partitioned table                 D6
+--   TEST 10  constrained vocabularies and shapes                           D5 / D9 / D12
+--   TEST 11  suppressions and erasure records hold hashes, not identities  D35
+--
+-- The queue's state transitions — the claim, its fence, the terminal move,
+-- fan-out, fairness, digests, cancel, expiry, erasure — are SQL in the Go
+-- adapter and are tested there, against a real PostgreSQL, by
+-- `make test-integration` (D37). This file asserts what the schema alone holds.
 --
 \set ON_ERROR_STOP on
 \set QUIET on
@@ -55,10 +52,6 @@ BEGIN
         EXECUTE format('ALTER FUNCTION %s OWNER TO notify_owner', r.f);
     END LOOP;
 END $$;
--- A second session, for the concurrent-claim test. Created after the ownership
--- loop so its functions stay the superuser's.
-CREATE EXTENSION dblink;
-
 SET ROLE notify_owner;
 
 CREATE FUNCTION pg_temp.expect(ok boolean, what text) RETURNS void
@@ -259,190 +252,15 @@ DO $$ BEGIN
 END $$;
 DELETE FROM notification_outbox WHERE id = '018f0000-0000-7000-8000-0000000000b1';
 
-\echo '=== TEST 7: the claim leases rows; concurrent claimers skip locked rows (D19) ==='
-SELECT pg_temp.q('018f0000-0000-7000-8000-0000000000c1', '018f0000-0000-7000-8000-000000000001', 5::smallint, 'email'),
-       pg_temp.q('018f0000-0000-7000-8000-0000000000c2', '018f0000-0000-7000-8000-000000000001', 5::smallint, 'sms'),
-       pg_temp.q('018f0000-0000-7000-8000-0000000000c3', '018f0000-0000-7000-8000-000000000001', 5::smallint, 'push');
-BEGIN;
-DO $$ BEGIN
-    PERFORM pg_temp.expect(
-        (SELECT count(*) FROM notify_claim_outbox(5::smallint, 2, '5 minutes')) = 2,
-        'session A claims two of three due rows and holds them in an open transaction');
-END $$;
-RESET ROLE;
-DO $$ BEGIN
-    PERFORM pg_temp.expect(
-        -- A timeout, so a claim that blocks instead of skipping FAILS rather than hangs.
-        (SELECT count(*) FROM dblink('dbname=' || current_database()
-                                     || ' user=postgres options=''-c statement_timeout=5000''',
-             'SELECT id FROM notify_claim_outbox(5::smallint, 10, ''5 minutes'')') AS t(id uuid)) = 1,
-        'a concurrent session B skips the rows A holds and claims only the free one');
-END $$;
-SET ROLE notify_owner;
-COMMIT;
-DO $$ BEGIN
-    PERFORM pg_temp.expect(
-        (SELECT count(*) FROM notify_claim_outbox(5::smallint, 10, '5 minutes')) = 0,
-        'leased rows are invisible to every claimer until the lease lapses');
-END $$;
--- The workers die holding their leases; the leases lapse.
-UPDATE notification_outbox SET next_attempt_at = now() - interval '1 second' WHERE shard = 5;
+\echo '=== TEST 7: at most one open digest window per (recipient, topic, channel) (D4) ==='
 DO $$
-DECLARE n int; a int;
+DECLARE first_window uuid;
 BEGIN
-    SELECT count(*), min(attempts) INTO n, a FROM notify_claim_outbox(5::smallint, 10, '5 minutes');
-    PERFORM pg_temp.expect(n = 3 AND a = 2,
-        'lapsed leases are re-claimed, and each claim counted as an attempt');
-END $$;
-
-\echo '=== TEST 8: a stale lease cannot record an outcome (D19) ==='
-DO $$
-DECLARE r notification_outbox;
-BEGIN
-    SELECT * INTO r FROM notification_outbox WHERE id = '018f0000-0000-7000-8000-0000000000c1';
-    PERFORM pg_temp.expect(NOT notify_retry_delivery(r.id, gen_random_uuid(), now(), 'late'),
-        'a write carrying someone else''s lease token is discarded');
-    PERFORM pg_temp.expect(notify_retry_delivery(r.id, r.lease_token, now() + interval '1 minute', 'timeout'),
-        'the lease holder records a retry');
-    PERFORM pg_temp.expect(NOT notify_finish_delivery(r.id, r.lease_token, 'delivered'),
-        'recording the retry released the lease: the old token cannot finish the row');
-END $$;
-DELETE FROM notification_outbox WHERE shard = 5;
-
-\echo '=== TEST 9: terminal transition -- history, dead letters, fallback (D12, D20, D29) ==='
-SELECT pg_temp.q('018f0000-0000-7000-8000-0000000000d1', '018f0000-0000-7000-8000-000000000002', 6::smallint, 'email', 'w1', 'u2'),
-       pg_temp.q('018f0000-0000-7000-8000-0000000000d2', '018f0000-0000-7000-8000-000000000002', 6::smallint, 'sms', 'w1', 'u2'),
-       pg_temp.q('018f0000-0000-7000-8000-0000000000d3', '018f0000-0000-7000-8000-000000000002', 6::smallint, 'push', 'w1', 'u2',
-                 ARRAY['sms_fallback', 'email_fallback']),
-       pg_temp.q('018f0000-0000-7000-8000-0000000000d4', '018f0000-0000-7000-8000-000000000002', 6::smallint, 'slack', 'w1', 'u2');
-DO $$
-DECLARE r notification_outbox;
-BEGIN
-    FOR r IN SELECT * FROM notify_claim_outbox(6::smallint, 10, '5 minutes') LOOP
-        PERFORM notify_finish_delivery(r.id, r.lease_token,
-            CASE r.channel WHEN 'email' THEN 'delivered' WHEN 'sms' THEN 'max_attempts'
-                           WHEN 'push' THEN 'no_address' ELSE 'suppressed' END,
-            CASE r.channel WHEN 'email' THEN 'prov-123' END);
-    END LOOP;
-
-    PERFORM pg_temp.expect(
-        NOT EXISTS (SELECT 1 FROM notification_outbox WHERE id IN (
-            '018f0000-0000-7000-8000-0000000000d1', '018f0000-0000-7000-8000-0000000000d2',
-            '018f0000-0000-7000-8000-0000000000d3', '018f0000-0000-7000-8000-0000000000d4')),
-        'finished deliveries leave the queue: it holds pending work only');
-    PERFORM pg_temp.expect(
-        (SELECT outcome FROM notification_deliveries
-          WHERE channel = 'email' AND provider_message_id = 'prov-123') = 'delivered',
-        'a provider callback finds its delivery by provider message id');
-    PERFORM pg_temp.expect(
-        (SELECT count(*) FROM dead_letters
-          WHERE outbox_id = '018f0000-0000-7000-8000-0000000000d2' AND reason = 'max_attempts') = 1,
-        'a genuine failure is dead-lettered with its reason');
-    PERFORM pg_temp.expect(
-        (SELECT count(*) FROM dead_letters WHERE outbox_id IN (
-            '018f0000-0000-7000-8000-0000000000d3', '018f0000-0000-7000-8000-0000000000d4')) = 0,
-        'suppressed and no_address are correct outcomes, not dead letters');
-    PERFORM pg_temp.expect(
-        (SELECT fallback FROM notification_outbox
-          WHERE notification_id = '018f0000-0000-7000-8000-000000000002'
-            AND channel = 'sms_fallback') = ARRAY['email_fallback'],
-        'an undelivered channel enqueues the next one in its fallback chain');
-END $$;
-DO $$ BEGIN
-    PERFORM notify_finish_delivery(gen_random_uuid(), gen_random_uuid(), 'fanned_out');
-    RAISE EXCEPTION 'FAIL: a finish recorded fanned_out';
-EXCEPTION WHEN raise_exception THEN
-    IF SQLERRM LIKE 'FAIL:%' THEN RAISE; END IF;
-    RAISE NOTICE 'PASS: fanned_out can only come from address binding';
-END $$;
-
-\echo '=== TEST 10: per-address fan-out, fenced and one-shot (D25) ==='
-SELECT pg_temp.q('018f0000-0000-7000-8000-0000000000e1', '018f0000-0000-7000-8000-000000000001', 8::smallint, 'push'),
-       pg_temp.q('018f0000-0000-7000-8000-0000000000e2', '018f0000-0000-7000-8000-000000000001', 8::smallint, 'email');
-DO $$
-DECLARE r notification_outbox; push_token uuid; email_token uuid;
-BEGIN
-    FOR r IN SELECT * FROM notify_claim_outbox(8::smallint, 10, '5 minutes') LOOP
-        IF r.channel = 'push' THEN push_token := r.lease_token; ELSE email_token := r.lease_token; END IF;
-    END LOOP;
-
-    PERFORM pg_temp.expect(
-        notify_bind_addresses('018f0000-0000-7000-8000-0000000000e1', push_token,
-            '[{"key":"dev-a","address":{"value":"tok-a"}},
-              {"key":"dev-b","address":{"value":"tok-b"}},
-              {"key":"dev-c","address":{"value":"tok-c"}}]') = 3,
-        'three devices bind as three deliveries');
-    PERFORM pg_temp.expect(
-        (SELECT count(*) FROM notification_outbox
-          WHERE notification_id = '018f0000-0000-7000-8000-000000000001' AND channel = 'push'
-            AND address_key IN ('dev-a', 'dev-b', 'dev-c') AND lease_token IS NULL) = 3,
-        'each device is its own unleased row, with its own retry state');
-    PERFORM pg_temp.expect(
-        (SELECT outcome FROM notification_deliveries
-          WHERE id = '018f0000-0000-7000-8000-0000000000e1') = 'fanned_out',
-        'the channel-level row is recorded as fanned out');
-    PERFORM pg_temp.expect(
-        notify_bind_addresses('018f0000-0000-7000-8000-0000000000e1', push_token,
-            '[{"key":"dev-a","address":{}},{"key":"dev-z","address":{}}]') IS NULL,
-        'binding again with the spent lease is fenced out');
-
-    PERFORM pg_temp.expect(
-        notify_bind_addresses('018f0000-0000-7000-8000-0000000000e2', email_token,
-            '[{"key":"addr-x","address":{"value":"u1@example.com"}}]') = 1,
-        'a single address binds in place');
-    PERFORM pg_temp.expect(
-        (SELECT address_key = 'addr-x' AND lease_token = email_token FROM notification_outbox
-          WHERE id = '018f0000-0000-7000-8000-0000000000e2'),
-        'the in-place binding keeps the lease, so the claimer goes on to deliver');
-    PERFORM pg_temp.expect(
-        notify_bind_addresses('018f0000-0000-7000-8000-0000000000e2', email_token,
-            '[{"key":"addr-y","address":{}}]') IS NULL,
-        'an address, once bound, is never re-bound, so the delivery key stays stable');
-END $$;
-DELETE FROM notification_outbox WHERE shard = 8;
-
-\echo '=== TEST 11: a noisy tenant''s backlog leaves the due range in one step (D24) ==='
-INSERT INTO notification_outbox (notification_id, notification_created_at, realm, tenant_kind,
-                                 tenant_id, recipient_kind, recipient_id, topic, channel, shard,
-                                 next_attempt_at)
-SELECT gen_random_uuid(), now(), 'aisat', 'workspace', 'w-noisy', 'user', 'u' || g,
-       'ingestion_complete', 'email', 9, now() - interval '10 minutes'
-  FROM generate_series(1, 50) g;
-SELECT pg_temp.q(gen_random_uuid(), gen_random_uuid(), 9::smallint, 'email', 'w-quiet', 'q1',
-                 '{}', now() - interval '1 minute');
-DO $$ BEGIN
-    PERFORM pg_temp.expect(
-        (SELECT tenant_id FROM notification_outbox WHERE shard = 9 AND next_attempt_at <= now()
-          ORDER BY next_attempt_at LIMIT 1) = 'w-noisy',
-        'before deferral the noisy tenant holds the head of the shard');
-    PERFORM pg_temp.expect(
-        notify_defer_tenant_channel('aisat', 'workspace', 'w-noisy', 'email',
-                                    now() + interval '1 hour') = 50,
-        'its exhausted quota moves its whole due backlog in one statement');
-    PERFORM pg_temp.expect(
-        (SELECT array_agg(DISTINCT tenant_id) FROM notify_claim_outbox(9::smallint, 5, '5 minutes'))
-            = ARRAY['w-quiet'],
-        'the next claim goes straight to the quiet tenant');
-END $$;
-DELETE FROM notification_outbox WHERE shard = 9;
-
-\echo '=== TEST 12: digest -- one open window, sealed at max, flush idempotent (D4, NS-005) ==='
-DO $$
-DECLARE a uuid; b uuid; c uuid;
-BEGIN
-    a := notify_digest_append('aisat', 'workspace', 'w1', 'user', 'u1', 'ingestion_complete',
-                              'email', 3::smallint, gen_random_uuid(), '15 minutes', 2);
-    b := notify_digest_append('aisat', 'workspace', 'w1', 'user', 'u1', 'ingestion_complete',
-                              'email', 3::smallint, gen_random_uuid(), '15 minutes', 2);
-    c := notify_digest_append('aisat', 'workspace', 'w1', 'user', 'u1', 'ingestion_complete',
-                              'email', 3::smallint, gen_random_uuid(), '15 minutes', 2);
-    PERFORM pg_temp.expect(a = b, 'members inside one window share it');
-    PERFORM pg_temp.expect(c <> a, 'at DigestMax the window seals and the next member opens another');
-    PERFORM pg_temp.expect(
-        (SELECT sealed_at IS NOT NULL AND flush_at <= now() AND member_count = 2
-           FROM digest_buffer WHERE id = a),
-        'the full window is sealed with DigestMax members and due at once');
-
+    INSERT INTO digest_buffer (realm, tenant_kind, tenant_id, recipient_kind, recipient_id,
+                               topic, channel, shard, flush_at)
+    VALUES ('aisat', 'workspace', 'w1', 'user', 'u1', 'ingestion_complete', 'email', 3,
+            now() + interval '15 minutes')
+    RETURNING id INTO first_window;
     BEGIN
         INSERT INTO digest_buffer (realm, tenant_kind, tenant_id, recipient_kind, recipient_id,
                                    topic, channel, shard, flush_at)
@@ -450,81 +268,34 @@ BEGIN
                 now() + interval '15 minutes');
         RAISE EXCEPTION 'FAIL: a second open window was accepted';
     EXCEPTION WHEN unique_violation THEN
-        RAISE NOTICE 'PASS: at most one open window per (recipient, topic, channel)';
+        RAISE NOTICE 'PASS: a second open window is rejected by the partial unique index';
     END;
-
-    PERFORM pg_temp.expect(notify_digest_flush(a) IS NOT NULL, 'flushing a due window enqueues it');
-    PERFORM pg_temp.expect(notify_digest_flush(a) IS NULL, 'a duplicate flush tick is a no-op');
-    PERFORM pg_temp.expect(
-        (SELECT count(*) FROM notification_outbox WHERE digest_id = a) = 1,
-        'one window, exactly one delivery');
+    UPDATE digest_buffer SET sealed_at = now() WHERE id = first_window;
+    INSERT INTO digest_buffer (realm, tenant_kind, tenant_id, recipient_kind, recipient_id,
+                               topic, channel, shard, flush_at)
+    VALUES ('aisat', 'workspace', 'w1', 'user', 'u1', 'ingestion_complete', 'email', 3,
+            now() + interval '15 minutes');
+    RAISE NOTICE 'PASS: once a window is sealed, the next one can open';
+    BEGIN
+        UPDATE digest_buffer SET member_count = 5 WHERE id = first_window;
+        RAISE EXCEPTION 'FAIL: member_count drifted from member_ids';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'PASS: member_count always equals the members held';
+    END;
 END $$;
 
-\echo '=== TEST 13: cancel stops pending deliveries, never an in-flight one (D29) ==='
+\echo '=== TEST 8: the idempotency guard is hash-partitioned and indexed by age (D21) ==='
 DO $$ BEGIN
-    PERFORM pg_temp.put('018f0000-0000-7000-8000-000000000005', 'aisat', 'workspace', 'w1',
-                        'user', 'u3', 'Meeting starts soon', 'remind:m1:start');
-END $$;
-SELECT pg_temp.q('018f0000-0000-7000-8000-0000000000f2', '018f0000-0000-7000-8000-000000000005',
-                 10::smallint, 'email', 'w1', 'u3'),
-       pg_temp.q('018f0000-0000-7000-8000-0000000000f3', '018f0000-0000-7000-8000-000000000005',
-                 11::smallint, 'sms', 'w1', 'u3');
--- A worker is mid-send on the SMS.
-SELECT count(*) AS claimed FROM notify_claim_outbox(11::smallint, 1, '5 minutes') \gset
-DO $$
-DECLARE r record;
-BEGIN
-    SELECT * INTO r FROM notify_cancel('aisat', 'workspace', 'w1', 'user', 'u3', 'remind:m1:start');
-    PERFORM pg_temp.expect(r.matched AND r.canceled = 1 AND r.in_flight = 1,
-        'cancel stops the pending email and reports the SMS already in flight');
-    PERFORM pg_temp.expect(
-        (SELECT outcome FROM notification_deliveries
-          WHERE id = '018f0000-0000-7000-8000-0000000000f2') = 'canceled',
-        'the canceled delivery is recorded as canceled');
-    PERFORM pg_temp.expect(
-        EXISTS (SELECT 1 FROM notification_outbox WHERE id = '018f0000-0000-7000-8000-0000000000f3'),
-        'the in-flight delivery is left to its worker, not falsely recorded as canceled');
-    PERFORM pg_temp.scope('aisat', 'workspace', 'w1', 'user', 'u3');
-    PERFORM pg_temp.expect(
-        (SELECT canceled_at IS NOT NULL FROM notifications
-          WHERE id = '018f0000-0000-7000-8000-000000000005'),
-        'the inbox row is marked canceled');
-    SELECT * INTO r FROM notify_cancel('aisat', 'workspace', 'w1', 'user', 'u3', 'no-such-key');
-    PERFORM pg_temp.expect(NOT r.matched, 'canceling an unknown key reports no match');
-END $$;
-DELETE FROM notification_outbox WHERE shard IN (10, 11);
-
-\echo '=== TEST 14: the idempotency window is bounded (D21) ==='
-INSERT INTO notify_idem (realm, tenant_kind, tenant_id, recipient_kind, recipient_id, idem_key,
-                         notification_id, notification_created_at, created_at)
-VALUES ('aisat', 'workspace', 'w1', 'user', 'u1', 'aged-key', gen_random_uuid(),
-        '2026-09-01', now() - interval '8 days');
-DO $$ BEGIN
-    PERFORM pg_temp.expect(notify_expire_idem(now() - interval '7 days', 1000) = 1,
-        'keys older than the window expire');
-    PERFORM pg_temp.expect(
-        EXISTS (SELECT 1 FROM notify_idem WHERE idem_key = 'ing:doc1:complete' AND tenant_id = 'w1'
-                  AND realm = 'aisat'),
-        'keys inside the window are kept');
     PERFORM pg_temp.expect(
         (SELECT count(*) FROM pg_inherits WHERE inhparent = 'notify_idem'::regclass) = 16,
-        'the guard is hash-partitioned, so expiry and vacuum work a partition at a time');
+        'notify_idem has 16 hash partitions, so expiry and vacuum work one at a time');
+    PERFORM pg_temp.expect(
+        EXISTS (SELECT 1 FROM pg_indexes WHERE tablename = 'notify_idem'
+                  AND indexdef LIKE '%(created_at)%'),
+        'expiry by age rides an index');
 END $$;
 
-\echo '=== TEST 15: single-owner jobs -- a live lease cannot be taken (D22) ==='
-DO $$ BEGIN
-    PERFORM pg_temp.expect(notify_try_lease_job('retention', 'worker-1', '1 minute'),
-        'the first worker takes the retention lease');
-    PERFORM pg_temp.expect(NOT notify_try_lease_job('retention', 'worker-2', '1 minute'),
-        'a second worker cannot take a live lease');
-    PERFORM pg_temp.expect(notify_try_lease_job('retention', 'worker-1', '1 minute'),
-        'the holder renews its own lease');
-    UPDATE notify_job_leases SET lease_expires_at = now() - interval '1 second' WHERE job = 'retention';
-    PERFORM pg_temp.expect(notify_try_lease_job('retention', 'worker-2', '1 minute'),
-        'once the lease lapses another worker takes over');
-END $$;
-
-\echo '=== TEST 16: no foreign key references a partitioned table (D6) ==='
+\echo '=== TEST 9: no foreign key references a partitioned table (D6) ==='
 DO $$ BEGIN
     PERFORM pg_temp.expect(
         (SELECT count(*) FROM pg_constraint k JOIN pg_class c ON c.oid = k.confrelid
@@ -532,26 +303,31 @@ DO $$ BEGIN
         'retiring a partition can never be blocked by a referencing row');
 END $$;
 
-\echo '=== TEST 17: constrained vocabularies (D5, D9, D12) ==='
+\echo '=== TEST 10: constrained vocabularies and shapes (D5, D9, D12) ==='
 DO $$ BEGIN
     BEGIN
-        UPDATE notification_outbox SET priority = 'URGENT!!' WHERE digest_id IS NOT NULL;
+        INSERT INTO notification_outbox (notification_id, notification_created_at, realm,
+                                         tenant_kind, tenant_id, recipient_kind, recipient_id,
+                                         topic, priority, channel, shard)
+        VALUES (gen_random_uuid(), '2026-09-15', 'aisat', 'workspace', 'w1', 'user', 'u1',
+                't', 'URGENT!!', 'email', 0);
         RAISE EXCEPTION 'FAIL: a bogus priority was accepted';
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'PASS: priority is info | warning | critical';
     END;
     BEGIN
         INSERT INTO notification_deliveries (id, realm, tenant_kind, tenant_id, recipient_kind,
-                                             recipient_id, topic, channel, address_key, outcome, attempts)
+                                             recipient_id, topic, channel, address_key, outcome,
+                                             attempts, completed_at)
         VALUES (gen_random_uuid(), 'aisat', 'workspace', 'w1', 'user', 'u1', 't', 'email', '',
-                'whatever', 1);
+                'whatever', 1, '2026-09-15');
         RAISE EXCEPTION 'FAIL: an arbitrary outcome was accepted';
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'PASS: a delivery outcome is one of the named terminal states';
     END;
     BEGIN
-        INSERT INTO dead_letters (id, realm, source, reason, payload, attempts, last_error)
-        VALUES (gen_random_uuid(), 'aisat', 'outbox', 'suppressed', '{}', 1, 'x');
+        INSERT INTO dead_letters (id, realm, source, reason, payload, attempts, last_error, created_at)
+        VALUES (gen_random_uuid(), 'aisat', 'outbox', 'suppressed', '{}', 1, 'x', '2026-09-15');
         RAISE EXCEPTION 'FAIL: a correct outcome was accepted as a dead letter';
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'PASS: only genuine failures can be dead letters';
@@ -560,8 +336,8 @@ DO $$ BEGIN
         INSERT INTO notification_outbox (notification_id, notification_created_at, digest_id, realm,
                                          tenant_kind, tenant_id, recipient_kind, recipient_id,
                                          topic, channel, shard)
-        VALUES (gen_random_uuid(), now(), gen_random_uuid(), 'aisat', 'workspace', 'w1', 'user',
-                'u1', 't', 'email', 0);
+        VALUES (gen_random_uuid(), '2026-09-15', gen_random_uuid(), 'aisat', 'workspace', 'w1',
+                'user', 'u1', 't', 'email', 0);
         RAISE EXCEPTION 'FAIL: a delivery for both a notification and a digest was accepted';
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'PASS: a delivery is for exactly one notification or one digest';
@@ -603,87 +379,24 @@ DO $$ BEGIN
     END;
 END $$;
 
-\echo '=== TEST 18: erasure removes a recipient everywhere, keeps suppressions (D35) ==='
+\echo '=== TEST 11: suppressions and erasure records hold hashes, not identities (D35) ==='
 DO $$ BEGIN
-    PERFORM pg_temp.put('018f0000-0000-7000-8000-000000000009', 'aisat', 'workspace', 'w1',
-                        'user', 'u9', 'To be erased', 'erase:me');
-    INSERT INTO notification_preferences (realm, tenant_kind, tenant_id, recipient_kind,
-                                          recipient_id, topic, channel, enabled)
-    VALUES ('aisat', 'workspace', 'w1', 'user', 'u9', 'ingestion_complete', 'email', false);
-    INSERT INTO notification_schedules (realm, tenant_kind, tenant_id, recipient_kind, recipient_id)
-    VALUES ('aisat', 'workspace', 'w1', 'user', 'u9');
-    INSERT INTO recipient_addresses (realm, tenant_kind, tenant_id, recipient_kind, recipient_id,
-                                     channel, address_key, value)
-    VALUES ('aisat', 'workspace', 'w1', 'user', 'u9', 'email', 'k9', 'u9@example.com');
-END $$;
-SELECT pg_temp.q('018f0000-0000-7000-8000-0000000000a9', '018f0000-0000-7000-8000-000000000009',
-                 12::smallint, 'email', 'w1', 'u9');
-INSERT INTO notification_deliveries (id, notification_id, realm, tenant_kind, tenant_id,
-                                     recipient_kind, recipient_id, topic, channel, address_key,
-                                     outcome, attempts)
-VALUES (gen_random_uuid(), '018f0000-0000-7000-8000-000000000009', 'aisat', 'workspace', 'w1',
-        'user', 'u9', 'ingestion_complete', 'sms', 'k9s', 'delivered', 1);
-INSERT INTO dead_letters (id, realm, tenant_kind, tenant_id, recipient_kind, recipient_id, source,
-                          reason, payload, attempts, last_error)
-VALUES (gen_random_uuid(), 'aisat', 'workspace', 'w1', 'user', 'u9', 'outbox', 'max_attempts',
-        '{}', 5, 'timeout');
-SELECT notify_digest_append('aisat', 'workspace', 'w1', 'user', 'u9', 'ingestion_complete',
-                            'email', 12::smallint, gen_random_uuid(), '15 minutes', 100) IS NOT NULL
-    AS digested \gset
-INSERT INTO channel_suppressions (realm, channel, address_hash, reason)
-VALUES ('aisat', 'email',
-        sha256(convert_to(notify_canonical('email', 'u9@example.com'), 'UTF8')), 'complaint');
-
-DO $$
-DECLARE c jsonb;
-BEGIN
-    c := notify_erase_recipient('aisat', 'workspace', 'w1', 'user', 'u9');
-    PERFORM pg_temp.expect(
-        (c ->> 'notifications')::int = 1 AND (c ->> 'notify_idem')::int = 1
-        AND (c ->> 'notification_outbox')::int = 1 AND (c ->> 'notification_deliveries')::int = 1
-        AND (c ->> 'dead_letters')::int = 1 AND (c ->> 'digest_buffer')::int = 1
-        AND (c ->> 'notification_preferences')::int = 1
-        AND (c ->> 'notification_schedules')::int = 1
-        AND (c ->> 'recipient_addresses')::int = 1,
-        'erasure reports one removed row from each of the nine tables that held u9: ' || c::text);
-END $$;
-DO $$ BEGIN
-    PERFORM pg_temp.scope('aisat', 'workspace', 'w1', 'user', 'u9');
-    PERFORM pg_temp.expect(
-        (SELECT count(*) FROM notifications) + (SELECT count(*) FROM notification_preferences)
-        + (SELECT count(*) FROM notification_schedules) + (SELECT count(*) FROM recipient_addresses)
-        + (SELECT count(*) FROM notify_idem WHERE recipient_id = 'u9')
-        + (SELECT count(*) FROM notification_outbox WHERE recipient_id = 'u9')
-        + (SELECT count(*) FROM notification_deliveries WHERE recipient_id = 'u9')
-        + (SELECT count(*) FROM dead_letters WHERE recipient_id = 'u9')
-        + (SELECT count(*) FROM digest_buffer WHERE recipient_id = 'u9') = 0,
-        'nothing of u9 remains, including behind its own scope');
-    PERFORM pg_temp.scope('aisat', 'workspace', 'w1', 'user', 'u1');
-    PERFORM pg_temp.expect((SELECT count(*) FROM notifications) = 1,
-        'erasing u9 left u1''s notification untouched');
-    PERFORM pg_temp.expect(
-        (SELECT count(*) FROM channel_suppressions WHERE reason = 'complaint') = 1,
-        'the complaint suppression survives erasure, so u9 is not mailed again');
-    PERFORM pg_temp.expect(
-        (SELECT subject_hash FROM erasure_requests) =
-            sha256(convert_to(notify_canonical('aisat', 'workspace', 'w1', 'user', 'u9'), 'UTF8')),
-        'the erasure is recorded by hash, not by identity');
     PERFORM pg_temp.expect(
         NOT EXISTS (SELECT 1 FROM information_schema.columns
                      WHERE table_name = 'channel_suppressions' AND column_name = 'address'),
-        'suppressions hold an address hash, never the address');
-END $$;
-
-\echo '=== TEST 19: the canonical identity encoding is unambiguous (D16, D18) ==='
-DO $$ BEGIN
-    PERFORM pg_temp.expect(notify_canonical('a:b', 'c') <> notify_canonical('a', 'b:c'),
-        'ids containing the separator cannot collide');
-    PERFORM pg_temp.expect(notify_canonical('ab', '') <> notify_canonical('a', 'b'),
-        'empty components cannot collide either');
-    -- The frozen vector the Go implementation is tested against.
+        'suppressions hold an address hash, never the address, so they can survive erasure');
     PERFORM pg_temp.expect(
-        notify_canonical('aisat', 'workspace', 'w1', 'user', 'u1') = '5:aisat,9:workspace,2:w1,4:user,2:u1',
-        'the encoding matches its frozen test vector');
+        NOT EXISTS (SELECT 1 FROM information_schema.columns
+                     WHERE table_name = 'erasure_requests'
+                       AND column_name IN ('tenant_id', 'recipient_id')),
+        'the erasure record keeps a hash of the subject, not the subject');
+    BEGIN
+        INSERT INTO channel_suppressions (realm, channel, address_hash, reason)
+        VALUES ('aisat', 'email', '\x0102'::bytea, 'complaint');
+        RAISE EXCEPTION 'FAIL: a suppression key that is not a sha256 was accepted';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'PASS: a suppression key is a 32-byte hash';
+    END;
 END $$;
 
 RESET ROLE;

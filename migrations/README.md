@@ -9,7 +9,7 @@ owner, the role a worker actually uses.
 | `0001_notification_core.sql` | The scope policy helper; inbox (partitioned, RLS on parent and partitions); `notify_idem` guard (tenant in the key, hash-partitioned); the delivery queue; the delivery history (partitioned); broadcasts; recipient and tenant preferences; schedules; job leases |
 | `0002_channels_delivery.sql` | Hashed per-channel suppressions; dead letters (genuine failures only, partitioned); sealing digest windows; quotas with a realm-wide default |
 | `0003_catalog_compliance.sql` | The data-backed ports: topics, versioned templates, recipient addresses (RLS), channel providers (credentials by reference); the erasure record |
-| `0004_state_transitions.sql` | The Store's state machine as functions: canonical encoding, fenced claim, outcome writes, terminal transition, address binding, tenant backlog deferral, shard rehoming, digest append and flush, cancel, bounded expiry, job leases, erasure |
+| `migrations.go` | Embeds the `.sql` files (`migrations.FS`), so a host, the service binary and the integration tests apply the same schema |
 
 These files were rewritten in place during the architecture review rather than amended by new
 migrations, because nothing had been deployed from them. From the first tagged release on, a merged
@@ -31,8 +31,10 @@ Several choices are counterintuitive and each is load-bearing. Read
   ([D20](../specs/001-notification-core/design-decisions.md#d20)).
 - **The queue row repeats the recipient identity.** The worker needs it to scope its read of the
   notification under forced RLS ([D17](../specs/001-notification-core/design-decisions.md#d17)).
-- **State transitions are SQL functions.** The claim, its fence and the terminal move are correctness
-  properties; one implementation, tested directly, cannot drift from its assertion.
+- **The schema holds shape, not behaviour.** Constraints, row-level security and indexes live here;
+  the queue's state transitions are SQL in the Go adapter, tested against a real PostgreSQL by
+  `make test-integration` ([D37](../specs/001-notification-core/design-decisions.md#d37)). The one
+  function here, `notify_apply_recipient_scope`, is a DDL helper that defines the RLS predicate once.
 - **Preferences are rows, not columns.** `(topic, channel, enabled)` rather than `in_app BOOL,
   email BOOL`, so adding a channel is not a migration
   ([D3](../specs/001-notification-core/design-decisions.md#d3)).
@@ -41,7 +43,8 @@ Several choices are counterintuitive and each is load-bearing. Read
 
 `notifications`, `notification_deliveries` and `dead_letters` are `PARTITION BY RANGE`. The bootstrap
 migration creates three months of each. **Provisioning further months is the maintenance job's
-responsibility** — see [docs/operations.md](../docs/operations.md#partition-provisioning).
+responsibility** — `Maintenance.EnsurePartitions`, which creates each missing month ahead of the clock —
+see [docs/operations.md](../docs/operations.md#partition-provisioning).
 
 Every new `notifications` partition **must** be passed to `notify_apply_recipient_scope()`. PostgreSQL
 does not carry a parent's row-level security to its partitions, so an unscoped partition queried by name
