@@ -840,10 +840,11 @@ one, tries the next inside the same attempt; it declares the weakest `Dedup` of 
 
 ## Contract tests
 
-These validate *any* implementation of the ports against the invariants. The `Channel` suite is
-table-driven; the store-backed suites run against real PostgreSQL and Redis via Testcontainers
-(`//go:build integration`, one cloned database per test). Schema-level guarantees are asserted
-separately by `make verify-schema`.
+These validate *any* implementation of the ports against the invariants. Every suite follows
+[docs/testing.md](../../../docs/testing.md): table-driven, every test and subtest parallel, unit suites
+with no infrastructure, integration suites against real PostgreSQL and Redis via Testcontainers
+(`//go:build integration`, one cloned database per test), and the REST and SSE surface end to end with
+Playwright. Schema-level guarantees are asserted separately by `make verify-schema`.
 
 The queue, digest and maintenance transitions already have their integration suite in
 [`adapters/driven/postgres`](../../../adapters/driven/postgres/) — every transition, real concurrency
@@ -866,6 +867,7 @@ func ChannelContract(t *testing.T, newChannel func(t *testing.T) (notify.Channel
 	}
 
 	t.Run("re-drive collapses at the declared dedup level", func(t *testing.T) {
+		t.Parallel()
 		c, p := newChannel(t)
 		r1, err := c.Deliver(ctx, d()); mustNoErr(t, err); mustBe(t, r1.Outcome, notify.Delivered)
 		r2, err := c.Deliver(ctx, d()); mustNoErr(t, err)
@@ -880,22 +882,26 @@ func ChannelContract(t *testing.T, newChannel func(t *testing.T) (notify.Channel
 		}
 	})
 	t.Run("distinct delivery keys are distinct sends", func(t *testing.T) {
+		t.Parallel()
 		c, p := newChannel(t)
 		a, b := d(), d(); b.IdemKey = "k2"; b.Address.Value = "b@example.com"
 		_, _ = c.Deliver(ctx, a); _, _ = c.Deliver(ctx, b)
 		if p.Sends("k1") != 1 || p.Sends("k2") != 1 { t.Fatal("per-address keys must not collapse (D25)") }
 	})
 	t.Run("transient failure is Retry, never an error or a drop", func(t *testing.T) {
+		t.Parallel()
 		c, p := newChannel(t); p.FailNext(Transient)
 		r, err := c.Deliver(ctx, d())
 		if err != nil || r.Outcome != notify.Retry { t.Fatalf("want Retry, got %v %v", r.Outcome, err) }
 	})
 	t.Run("dead address is Suppressed with a reason", func(t *testing.T) {
+		t.Parallel()
 		c, p := newChannel(t); p.FailNext(DeadAddress)
 		r, _ := c.Deliver(ctx, d())
 		if r.Outcome != notify.Suppressed || r.SuppressReason == "" { t.Fatal("dead address must be Suppressed") }
 	})
 	t.Run("permanent refusal is Rejected", func(t *testing.T) {
+		t.Parallel()
 		c, p := newChannel(t); p.FailNext(Permanent)
 		if r, _ := c.Deliver(ctx, d()); r.Outcome != notify.Rejected { t.Fatal("want Rejected") }
 	})
@@ -1177,6 +1183,7 @@ module — no host, no replace directives?**
   cmd/notifyd/             the service binary: the only place concrete adapters are assembled
   migrations/              owns the schema — travels with the module; migrations.go embeds it
   internal/pgtest/         integration-test support: Testcontainers, one cloned database per test
+  e2e/                     Playwright suite against the running service (docs/testing.md)
 ```
 
 **Dependency rule:** `adapters → app → ports → domain`. `domain` and `ports` import nothing outside

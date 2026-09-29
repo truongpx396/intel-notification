@@ -48,12 +48,29 @@ services:
       NOTIFY_REDIS_URL: redis://redis:6379/0
       NOTIFY_REALM_BINDINGS: local-producer=local
       NOTIFY_SHARDS: "16"
+      # Recipient tokens are verified against the host's JWKS. The e2e suite
+      # serves one on the host (e2e/support/global-setup.ts).
+      NOTIFY_RECIPIENT_JWKS: local=http://host.docker.internal:8099/jwks.json
+      # Local development and e2e only; production uses mTLS on /admin.
+      NOTIFY_OPERATOR_TOKENS: env:NOTIFY_OPERATOR_TOKEN
+      NOTIFY_OPERATOR_TOKEN: e2e-operator
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8080:8080"   # REST, recipient-facing
       - "9090:9090"   # gRPC, producer-facing -- internal network in production
     depends_on:
       postgres: { condition: service_healthy }
       redis:    { condition: service_healthy }
+
+  # Captures outgoing email for the e2e suite, which reads messages back through
+  # its API (the unsubscribe spec). Only started with `--profile e2e`.
+  mailpit:
+    image: axllent/mailpit:v1.31.3
+    profiles: [ e2e ]
+    ports:
+      - "8025:8025"   # API and web UI
+      - "1025:1025"   # SMTP
 
   # notifyd runs the dispatcher and the maintenance jobs in-process by default.
   # Split them out when delivery volume needs to scale independently of the API

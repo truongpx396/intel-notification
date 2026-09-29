@@ -22,5 +22,6 @@ disagree, one of them is a bug and the spec says which.
 ## Changing the design
 
 A change to a contract needs: the requirement it serves, the failure mode it prevents, and either a
-new assertion in `scripts/verify-schema.sql` or a new contract test. A change with none of those is a
+new assertion in `scripts/verify-schema.sql` or a new test at the right layer, following the
+conventions in [docs/testing.md](../docs/testing.md). A change with none of those is a
 preference, and preferences do not go in contracts.

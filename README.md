@@ -133,7 +133,10 @@ superuser nor BYPASSRLS:
   PostgreSQL 16 started by Testcontainers, in parallel, one cloned database per test. Each guarantee was
   mutation-checked: break it on purpose and a named test fails.
 
-`make test` runs the domain's unit tests with no infrastructure; `make ci` runs everything.
+`make test` runs the domain's unit tests with no infrastructure; `make ci` runs everything. A
+Playwright suite for the REST and SSE surface is written against the contract and switches on with the
+HTTP layer. How the layers fit, and the conventions every test follows — table-driven, parallel,
+Testcontainers, Playwright — are in [docs/testing.md](docs/testing.md).
 
 ### The bug this fixes
 
@@ -160,6 +163,7 @@ commit, that can skip a database round-trip and can never skip a notification.
 | [docs/integration-guide.md](docs/integration-guide.md) | adopting it in a host product, in either mode |
 | [docs/operations.md](docs/operations.md) | running it: shards, leases, dead letters, retention, erasure, alarms |
 | [docs/security.md](docs/security.md) | isolation, the live stream, producer and recipient auth, personal data |
+| [docs/testing.md](docs/testing.md) | the test layers and the conventions every new test follows |
 | [PROVENANCE.md](PROVENANCE.md) | where this came from and what changed in the lift and the review |
 
 ## License

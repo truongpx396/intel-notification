@@ -73,6 +73,7 @@ NOTIFY_DEFAULT_LOCALE=en
 | `NOTIFY_REALM_BINDINGS` | `principal=realm` pairs, comma-separated. A producer principal is its mTLS certificate SAN or its token subject. A request from an unbound principal is rejected; a request never names its own realm ([D31](../specs/001-notification-core/design-decisions.md#d31)) |
 | `NOTIFY_RECIPIENT_JWKS` | `realm=https://…/jwks.json` pairs: the keys that verify each realm's recipient tokens |
 | `NOTIFY_UNSUBSCRIBE_KEYS` | `kid=secret-ref` pairs for signing unsubscribe tokens; the first signs, all verify, so keys rotate without breaking old mail ([D34](../specs/001-notification-core/design-decisions.md#d34)) |
+| `NOTIFY_OPERATOR_TOKENS` | Bearer tokens accepted on `/admin` routes, as secret references (`env:`, `file:`). Prefer mTLS in production; a token is for local stacks and the e2e suite |
 | `NOTIFY_DIRECTORY_ADDRS` | `realm=host:port` pairs: the host's `Directory` service, if audiences resolve by callback |
 | `NOTIFY_INGEST_NATS_URL` | Optional: enables the JetStream ingest adapter ([bus-subjects.md](../specs/001-notification-core/contracts/bus-subjects.md)) |
 

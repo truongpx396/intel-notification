@@ -138,6 +138,9 @@ Stages map to [plan.md § Phasing](plan.md#phasing). Stages 1–6 are the releas
       `NotifyTx` returns `ErrTxUnsupported`)
 - [ ] **T047** **Contract tests** `NotifierContract` through gRPC, and `StreamIsolationContract` against
       the relay (NS-001)
+- [ ] **T047a** Enable the Playwright suite: remove `test.describe.fixme` from the `e2e/` specs as the
+      routes they drive land, implement `/healthz` and `/readyz`, and switch on the `e2e` CI job
+      ([docs/testing.md](../../docs/testing.md))
 
 ## Stage 11 — Service mode
 

@@ -1,4 +1,5 @@
-# intel-notification — see ROADMAP.md for what is built vs designed.
+# intel-notification — see ROADMAP.md for what is built vs designed, and
+# docs/testing.md for what each test layer covers.
 
 SHELL       := /usr/bin/env bash
 PG_IMAGE    ?= postgres:16-alpine
@@ -71,8 +72,8 @@ lint-sql: ## Migration hygiene: transactional, commented, sequentially named
 	[ $$fail -eq 0 ] && echo "migrations OK" || exit 1
 
 # ------------------------------------------------------------------- go -------
-# Tests run shuffled and under the race detector, so order-dependence and data
-# races fail the build.
+# Tests run shuffled and under the race detector: parallel tests (docs/testing.md)
+# are only worth having if order-dependence and data races fail the build.
 GOTEST := go test -race -shuffle=on -count=1
 
 .PHONY: build test test-integration lint arch-lint
@@ -85,13 +86,21 @@ test: ## Unit tests: no Docker, no network
 test-integration: ## Integration tests against PostgreSQL via Testcontainers (needs Docker)
 	$(GOTEST) -tags integration ./...
 
-lint: ## golangci-lint: depguard boundaries and formatting
+lint: ## golangci-lint: depguard boundaries, parallel-test rules, formatting
 	@command -v golangci-lint >/dev/null || { echo "golangci-lint not installed: https://golangci-lint.run/docs/welcome/install/"; exit 1; }
 	golangci-lint run ./...
 
 arch-lint: ## go-arch-lint: the hexagonal dependency graph
 	@command -v go-arch-lint >/dev/null || { echo "go-arch-lint not installed: go install github.com/fe3dback/go-arch-lint@v1.19.0"; exit 1; }
 	go-arch-lint check
+
+# ------------------------------------------------------------------ e2e -------
+.PHONY: e2e e2e-list
+e2e: ## Playwright end-to-end tests against the compose stack (needs Docker, Node 24)
+	cd e2e && npm ci && npx playwright install --with-deps chromium && npx playwright test
+
+e2e-list: ## Typecheck the e2e suite and list its tests, without running the stack
+	cd e2e && npm ci && npx tsc --noEmit && npx playwright test --list
 
 .PHONY: docs-links
 docs-links: ## Fail on a relative markdown link with no target on disk
@@ -106,4 +115,4 @@ docs-links: ## Fail on a relative markdown link with no target on disk
 	if [ $$fail -eq 0 ]; then echo "links OK"; else echo "dangling links above"; exit 1; fi
 
 .PHONY: ci
-ci: lint-sql verify-schema docs-links build test test-integration lint arch-lint ## Everything CI runs today
+ci: lint-sql verify-schema docs-links build test test-integration lint arch-lint e2e-list ## Everything CI runs today
