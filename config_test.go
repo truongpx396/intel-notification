@@ -57,6 +57,9 @@ func fieldsOf(t *testing.T, err error) []string {
 	if !errors.As(err, &ce) {
 		t.Fatalf("Validate returned %T (%v), want a *ConfigError", err, err)
 	}
+	if len(ce.Problems) == 0 {
+		t.Fatal("a *ConfigError with no problems: a clean config must be a nil error")
+	}
 	fields := make([]string, 0, len(ce.Problems))
 	for _, p := range ce.Problems {
 		if p.Message == "" {
