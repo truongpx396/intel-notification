@@ -110,7 +110,9 @@ Rules:
 A test that cannot fail proves nothing. For each guarantee worth a test, break it on purpose once and
 confirm the test goes red: remove `SKIP LOCKED`, drop a lease fence, skip a table in erasure. The queue's
 integration suite was checked this way against 20 such mutations, every one caught (two of them only
-after the tests were strengthened — which is the point). Do this whenever you add or change a guarantee.
+after the tests were strengthened — which is the point). Do this whenever you add or change a guarantee,
+and record it in the [mutation ledger](mutations.md): a guarantee with no row there has not been shown to
+be caught.
 
 ### End to end: Playwright
 
