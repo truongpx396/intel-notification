@@ -25,7 +25,8 @@ components:
   ports:      { in: ports }
   driven:     { in: adapters/driven/** }
   migrations: { in: migrations }         # the embedded schema
-  testing:    { in: internal/** }        # test support only: pgtest, notifytest
+  testing:    { in: internal/pgtest }    # integration-test support only
+  notifytest: { in: internal/notifytest }  # the kit every suite is written against (T013a)
   # app:      { in: app/** }             # uncomment with the first use-case
   # driving:  { in: adapters/driving/** }
   # api:      { in: api/** }             # generated protobuf
@@ -37,7 +38,8 @@ deps:
   config:     { mayDependOn: [ domain ] }                          # Config.Realm is a domain.Realm
   ports:      { mayDependOn: [ domain ] }
   driven:     { mayDependOn: [ domain, ports, migrations ] }       # implements ports; NOT app
-  testing:    { mayDependOn: [ domain, ports, migrations, driven ] }   # Env wires the PostgreSQL adapter
+  testing:    { mayDependOn: [ migrations ] }
+  notifytest: { mayDependOn: [ domain, ports, migrations, driven, testing ] }   # Env wires the PostgreSQL adapter over pgtest
   # app:      { mayDependOn: [ config, domain, ports ] }       # app.New takes a Config
   # driving:  { mayDependOn: [ domain, ports, api ] }
   # cmd:      { mayDependOn: [ config, domain, ports, app, driven, driving, api, migrations ] }
