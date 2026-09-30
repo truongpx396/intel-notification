@@ -109,7 +109,8 @@ Rules:
 
 Every suite above the store is written against one kit, so a Red test can exist before the code it
 drives. It holds a fake clock that moves only when told, fault injection, a probe that counts sends
-per idempotency key, and a channel registry. The read-side fakes and `Env` follow.
+per idempotency key, a channel registry, in-memory fakes for the read-side ports, and, with the
+`integration` tag, `Env`.
 
 - **`Clock`.** `Advance` and `Set` are the only things that move it. A test never sleeps.
 - **`Injector`.** The dispatcher calls `Reach` at each of its nine `domain.DispatchStep`s. `PanicAt`
@@ -122,9 +123,15 @@ per idempotency key, and a channel registry. The read-side fakes and `Env` follo
 - **`Probe` and `Channel`.** The probe counts sends and calls per key and injects a failure into a
   coming send; the channel honours the `Dedup` level it declares, so a re-drive collapses only where a
   real channel at that level would.
-- **`Registry`.** A `ports.ChannelRegistry`: registering a channel is one line.
-- There is no fake `Queue` or `Store`, on purpose: their leases, fencing and row-level security only
-  PostgreSQL can hold, and a fake that passed where the real one fails would be worse than none.
+- **The fakes** (`Topics`, `Preferences`, `QuotaCounter`, `AddressBook`, `Templates`) are real
+  in-memory implementations of their ports, each with its own table test. There is no fake `Queue` or
+  `Store`, on purpose: their leases, fencing and row-level security only PostgreSQL can hold, and a fake
+  that passed where the real one fails would be worse than none.
+- **`Env`.** A private database (cloned for that test alone) with the real queue, digest and
+  maintenance ports, and the rest of the kit. A suite starts with
+  `func TestMain(m *testing.M) { os.Exit(notifytest.Main(m)) }` and then `e := notifytest.NewEnv(t)`.
+  `Env` imports `adapters/driven/postgres`, so a suite that lives in that package and uses it must be an
+  external test package (`package postgres_test`): an internal one would be an import cycle.
 
 Waiting for something concurrent is done with `testing/synctest`, not a sleep: `synctest.Wait` returns
 once every goroutine is blocked, so "the worker is still held" is an assertion, not a guess.
