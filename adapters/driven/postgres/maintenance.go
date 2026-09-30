@@ -208,7 +208,96 @@ func (s *Store) EnsurePartitions(ctx context.Context, from time.Time, months int
 	return created, nil
 }
 
-// CheckPartitions implements ports.Maintenance.
+// missingPartitionsSQL returns each table in $1 and month [$2[i], $3[i]) that no
+// partition covers, as the table and the month's ordinal. A partition's bounds
+// are read back from the catalog as "FOR VALUES FROM (x) TO (y)", each side a
+// quoted timestamp or MINVALUE/MAXVALUE, and one table's partitions are merged
+// with range_agg, so a month split across partitions is covered. A default
+// partition is excluded: its bound parses to no range at all, which would read
+// as unbounded, and a row it holds can never be retired (D33).
+const missingPartitionsSQL = `
+WITH covered AS (
+    SELECT i.inhparent AS parent,
+           range_agg(tstzrange(
+               CASE WHEN b.v[1] = 'MINVALUE' THEN NULL ELSE btrim(b.v[1], '''')::timestamptz END,
+               CASE WHEN b.v[2] = 'MAXVALUE' THEN NULL ELSE btrim(b.v[2], '''')::timestamptz END)) AS span
+      FROM pg_inherits i
+      JOIN pg_class c ON c.oid = i.inhrelid
+      JOIN pg_partitioned_table p ON p.partrelid = i.inhparent
+     CROSS JOIN LATERAL regexp_match(pg_get_expr(c.relpartbound, c.oid),
+                                     '^FOR VALUES FROM \((.+)\) TO \((.+)\)$') AS b(v)
+     WHERE c.oid <> p.partdefid
+     GROUP BY i.inhparent
+)
+SELECT t.name, m.n
+  FROM unnest($1::text[]) WITH ORDINALITY AS t(name, pos)
+ CROSS JOIN unnest($2::timestamptz[], $3::timestamptz[]) WITH ORDINALITY AS m(lo, hi, n)
+  LEFT JOIN covered cv ON cv.parent = t.name::regclass
+ WHERE NOT coalesce(cv.span @> tstzrange(m.lo, m.hi), false)
+ ORDER BY m.n, t.pos`
+
+// unscopedSQL returns notifications, and every partition under it at any depth,
+// that recipient scoping does not hold on (D17): row-level security not both
+// enabled and forced; no permissive recipient_scope policy for all commands with
+// the parent's predicate and check; or any other permissive policy, which
+// PostgreSQL ORs with the scope and so widens it. A restrictive policy can only
+// narrow the scope, so it is not a finding.
+const unscopedSQL = `
+WITH parent AS (
+    SELECT pg_get_expr(p.polqual, p.polrelid)      AS qual,
+           pg_get_expr(p.polwithcheck, p.polrelid) AS wcheck
+      FROM pg_policy p
+     WHERE p.polrelid = 'notifications'::regclass AND p.polname = 'recipient_scope'
+)
+SELECT t.relid::regclass::text
+  FROM pg_partition_tree('notifications') t
+  JOIN pg_class c ON c.oid = t.relid
+ WHERE NOT (c.relrowsecurity AND c.relforcerowsecurity)
+    OR NOT EXISTS (
+           SELECT 1 FROM pg_policy p, parent
+            WHERE p.polrelid = c.oid AND p.polname = 'recipient_scope'
+              AND p.polpermissive AND p.polcmd = '*'
+              AND pg_get_expr(p.polqual, p.polrelid) = parent.qual
+              AND pg_get_expr(p.polwithcheck, p.polrelid) IS NOT DISTINCT FROM parent.wcheck)
+    OR EXISTS (
+           SELECT 1 FROM pg_policy p
+            WHERE p.polrelid = c.oid AND p.polname <> 'recipient_scope' AND p.polpermissive)
+ ORDER BY t.relid::regclass::text COLLATE "C"`
+
+// CheckPartitions implements ports.Maintenance. It reads the catalog and
+// nothing else, so it reports the partitions that exist, not the ones
+// provisioning believes it made: a partition detached by hand still has its
+// table, and is still missing. Months are UTC, like EnsurePartitions'.
 func (s *Store) CheckPartitions(ctx context.Context, at time.Time) (domain.PartitionHealth, error) {
-	return domain.PartitionHealth{}, nil
+	at = at.UTC()
+	this := time.Date(at.Year(), at.Month(), 1, 0, 0, 0, 0, time.UTC)
+	months := []time.Time{this, this.AddDate(0, 1, 0)}
+	ends := []time.Time{months[1], months[1].AddDate(0, 1, 0)}
+
+	var h domain.PartitionHealth
+	rows, err := s.pool.Query(ctx, missingPartitionsSQL, partitionedTables, months, ends)
+	if err != nil {
+		return h, fmt.Errorf("check partitions: missing: %w", err)
+	}
+	gaps, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (domain.PartitionGap, error) {
+		var table string
+		var n int
+		if err := r.Scan(&table, &n); err != nil {
+			return domain.PartitionGap{}, err
+		}
+		return domain.PartitionGap{Table: table, Month: months[n-1]}, nil
+	})
+	if err != nil {
+		return h, fmt.Errorf("check partitions: missing: %w", err)
+	}
+	rows, err = s.pool.Query(ctx, unscopedSQL)
+	if err != nil {
+		return h, fmt.Errorf("check partitions: unscoped: %w", err)
+	}
+	unscoped, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return h, fmt.Errorf("check partitions: unscoped: %w", err)
+	}
+	h.Missing, h.Unscoped = gaps, unscoped
+	return h, nil
 }

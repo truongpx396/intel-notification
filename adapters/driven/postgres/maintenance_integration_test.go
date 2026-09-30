@@ -313,6 +313,7 @@ func TestCheckPartitions(t *testing.T) {
 
 	cases := []struct {
 		name      string
+		zone      string    // the database's session time zone, set before any connection
 		provision bool      // EnsurePartitions for March and April 2031 first
 		setup     []string  // then these, as the superuser
 		at        time.Time // zero: mid-March
@@ -354,15 +355,25 @@ func TestCheckPartitions(t *testing.T) {
 				`CREATE TABLE notification_deliveries_2031h1 PARTITION OF notification_deliveries
                      FOR VALUES FROM ('2031-01-01 00:00+00') TO ('2031-07-01 00:00+00')`,
 			}},
-		{name: "unbounded bounds are read", provision: true,
+		{name: "an unbounded upper bound is read", provision: true,
 			setup: []string{
 				`DROP TABLE dead_letters_2031m03`,
 				`DROP TABLE dead_letters_2031m04`,
 				`CREATE TABLE dead_letters_from_2031 PARTITION OF dead_letters
                      FOR VALUES FROM ('2031-01-01 00:00+00') TO (MAXVALUE)`,
-				`CREATE TABLE notification_deliveries_before_2026m09 PARTITION OF notification_deliveries
-                     FOR VALUES FROM (MINVALUE) TO ('2026-09-01 00:00+00')`,
 			}},
+		{name: "an unbounded lower bound is read",
+			at: time.Date(2020, 5, 10, 0, 0, 0, 0, time.UTC),
+			setup: []string{
+				`CREATE TABLE notifications_to_2021 PARTITION OF notifications
+                     FOR VALUES FROM (MINVALUE) TO ('2021-01-01 00:00+00')`,
+				`SELECT notify_apply_recipient_scope('notifications_to_2021')`,
+				`CREATE TABLE notification_deliveries_to_2021 PARTITION OF notification_deliveries
+                     FOR VALUES FROM (MINVALUE) TO ('2021-01-01 00:00+00')`,
+				`CREATE TABLE dead_letters_to_2021 PARTITION OF dead_letters
+                     FOR VALUES FROM (MINVALUE) TO ('2021-01-01 00:00+00')`,
+			}},
+		{name: "bounds are read in any session time zone", zone: "Pacific/Pago_Pago", provision: true},
 		{name: "a default partition is not coverage", provision: true,
 			setup: []string{
 				`DROP TABLE dead_letters_2031m03`,
@@ -442,6 +453,12 @@ END $$`},
 			t.Parallel()
 			e := newEnv(t)
 			ctx := t.Context()
+			if c.zone != "" {
+				if _, err := e.db.Admin.Exec(ctx, `ALTER DATABASE `+pgx.Identifier{e.db.Name}.Sanitize()+
+					` SET TimeZone = '`+c.zone+`'`); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if c.provision {
 				if _, err := e.s.EnsurePartitions(ctx, mar, 2); err != nil {
 					t.Fatal(err)
