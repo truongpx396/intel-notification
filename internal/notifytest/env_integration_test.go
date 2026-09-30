@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/truongpx396/intel-notification/adapters/driven/postgres"
 	"github.com/truongpx396/intel-notification/domain"
+	"github.com/truongpx396/intel-notification/internal/pgtest"
 )
 
 func TestMain(m *testing.M) { os.Exit(Main(m)) }
@@ -37,17 +39,30 @@ func TestEnvGivesEachTestItsOwnDatabase(t *testing.T) {
 	}
 }
 
-// The clock starts at Epoch, and the months around it are provisioned, so a row a
-// test dates from its clock has a partition to land in. The months around the real
-// now are provisioned too, for rows the database dates itself.
-func TestEnvStartsAtItsEpochWithItsPartitions(t *testing.T) {
+// The clock starts at Epoch, so a test's times do not depend on the day it runs.
+func TestEnvStartsAtItsEpoch(t *testing.T) {
 	t.Parallel()
 	e := NewEnv(t)
 	if got := e.Clock.Now(); !got.Equal(Epoch) {
 		t.Fatalf("Clock.Now() = %v, want Epoch %v", got, Epoch)
 	}
-	for name, at := range map[string]time.Time{"the epoch": Epoch, "now": time.Now()} {
-		health, err := e.Maintenance.CheckPartitions(t.Context(), at)
+}
+
+// The template is prepared with the months around the real now and around Epoch,
+// so a row the database dates itself and a row a test dates from its clock both
+// have a partition to land in. The migrations cover a few fixed months and stop
+// covering the real now one day, so this runs prepare with a date far past them:
+// it must not depend on the calendar.
+func TestPrepareProvisionsTheMonthsAroundNowAndTheEpoch(t *testing.T) {
+	t.Parallel()
+	db := pgtest.New(t)
+	future := time.Date(2040, 6, 15, 9, 0, 0, 0, time.UTC)
+	if err := prepare(t.Context(), db.Owner, future); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	store := postgres.New(db.Owner)
+	for name, at := range map[string]time.Time{"now": future, "the epoch": Epoch} {
+		health, err := store.CheckPartitions(t.Context(), at)
 		if err != nil {
 			t.Fatalf("CheckPartitions(%s): %v", name, err)
 		}

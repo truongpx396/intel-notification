@@ -32,9 +32,21 @@ const Realm domain.Realm = "aisat"
 // months around Epoch, for rows a test dates from its fake clock.
 func Main(m *testing.M) int {
 	return pgtest.Main(m, func(ctx context.Context, owner *pgxpool.Pool) error {
-		_, err := postgres.New(owner).EnsurePartitions(ctx, time.Now(), 2)
-		return err
+		return prepare(ctx, owner, time.Now())
 	})
+}
+
+// prepare provisions, as the owner, the month containing each of now and Epoch and
+// the month after it. The migrations create a fixed few months, which stop
+// covering the real now one day; this keeps the suite from failing that day.
+func prepare(ctx context.Context, owner *pgxpool.Pool, now time.Time) error {
+	store := postgres.New(owner)
+	for _, around := range []time.Time{now, Epoch} {
+		if _, err := store.EnsurePartitions(ctx, around, 2); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Env is one test's world: a private PostgreSQL database with the real queue,
@@ -63,15 +75,15 @@ type Env struct {
 	Maintenance ports.Maintenance
 }
 
-// NewEnv returns an Env over a database cloned for t alone, which is dropped when
-// t ends. The code under test is handed DB.Owner, never DB.Admin.
-func NewEnv(t testing.TB) *Env {
-	t.Helper()
-	db := pgtest.New(t)
+// NewEnv returns an Env over a database cloned for tb alone, which is dropped when
+// tb ends. The code under test is handed DB.Owner, never DB.Admin.
+func NewEnv(tb testing.TB) *Env {
+	tb.Helper()
+	db := pgtest.New(tb)
 	store := postgres.New(db.Owner)
 	return &Env{
 		DB:          db,
-		Clock:       NewClock(time.Time{}),
+		Clock:       NewClock(Epoch),
 		Faults:      NewInjector(),
 		Probe:       NewProbe(),
 		Channels:    NewRegistry(),
@@ -90,5 +102,7 @@ func NewEnv(t testing.TB) *Env {
 // Probe, and returns it. It is the one line NS-008 counts: a channel is
 // registered, and nothing else changes.
 func (e *Env) AddChannel(kind domain.ChannelKind, caps domain.ChannelCapabilities) *Channel {
-	return NewChannel(kind, caps, e.Probe)
+	ch := NewChannel(kind, caps, e.Probe)
+	e.Channels.Register(ch)
+	return ch
 }
