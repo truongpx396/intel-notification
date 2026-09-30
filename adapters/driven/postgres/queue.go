@@ -24,25 +24,33 @@ const outboxColumns = `
 //
 // FOR UPDATE SKIP LOCKED makes it safe under any number of concurrent claimers:
 // two workers on one shard, a rolling deploy, a shard-count change. The lease is
-// next_attempt_at itself, so a worker that dies holding rows releases them when
-// it lapses, and the fresh lease_token fences its late writes out. attempts is
+// lease_expires_at, so a worker that dies holding rows releases them when it
+// lapses, and the fresh lease_token fences its late writes out. attempts is
 // incremented here, at claim, so a delivery that crashes its worker every time
 // still reaches the ceiling — counting on failure never counts a crash.
+//
+// The lease is NOT next_attempt_at. That column is indexed, so moving it would
+// make every claim a non-HOT update writing an entry into all five indexes; the
+// columns a claim does write are in none, so the update can stay in its page.
+// The price is that a held row stays in the due range of the claim index and is
+// skipped on the heap check. There are only as many as workers hold, spread over
+// the shards (D19).
 const claimSQL = `
 WITH due AS (
     SELECT id AS due_id
       FROM notification_outbox
      WHERE shard = $1
        AND next_attempt_at <= now()
+       AND (lease_expires_at IS NULL OR lease_expires_at <= now())
      ORDER BY next_attempt_at
      LIMIT $2
        FOR UPDATE SKIP LOCKED
 )
 UPDATE notification_outbox
-   SET attempts        = attempts + 1,
-       lease_token     = gen_random_uuid(),
-       claimed_at      = now(),
-       next_attempt_at = now() + $3::bigint * interval '1 microsecond'
+   SET attempts         = attempts + 1,
+       lease_token      = gen_random_uuid(),
+       claimed_at       = now(),
+       lease_expires_at = now() + $3::bigint * interval '1 microsecond'
   FROM due
  WHERE id = due.due_id
 RETURNING` + outboxColumns
@@ -113,10 +121,11 @@ func scanClaim(row pgx.CollectableRow) (domain.Claim, error) {
 }
 
 // retrySQL records a transient failure and releases the lease. Fenced: it
-// matches nothing unless $2 is the current lease token.
+// matches nothing unless $2 is the current lease token. The lease ends with the
+// token, so a row that is due again at once is claimable at once.
 const retrySQL = `
 UPDATE notification_outbox
-   SET next_attempt_at = $3, last_error = $4, lease_token = NULL
+   SET next_attempt_at = $3, last_error = $4, lease_token = NULL, lease_expires_at = NULL
  WHERE id = $1::uuid AND lease_token = $2::uuid`
 
 // Retry implements ports.Queue.
@@ -132,11 +141,12 @@ func (s *Store) Retry(ctx context.Context, c domain.Claim, next time.Time, lastE
 // Deferral is not failure, so it can never walk a delivery into a dead letter.
 const deferSQL = `
 UPDATE notification_outbox
-   SET next_attempt_at = $3,
-       attempts        = greatest(attempts - 1, 0),
-       deferrals       = deferrals + 1,
-       last_error      = $4,
-       lease_token     = NULL
+   SET next_attempt_at  = $3,
+       attempts         = greatest(attempts - 1, 0),
+       deferrals        = deferrals + 1,
+       last_error       = $4,
+       lease_token      = NULL,
+       lease_expires_at = NULL
  WHERE id = $1::uuid AND lease_token = $2::uuid`
 
 // Defer implements ports.Queue.
@@ -311,14 +321,15 @@ func (s *Store) BindAddresses(ctx context.Context, c domain.Claim, addrs []domai
 }
 
 // deferTenantSQL moves a tenant's due backlog on one channel out of the claim
-// range (D24). next_attempt_at <= now() excludes rows under a live lease, whose
-// lease expiry is in the future; a row whose lease has lapsed is deferred and
-// its token cleared, which fences out the worker that let it lapse.
+// range (D24). The lease check leaves rows a worker holds to that worker; a row
+// whose lease has lapsed is deferred and its token cleared, which fences out the
+// worker that let it lapse.
 const deferTenantSQL = `
 UPDATE notification_outbox
-   SET next_attempt_at = $5, deferrals = deferrals + 1, lease_token = NULL
+   SET next_attempt_at = $5, deferrals = deferrals + 1, lease_token = NULL, lease_expires_at = NULL
  WHERE realm = $1 AND tenant_kind = $2 AND tenant_id = $3 AND channel = $4
-   AND next_attempt_at <= now()`
+   AND next_attempt_at <= now()
+   AND (lease_expires_at IS NULL OR lease_expires_at <= now())`
 
 // DeferTenantChannel implements ports.Queue.
 func (s *Store) DeferTenantChannel(ctx context.Context, realm domain.Realm, t domain.Tenant, ch domain.ChannelKind, until time.Time) (int, error) {
@@ -349,7 +360,7 @@ const cancelDeliveriesSQL = `
 WITH gone AS (
     DELETE FROM notification_outbox
      WHERE notification_id = $1::uuid
-       AND (lease_token IS NULL OR next_attempt_at <= now())
+       AND (lease_expires_at IS NULL OR lease_expires_at <= now())
     RETURNING *
 ), history AS (
     INSERT INTO notification_deliveries (` + historyColumns + `, outcome)
@@ -359,7 +370,7 @@ WITH gone AS (
 SELECT (SELECT count(*) FROM gone),
        (SELECT count(*) FROM notification_outbox
          WHERE notification_id = $1::uuid
-           AND lease_token IS NOT NULL AND next_attempt_at > now())`
+           AND lease_expires_at > now())`
 
 // Cancel implements ports.Queue.
 func (s *Store) Cancel(ctx context.Context, id domain.Identity, idemKey string) (domain.CancelReceipt, error) {

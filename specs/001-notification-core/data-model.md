@@ -132,14 +132,16 @@ leaves when its delivery finishes ([D20](design-decisions.md#d20)), so the table
 | `shard` | A contention hint, stored, never recomputed ([D11](design-decisions.md#d11)) |
 | `attempts` | Counted at claim ([D19](design-decisions.md#d19)) |
 | `deferrals` | Quota and quiet-hours deferrals — not attempts |
-| `next_attempt_at` | Due time; while claimed, the lease expiry |
+| `next_attempt_at` | Due time. A claim does not move it: it is indexed, and moving it would make every claim a non-HOT update ([D19](design-decisions.md#d19)) |
 | `lease_token`, `claimed_at` | The current claim's fence |
+| `lease_expires_at` | When the claim's lease lapses; `NULL` while no claim holds the row. In no index, so a claim can be a HOT update |
 | `deliver_before` | Expiry |
 | `quiet_hours_override` | A critical delivery inside quiet hours ([D9](design-decisions.md#d9)) |
 
 Unique on `(notification_id, channel, address_key)` and on `(digest_id, address_key)`. The claim rides
 `(shard, next_attempt_at)`; bulk tenant deferral rides `(realm, tenant, channel, next_attempt_at)`.
-Autovacuum runs at 1% dead tuples, because every claim, retry and deferral is an `UPDATE`.
+Autovacuum runs at 1% dead tuples, because every claim, retry and deferral is an `UPDATE`, and the
+fillfactor is 60 so an update's new row version fits in the same page.
 
 ### `notification_deliveries` — the delivery history
 
