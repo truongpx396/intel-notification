@@ -1233,7 +1233,8 @@ they are the normative copies and are not repeated here. Their load-bearing rule
 package notify
 
 type Config struct {
-	// Realm is required in library mode and must match ^[a-z0-9][a-z0-9-]{0,62}$.
+	// Realm (a domain.Realm in the code) is required in library mode and must match
+	// ^[a-z0-9][a-z0-9-]{0,62}$.
 	// Service mode ignores it: realms come from RealmBindings (D31).
 	Realm Realm
 
@@ -1263,8 +1264,12 @@ type Config struct {
 	MaxInlineRecipients int    // 1000
 }
 
+// WithDefaults returns a copy with every unset (zero) field given its default. The
+// receiver is not changed, and Realm, StoreDSN and RedisURL have no default.
+func (c Config) WithDefaults() Config
+
 // Validate checks the EFFECTIVE config (defaults applied to a copy) and returns every
-// problem at once. It rejects: an empty or malformed Realm (library mode); empty
+// problem at once, as a *ConfigError that names each field at fault. It rejects: an empty or malformed Realm (library mode); empty
 // StoreDSN or RedisURL; Shards, ClaimBatch, MaxAttempts, DigestMax, UnreadCap or
 // MaxInlineRecipients < 1; ClaimLease or PollInterval <= 0; BackoffCeiling <
 // BackoffBase; IdempotencyWindow < 24h; PreCheckTTL > IdempotencyWindow.

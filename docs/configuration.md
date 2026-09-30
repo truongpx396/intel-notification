@@ -36,8 +36,13 @@ reintroduced the crash-loses-a-channel bug the queue exists to prevent
 
 ## Validation
 
-`Config.Validate()` applies defaults to a copy and returns **every** problem at once, so a misconfigured
-deployment fails at startup with a complete list, before any connection is dialled. It rejects:
+A zero value means "use the default": set a field to override it. `Config.WithDefaults()` returns the
+effective configuration as a copy and leaves the caller's value alone. `Config.Validate()` applies the
+defaults to a copy and returns **every** problem at once, as a `*ConfigError` naming each field at fault,
+so a misconfigured deployment fails at startup with a complete list, before any connection is dialled. It
+judges the effective config, so a rule that compares two fields holds against a default too: a
+`BackoffBase` of `2h` is rejected against the default `1h` ceiling although the ceiling was never set.
+Because zero means "default", the count rules below only ever reject a negative value. It rejects:
 
 - an empty or malformed `Realm` (library mode); an empty `StoreDSN` or `RedisURL`
 - `Shards`, `ClaimBatch`, `MaxAttempts`, `DigestMax`, `UnreadCap` or `MaxInlineRecipients` below 1
