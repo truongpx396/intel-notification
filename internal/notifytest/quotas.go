@@ -40,17 +40,43 @@ func (q *QuotaCounter) SetBudget(k domain.QuotaKey, n int, resetAt time.Time) {
 }
 
 // Lose forgets every budget, as losing Redis does. Every key is unlimited again.
-func (q *QuotaCounter) Lose() {}
+func (q *QuotaCounter) Lose() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	clear(q.budgets)
+}
 
 // Taken is how many units have been taken from k.
-func (q *QuotaCounter) Taken(k domain.QuotaKey) int { return 0 }
+func (q *QuotaCounter) Taken(k domain.QuotaKey) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.taken[k]
+}
 
 // Peek implements ports.QuotaCounter. It consumes nothing.
 func (q *QuotaCounter) Peek(_ context.Context, k domain.QuotaKey) (bool, time.Time, error) {
-	return false, time.Time{}, nil
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	b, ok := q.budgets[k]
+	if !ok {
+		return false, time.Time{}, nil
+	}
+	return b.remaining <= 0, b.resetAt, nil
 }
 
 // Take implements ports.QuotaCounter. It consumes one unit if any is left.
 func (q *QuotaCounter) Take(_ context.Context, k domain.QuotaKey) (bool, time.Time, error) {
-	return false, time.Time{}, nil
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	b, ok := q.budgets[k]
+	if !ok {
+		q.taken[k]++
+		return true, time.Time{}, nil
+	}
+	if b.remaining <= 0 {
+		return false, b.resetAt, nil
+	}
+	b.remaining--
+	q.taken[k]++
+	return true, b.resetAt, nil
 }
