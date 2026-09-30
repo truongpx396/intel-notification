@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -270,5 +271,204 @@ VALUES (gen_random_uuid(), 'aisat', 'workspace', 'w1', 'user', 'u1', 't', 'k', '
 	}
 	if visible != 0 {
 		t.Fatalf("the owner read %d rows of a new partition without a scope", visible)
+	}
+}
+
+// scopePredicate is recipient_scope's USING clause as notify_apply_recipient_scope
+// writes it. Cases that recreate the policy with one thing changed use it, so
+// the one change is the only difference.
+const scopePredicate = `
+    realm          = current_setting('notify.realm', true)
+AND tenant_kind    = current_setting('notify.tenant_kind', true)
+AND tenant_id      = current_setting('notify.tenant_id', true)
+AND recipient_kind = current_setting('notify.recipient_kind', true)
+AND recipient_id   = current_setting('notify.recipient_id', true)`
+
+// NR-022, D17, D33. CheckPartitions reads, from the catalog alone, what the two
+// partition alarms fire on: a month, this one or the next, that a
+// range-partitioned table has no partition for, so inserts dated in it fail;
+// and notifications or a partition of it that recipient scoping does not hold
+// on, so reading it by name shows every recipient's rows. The months are 2031's,
+// clear of the partitions the template carries for the current month.
+func TestCheckPartitions(t *testing.T) {
+	t.Parallel()
+	mar := time.Date(2031, 3, 1, 0, 0, 0, 0, time.UTC)
+	apr := time.Date(2031, 4, 1, 0, 0, 0, 0, time.UTC)
+	may := time.Date(2031, 5, 1, 0, 0, 0, 0, time.UTC)
+	midMarch := time.Date(2031, 3, 17, 13, 0, 0, 0, time.UTC)
+	const (
+		n  = "notifications"
+		nd = "notification_deliveries"
+		dl = "dead_letters"
+	)
+	gap := func(table string, month time.Time) domain.PartitionGap {
+		return domain.PartitionGap{Table: table, Month: month}
+	}
+	recreate := func(partition, policy string) []string {
+		return []string{
+			`DROP POLICY recipient_scope ON ` + partition,
+			`CREATE POLICY recipient_scope ON ` + partition + ` ` + policy,
+		}
+	}
+
+	cases := []struct {
+		name      string
+		provision bool      // EnsurePartitions for March and April 2031 first
+		setup     []string  // then these, as the superuser
+		at        time.Time // zero: mid-March
+		want      domain.PartitionHealth
+	}{
+		// Missing.
+		{name: "every table has this month and the next", provision: true},
+		{name: "nothing provisioned: every table misses both months",
+			want: domain.PartitionHealth{Missing: []domain.PartitionGap{
+				gap(n, mar), gap(nd, mar), gap(dl, mar), gap(n, apr), gap(nd, apr), gap(dl, apr)}}},
+		{name: "next month missing from one table", provision: true,
+			setup: []string{`DROP TABLE dead_letters_2031m04`},
+			want:  domain.PartitionHealth{Missing: []domain.PartitionGap{gap(dl, apr)}}},
+		{name: "this month missing from one table", provision: true,
+			setup: []string{`DROP TABLE notification_deliveries_2031m03`},
+			want:  domain.PartitionHealth{Missing: []domain.PartitionGap{gap(nd, mar)}}},
+		{name: "a month split across two partitions is covered", provision: true,
+			setup: []string{
+				`DROP TABLE notifications_2031m03`,
+				`CREATE TABLE notifications_2031m03a PARTITION OF notifications
+                     FOR VALUES FROM ('2031-03-01 00:00+00') TO ('2031-03-16 00:00+00')`,
+				`CREATE TABLE notifications_2031m03b PARTITION OF notifications
+                     FOR VALUES FROM ('2031-03-16 00:00+00') TO ('2031-04-01 00:00+00')`,
+				`SELECT notify_apply_recipient_scope('notifications_2031m03a')`,
+				`SELECT notify_apply_recipient_scope('notifications_2031m03b')`,
+			}},
+		{name: "half a month is missing", provision: true,
+			setup: []string{
+				`DROP TABLE notifications_2031m03`,
+				`CREATE TABLE notifications_2031m03a PARTITION OF notifications
+                     FOR VALUES FROM ('2031-03-01 00:00+00') TO ('2031-03-16 00:00+00')`,
+				`SELECT notify_apply_recipient_scope('notifications_2031m03a')`,
+			},
+			want: domain.PartitionHealth{Missing: []domain.PartitionGap{gap(n, mar)}}},
+		{name: "one partition spanning several months covers each", provision: true,
+			setup: []string{
+				`DROP TABLE notification_deliveries_2031m03`,
+				`DROP TABLE notification_deliveries_2031m04`,
+				`CREATE TABLE notification_deliveries_2031h1 PARTITION OF notification_deliveries
+                     FOR VALUES FROM ('2031-01-01 00:00+00') TO ('2031-07-01 00:00+00')`,
+			}},
+		{name: "unbounded bounds are read", provision: true,
+			setup: []string{
+				`DROP TABLE dead_letters_2031m03`,
+				`DROP TABLE dead_letters_2031m04`,
+				`CREATE TABLE dead_letters_from_2031 PARTITION OF dead_letters
+                     FOR VALUES FROM ('2031-01-01 00:00+00') TO (MAXVALUE)`,
+				`CREATE TABLE notification_deliveries_before_2026m09 PARTITION OF notification_deliveries
+                     FOR VALUES FROM (MINVALUE) TO ('2026-09-01 00:00+00')`,
+			}},
+		{name: "a default partition is not coverage", provision: true,
+			setup: []string{
+				`DROP TABLE dead_letters_2031m03`,
+				`CREATE TABLE dead_letters_default PARTITION OF dead_letters DEFAULT`,
+			},
+			want: domain.PartitionHealth{Missing: []domain.PartitionGap{gap(dl, mar)}}},
+		{name: "a detached partition is missing although its table remains", provision: true,
+			setup: []string{`ALTER TABLE notification_deliveries DETACH PARTITION notification_deliveries_2031m04`},
+			want:  domain.PartitionHealth{Missing: []domain.PartitionGap{gap(nd, apr)}}},
+		{name: "a table with no partitions at all", provision: true,
+			setup: []string{`
+DO $$
+DECLARE r record;
+BEGIN
+    FOR r IN SELECT inhrelid::regclass AS p FROM pg_inherits WHERE inhparent = 'dead_letters'::regclass
+    LOOP
+        EXECUTE format('ALTER TABLE dead_letters DETACH PARTITION %s', r.p);
+    END LOOP;
+END $$`},
+			want: domain.PartitionHealth{Missing: []domain.PartitionGap{gap(dl, mar), gap(dl, apr)}}},
+		{name: "the month is the UTC month", provision: true,
+			// 22:00 on 31 March at UTC-5 is already April in UTC, so the months are April and May.
+			at: time.Date(2031, 3, 31, 22, 0, 0, 0, time.FixedZone("UTC-5", -5*60*60)),
+			want: domain.PartitionHealth{Missing: []domain.PartitionGap{
+				gap(n, may), gap(nd, may), gap(dl, may)}}},
+
+		// Unscoped.
+		{name: "a partition created by hand without the scope", provision: true,
+			setup: []string{`CREATE TABLE notifications_2031m05 PARTITION OF notifications
+                                 FOR VALUES FROM ('2031-05-01 00:00+00') TO ('2031-06-01 00:00+00')`},
+			want: domain.PartitionHealth{Unscoped: []string{"notifications_2031m05"}}},
+		{name: "row-level security enabled but not forced", provision: true,
+			setup: []string{`ALTER TABLE notifications_2031m03 NO FORCE ROW LEVEL SECURITY`},
+			want:  domain.PartitionHealth{Unscoped: []string{"notifications_2031m03"}}},
+		{name: "row-level security disabled", provision: true,
+			setup: []string{`ALTER TABLE notifications_2031m04 DISABLE ROW LEVEL SECURITY`},
+			want:  domain.PartitionHealth{Unscoped: []string{"notifications_2031m04"}}},
+		{name: "the parent not forced", provision: true,
+			setup: []string{`ALTER TABLE notifications NO FORCE ROW LEVEL SECURITY`},
+			want:  domain.PartitionHealth{Unscoped: []string{"notifications"}}},
+		{name: "the scope policy dropped from a bootstrap partition", provision: true,
+			setup: []string{`DROP POLICY recipient_scope ON notifications_2026m09`},
+			want:  domain.PartitionHealth{Unscoped: []string{"notifications_2026m09"}}},
+		{name: "the scope policy recreated as it was", provision: true,
+			setup: recreate("notifications_2031m03", `USING (`+scopePredicate+`)`)},
+		{name: "a looser predicate", provision: true,
+			setup: recreate("notifications_2031m03", `USING (realm = current_setting('notify.realm', true))`),
+			want:  domain.PartitionHealth{Unscoped: []string{"notifications_2031m03"}}},
+		{name: "a looser check on writes", provision: true,
+			setup: recreate("notifications_2031m03", `USING (`+scopePredicate+`) WITH CHECK (true)`),
+			want:  domain.PartitionHealth{Unscoped: []string{"notifications_2031m03"}}},
+		{name: "the scope for reads only", provision: true,
+			setup: recreate("notifications_2031m03", `FOR SELECT USING (`+scopePredicate+`)`),
+			want:  domain.PartitionHealth{Unscoped: []string{"notifications_2031m03"}}},
+		{name: "the scope restrictive, with no permissive policy", provision: true,
+			setup: recreate("notifications_2031m03", `AS RESTRICTIVE USING (`+scopePredicate+`)`),
+			want:  domain.PartitionHealth{Unscoped: []string{"notifications_2031m03"}}},
+		{name: "another permissive policy widens the scope", provision: true,
+			setup: []string{`CREATE POLICY peek ON notifications_2031m03 FOR SELECT USING (true)`},
+			want:  domain.PartitionHealth{Unscoped: []string{"notifications_2031m03"}}},
+		{name: "another restrictive policy only narrows it", provision: true,
+			setup: []string{`CREATE POLICY narrow ON notifications_2031m03 AS RESTRICTIVE USING (topic <> 'hidden')`}},
+		{name: "an unscoped partition of a partition", provision: true,
+			setup: []string{
+				`DROP TABLE notifications_2031m04`,
+				`CREATE TABLE notifications_2031m04 PARTITION OF notifications
+                     FOR VALUES FROM ('2031-04-01 00:00+00') TO ('2031-05-01 00:00+00')
+                     PARTITION BY RANGE (created_at)`,
+				`SELECT notify_apply_recipient_scope('notifications_2031m04')`,
+				`CREATE TABLE notifications_2031m04_all PARTITION OF notifications_2031m04
+                     FOR VALUES FROM ('2031-04-01 00:00+00') TO ('2031-05-01 00:00+00')`,
+			},
+			want: domain.PartitionHealth{Unscoped: []string{"notifications_2031m04_all"}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			ctx := t.Context()
+			if c.provision {
+				if _, err := e.s.EnsurePartitions(ctx, mar, 2); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, sql := range c.setup {
+				if _, err := e.db.Admin.Exec(ctx, sql); err != nil {
+					t.Fatalf("setup %q: %v", sql, err)
+				}
+			}
+			at := c.at
+			if at.IsZero() {
+				at = midMarch
+			}
+
+			got, err := e.s.CheckPartitions(ctx, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.EqualFunc(got.Missing, c.want.Missing, func(a, b domain.PartitionGap) bool {
+				return a.Table == b.Table && a.Month.Equal(b.Month)
+			}) {
+				t.Errorf("missing %v, want %v", got.Missing, c.want.Missing)
+			}
+			if !slices.Equal(got.Unscoped, c.want.Unscoped) {
+				t.Errorf("unscoped %v, want %v", got.Unscoped, c.want.Unscoped)
+			}
+		})
 	}
 }

@@ -207,3 +207,8 @@ func (s *Store) EnsurePartitions(ctx context.Context, from time.Time, months int
 	}
 	return created, nil
 }
+
+// CheckPartitions implements ports.Maintenance.
+func (s *Store) CheckPartitions(ctx context.Context, at time.Time) (domain.PartitionHealth, error) {
+	return domain.PartitionHealth{}, nil
+}
