@@ -3,6 +3,9 @@ package notifytest
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/truongpx396/intel-notification/domain"
@@ -42,29 +45,73 @@ func NewProbe() *Probe {
 
 // Sends is how many sends with this key reached the provider. A provider that
 // dedupes collapses a re-drive into one.
-func (p *Probe) Sends(key string) int { return 0 }
+func (p *Probe) Sends(key string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.sends[key]
+}
 
 // Calls is how many times a channel was asked to send with this key, including the
 // re-drives a deduping provider collapsed, and the attempts that failed.
-func (p *Probe) Calls(key string) int { return 0 }
+func (p *Probe) Calls(key string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls[key]
+}
 
 // Total is the number of sends that reached the provider, over every key.
-func (p *Probe) Total() int { return 0 }
+func (p *Probe) Total() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for _, sends := range p.sends {
+		n += sends
+	}
+	return n
+}
 
 // Keys lists every key a channel was asked to send, sorted.
-func (p *Probe) Keys() []string { return nil }
+func (p *Probe) Keys() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Sorted(maps.Keys(p.calls))
+}
 
 // FailNext arms one failure for a coming send. Failures are consumed in the order
 // armed, one per send attempt.
-func (p *Probe) FailNext(f Failure) {}
+func (p *Probe) FailNext(f Failure) {
+	if f < Transient || f > Infrastructure {
+		panic(fmt.Sprintf("notifytest: %d is not a failure a probe can inject", int(f)))
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.failures = append(p.failures, f)
+}
 
-// take consumes the next armed failure, if any.
-func (p *Probe) take() (Failure, bool) { return 0, false }
+// call records that a channel was asked to send key, and takes the next armed
+// failure, if any, in the same step so concurrent calls each get their own.
+func (p *Probe) call(key string) (Failure, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls[key]++
+	if len(p.failures) == 0 {
+		return 0, false
+	}
+	f := p.failures[0]
+	p.failures = p.failures[1:]
+	return f, true
+}
 
-// observe records a send attempt with key. It returns whether the send reached the
-// provider: always for a provider that does not dedupe, and only the first time
-// for one that does.
-func (p *Probe) observe(key string, dedupes bool) bool { return false }
+// send records that a send with key reached the provider. A provider that dedupes
+// counts it only the first time.
+func (p *Probe) send(key string, dedupes bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if dedupes && p.sends[key] > 0 {
+		return
+	}
+	p.sends[key]++
+}
 
 // Channel is a fake ports.Channel that reports to a [Probe]. It honours the Dedup
 // level it was given the way a real channel at that level would, and it turns an
@@ -91,6 +138,20 @@ func (c *Channel) Kind() domain.ChannelKind { return c.kind }
 func (c *Channel) Capabilities() domain.ChannelCapabilities { return c.caps }
 
 // Deliver implements ports.Channel.
-func (c *Channel) Deliver(ctx context.Context, d domain.Delivery) (domain.DeliveryResult, error) {
-	return domain.DeliveryResult{Outcome: domain.Delivered}, nil
+func (c *Channel) Deliver(_ context.Context, d domain.Delivery) (domain.DeliveryResult, error) {
+	if f, failed := c.probe.call(d.IdemKey); failed {
+		switch f {
+		case Transient:
+			return domain.DeliveryResult{Outcome: domain.Retry, Detail: "injected transient failure"}, nil
+		case DeadAddress:
+			return domain.DeliveryResult{Outcome: domain.Suppressed, SuppressReason: domain.SuppressHardBounce,
+				Detail: "injected dead address"}, nil
+		case Permanent:
+			return domain.DeliveryResult{Outcome: domain.Rejected, Detail: "injected permanent refusal"}, nil
+		default:
+			return domain.DeliveryResult{}, ErrInfrastructure
+		}
+	}
+	c.probe.send(d.IdemKey, c.caps.Dedup >= domain.DedupLocal)
+	return domain.DeliveryResult{Outcome: domain.Delivered, ProviderMessageID: "msg-" + d.IdemKey}, nil
 }

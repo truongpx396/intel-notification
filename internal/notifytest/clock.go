@@ -15,6 +15,7 @@
 package notifytest
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -34,12 +35,28 @@ var _ ports.Clock = (*Clock)(nil)
 func NewClock(start time.Time) *Clock { return &Clock{now: start} }
 
 // Now returns the clock's time. Reading it does not move it.
-func (c *Clock) Now() time.Time { return time.Time{} }
+func (c *Clock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
 
 // Advance moves the clock forward by d and returns the new time. A negative d
 // panics: a clock that runs backwards hides the bugs a test is there to find; use
 // Set when a test really means to jump.
-func (c *Clock) Advance(d time.Duration) time.Time { return time.Time{} }
+func (c *Clock) Advance(d time.Duration) time.Time {
+	if d < 0 {
+		panic(fmt.Sprintf("notifytest: Clock.Advance(%v): a clock does not run backwards; use Set", d))
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+	return c.now
+}
 
 // Set moves the clock to t, forwards or backwards.
-func (c *Clock) Set(t time.Time) {}
+func (c *Clock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = t
+}

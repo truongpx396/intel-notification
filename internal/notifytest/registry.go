@@ -2,6 +2,8 @@ package notifytest
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sync"
 
 	"github.com/truongpx396/intel-notification/domain"
@@ -30,13 +32,29 @@ func NewRegistry(chs ...ports.Channel) *Registry {
 // Register adds c under its kind. A kind registered twice, or an empty one, is a
 // wiring mistake, so it panics.
 func (r *Registry) Register(c ports.Channel) {
-	if c.Kind() == "" {
+	kind := c.Kind()
+	if kind == "" {
 		panic(fmt.Sprintf("notifytest: a channel with an empty kind: %T", c))
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, dup := r.m[kind]; dup {
+		panic(fmt.Sprintf("notifytest: channel kind %q is registered twice", kind))
+	}
+	r.m[kind] = c
 }
 
 // Get returns the channel registered for kind.
-func (r *Registry) Get(kind domain.ChannelKind) (ports.Channel, bool) { return nil, false }
+func (r *Registry) Get(kind domain.ChannelKind) (ports.Channel, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.m[kind]
+	return c, ok
+}
 
 // Kinds lists the registered kinds, sorted.
-func (r *Registry) Kinds() []domain.ChannelKind { return nil }
+func (r *Registry) Kinds() []domain.ChannelKind {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Sorted(maps.Keys(r.m))
+}
