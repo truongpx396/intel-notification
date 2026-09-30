@@ -105,6 +105,30 @@ Rules:
   that can hold a recipient from the database catalog, not from the adapter's own list, so a table the
   code forgot — or one added later — fails the test.
 
+### The kit: `internal/notifytest`
+
+Every suite above the store is written against one kit, so a Red test can exist before the code it
+drives. It holds a fake clock that moves only when told, fault injection, a probe that counts sends
+per idempotency key, and a channel registry. The read-side fakes and `Env` follow.
+
+- **`Clock`.** `Advance` and `Set` are the only things that move it. A test never sleeps.
+- **`Injector`.** The dispatcher calls `Reach` at each of its nine `domain.DispatchStep`s. `PanicAt`
+  crashes the worker there (`Survive` catches it, standing in for the process dying) and `StallAt`
+  holds it until `Release` or its context ends. A fault fires once, at the named step, and disarms;
+  several at one step fire in the order armed.
+- **`FaultStore.FailNextCommit`.** Wraps a `ports.Store` and, through the port's own transaction seam,
+  rolls back the next commit after the store's writes are done: the failure that matters for D18,
+  injected with nothing added to the adapter.
+- **`Probe` and `Channel`.** The probe counts sends and calls per key and injects a failure into a
+  coming send; the channel honours the `Dedup` level it declares, so a re-drive collapses only where a
+  real channel at that level would.
+- **`Registry`.** A `ports.ChannelRegistry`: registering a channel is one line.
+- There is no fake `Queue` or `Store`, on purpose: their leases, fencing and row-level security only
+  PostgreSQL can hold, and a fake that passed where the real one fails would be worse than none.
+
+Waiting for something concurrent is done with `testing/synctest`, not a sleep: `synctest.Wait` returns
+once every goroutine is blocked, so "the worker is still held" is an assertion, not a guess.
+
 ### Mutation-check what matters
 
 A test that cannot fail proves nothing. For each guarantee worth a test, break it on purpose once and

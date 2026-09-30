@@ -25,7 +25,7 @@ components:
   ports:      { in: ports }
   driven:     { in: adapters/driven/** }
   migrations: { in: migrations }         # the embedded schema
-  testing:    { in: internal/pgtest }    # integration-test support only
+  testing:    { in: internal/** }        # test support only: pgtest, notifytest
   # app:      { in: app/** }             # uncomment with the first use-case
   # driving:  { in: adapters/driving/** }
   # api:      { in: api/** }             # generated protobuf
@@ -37,7 +37,7 @@ deps:
   config:     { mayDependOn: [ domain ] }                          # Config.Realm is a domain.Realm
   ports:      { mayDependOn: [ domain ] }
   driven:     { mayDependOn: [ domain, ports, migrations ] }       # implements ports; NOT app
-  testing:    { mayDependOn: [ migrations ] }
+  testing:    { mayDependOn: [ domain, ports, migrations ] }
   # app:      { mayDependOn: [ config, domain, ports ] }       # app.New takes a Config
   # driving:  { mayDependOn: [ domain, ports, api ] }
   # cmd:      { mayDependOn: [ config, domain, ports, app, driven, driving, api, migrations ] }
