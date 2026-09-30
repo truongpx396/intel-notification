@@ -37,7 +37,7 @@ deps:
   config:     { mayDependOn: [ domain ] }                          # Config.Realm is a domain.Realm
   ports:      { mayDependOn: [ domain ] }
   driven:     { mayDependOn: [ domain, ports, migrations ] }       # implements ports; NOT app
-  testing:    { mayDependOn: [ domain, ports, migrations ] }
+  testing:    { mayDependOn: [ domain, ports, migrations, driven ] }   # Env wires the PostgreSQL adapter
   # app:      { mayDependOn: [ config, domain, ports ] }       # app.New takes a Config
   # driving:  { mayDependOn: [ domain, ports, api ] }
   # cmd:      { mayDependOn: [ config, domain, ports, app, driven, driving, api, migrations ] }
