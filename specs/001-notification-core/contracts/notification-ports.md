@@ -335,6 +335,18 @@ type CancelReceipt struct {
 	InFlight int // under a live lease: may already be at the provider (D29)
 }
 
+// PartitionHealth is what Maintenance.CheckPartitions reads from the catalog; its zero value is
+// healthy. It backs the notify.partition.missing and notify.partition.unscoped alarms.
+type PartitionHealth struct {
+	Missing  []PartitionGap // this month and the next, per range-partitioned table, with no partition covering it
+	Unscoped []string       // notifications, or a partition of it, that recipient scoping does not hold on (D17)
+}
+
+type PartitionGap struct {
+	Table string
+	Month time.Time // the UTC start of the month
+}
+
 type StatusRequest = CancelRequest
 
 type DeliveryStatus struct {
@@ -538,6 +550,14 @@ type Maintenance interface {
 	ExpireDigests(ctx context.Context, olderThan time.Time, batch int) (int, error)      // D4
 	Erase(ctx context.Context, id Identity) (map[string]int, error)                      // D35
 	EnsurePartitions(ctx context.Context, from time.Time, months int) ([]string, error)  // scopes new partitions (D17)
+	// CheckPartitions reads the catalog and changes nothing. Missing: for notifications,
+	// notification_deliveries and dead_letters, the month containing at and the next, when no
+	// non-default partition covers it (bounds read from pg_get_expr(relpartbound), merged, tested
+	// against the UTC month). Unscoped: notifications or any partition of it where row-level security
+	// is not both enabled and forced, the permissive recipient_scope policy for all commands is absent or
+	// differs from the parent's, or any other permissive policy exists. The maintenance job (T038)
+	// raises the alarms from it.
+	CheckPartitions(ctx context.Context, at time.Time) (PartitionHealth, error)
 	// Still to come: RetirePartitions (T038), ReplayDeadLetter (T032).
 }
 

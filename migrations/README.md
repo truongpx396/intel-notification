@@ -48,9 +48,10 @@ see [docs/operations.md](../docs/operations.md#partition-provisioning).
 
 Every new `notifications` partition **must** be passed to `notify_apply_recipient_scope()`. PostgreSQL
 does not carry a parent's row-level security to its partitions, so an unscoped partition queried by name
-shows every recipient's rows. `verify-schema` TEST 5 fails on one.
+shows every recipient's rows. `verify-schema` TEST 5 fails on one, and at run time
+`Maintenance.CheckPartitions` reports one.
 
-There is deliberately **no default partition**. A missing partition makes an insert fail loudly, which
+There is deliberately **no default partition** (`verify-schema` TEST 13 fails on one). A missing partition makes an insert fail loudly, which
 is recoverable; a default partition silently absorbs those rows and can never be retired, which is not.
 
 ## Adding a migration

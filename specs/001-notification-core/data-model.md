@@ -64,10 +64,12 @@ Three rules make it hold ([D17](design-decisions.md#d17)):
   unless forced.
 - **On every partition**, because PostgreSQL applies a partitioned table's policy only to queries
   through the parent. Partition provisioning calls `notify_apply_recipient_scope()` for each new
-  partition, and TEST 5 fails if any partition lacks it.
+  partition, and TEST 5 fails if any partition lacks it. `Maintenance.CheckPartitions` reports, from
+  the catalog at run time, a `notifications` partition where the scope does not hold.
 - **Set per transaction** with `set_config(name, value, true)`. A session `SET` on a pooled connection
   outlives the request. Identity columns reject `''`, so an unset scope — which reads back as `''` once
-  any transaction in the session has set it — matches nothing.
+  any transaction in the session has set it — matches nothing. TEST 14 asserts it for every
+  recipient-scoped table, found from the catalog, and for each of the five components.
 
 The remaining tables that hold a recipient — `notify_idem`, `notification_outbox`,
 `notification_deliveries`, `dead_letters`, `digest_buffer` — are **worker-only**: never read on a
@@ -100,7 +102,8 @@ because the row is *both* the inbox entry and the dedup record (NR-001).
 
 **Partitioned** by range on `created_at`; retention drops whole partitions — read and unread alike
 ([D33](design-decisions.md#d33)). There is deliberately **no default partition**: a missing partition
-fails an insert loudly rather than silently filling a catch-all that can never be retired.
+fails an insert loudly rather than silently filling a catch-all that can never be retired. TEST 13
+asserts that no partitioned table has one and that a row dated outside every partition is refused.
 
 Two indexes: `notifications_recipient_idx (identity, created_at DESC)` for the list and per-recipient
 maintenance, and the partial `notifications_unread_idx` over unread, visible, unarchived, uncanceled
@@ -193,7 +196,8 @@ error, and `replayed_at`. Partitioned, retained for `DeadLetterRetention`.
 One row per window; `member_ids` bounded by `DigestMax`. At most one window per
 `(recipient, topic, channel)` has `sealed_at IS NULL`; a full or due window is sealed, then flushed once
 ([D4](design-decisions.md#d4)). Flushed windows whose delivery finished are deleted by
-`Maintenance.ExpireDigests`.
+`Maintenance.ExpireDigests`. A window is never flushed before it is sealed, so a digest cannot miss
+a member still to arrive (TEST 7).
 
 ### `channel_quotas` — per-tenant channel budget
 
@@ -240,6 +244,7 @@ runs every transition against PostgreSQL 16 as the table owner.
 | `Maintenance.TryLeaseJob(job, owner, ttl)` | Single-owner lease | `TestTryLeaseJob` |
 | `Maintenance.Erase(identity)` | Erase one recipient everywhere; record by hash | `TestErase` |
 | `Maintenance.EnsurePartitions(from, months)` | Create missing monthly partitions; scope every new `notifications` partition | `TestEnsurePartitions` |
+| `Maintenance.CheckPartitions(at)` | Read the catalog for the alarms: each table with no partition covering `at`'s month or the next, and each `notifications` partition the recipient scope does not hold on. Changes nothing | `TestCheckPartitions` |
 
 Every state change on a claim takes its lease token and changes nothing without it.
 
@@ -271,7 +276,8 @@ tag — tagging it by realm would put a whole product's traffic on one slot.
 5. An address, once bound to a delivery, is never re-bound.
 6. The unread count is recomputed from rows; any cached count is advisory.
 7. Retention retires inbox, history and dead-letter partitions independently; partition provisioning
-   applies the scope policy to every new `notifications` partition.
+   applies the scope policy to every new `notifications` partition, and `CheckPartitions` reports any
+   that lacks it.
 
 These are asserted by the contract tests in
 [contracts/notification-ports.md](contracts/notification-ports.md#contract-tests), because a schema

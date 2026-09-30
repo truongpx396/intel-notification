@@ -73,11 +73,19 @@ rule above.
       which moved into the Go adapter — [D37](design-decisions.md#d37).)*
 - [x] **T005** `scripts/verify-schema.sql` + `make verify-schema`: the schema tests, run as the table
       owner, each raising on failure, including the proof that the inherited constraint cannot be
-      constructed and a mutation check on the partition-scope test (NS-001, NS-002)
+      constructed and a mutation check on the partition-scope test (NS-001, NS-002). *Extended, each
+      assertion mutation-checked ([ledger](../../docs/mutations.md)): no default partition and a dated
+      insert with no partition (13); an empty identity component on every scoped table (14); one
+      pending delivery per address (15); a digest window cannot flush before it seals (7); a whole
+      quota tenant pair, one active template version and one broadcast audience source (10)*
 - [x] **T006** Partition provisioning: `Maintenance.EnsurePartitions` creates each missing month of
       `notifications`, `notification_deliveries` and `dead_letters` and scopes every new `notifications`
-      partition; `TestEnsurePartitions` (NR-008, NR-022). *Still to do: the `notify.partition.missing`
-      and `notify.partition.unscoped` alarms, with T038.*
+      partition; `TestEnsurePartitions` (NR-008, NR-022). `Maintenance.CheckPartitions(ctx, at)` detects
+      the two alarm conditions from the catalog alone and returns `domain.PartitionHealth`: `Missing`,
+      the months, `at`'s and the next, that no non-default partition of a table covers, and `Unscoped`,
+      the `notifications` partitions recipient scoping does not hold on. `TestCheckPartitions`, every
+      guarantee mutation-checked ([ledger](../../docs/mutations.md)). *Emitting* `notify.partition.missing`
+      and `notify.partition.unscoped` from that report is the maintenance job's, with T038
 
 ## Stage 2 — Domain and ports
 
@@ -304,13 +312,16 @@ rule above.
       delivery outstanding leaves that delivery drivable. Written against `RetirePartitions` before it
       exists
 - [ ] **T038** *red → green* `app/maintenance.go`: leased jobs for retention (inbox, history, dead
-      letters), partition provisioning (T006), idempotency and digest expiry, completed-broadcast cleanup
-      (NR-022, [D33](design-decisions.md#d33)). Make T039 pass.
+      letters), partition provisioning and its check (T006), idempotency and digest expiry,
+      completed-broadcast cleanup (NR-022, [D33](design-decisions.md#d33)). Make T039 pass.
       **Red first:** two workers contending for a job run it once; a re-run of each job changes nothing;
-      retiring a partition is a metadata operation, so `n_tup_del` on the table does not move; a missing
-      next-month partition raises `notify.partition.missing`, and a partition created by hand without the
-      scope raises `notify.partition.unscoped` (the T006 alarms).
-      **Mutate:** retire with `DELETE`; skip the lease
+      retiring a partition is a metadata operation, so `n_tup_del` on the table does not move; the
+      partition check runs at startup and on its schedule, and against a fake `Maintenance` whose
+      `CheckPartitions` returns a `PartitionHealth`, each `Missing` gap raises `notify.partition.missing`
+      naming its table and month, each `Unscoped` partition raises `notify.partition.unscoped` naming
+      it, and a healthy report raises neither. Detecting the conditions is T006's, tested there against
+      PostgreSQL; this task tests only that the job turns a report into the two alarms.
+      **Mutate:** retire with `DELETE`; skip the lease; drop the `Unscoped` half of the report
 - [ ] **T040** *red → green* `app/erasure.go` + `Admin.Erase`; test NS-012.
       **Red first:** erase a recipient, then scan every table listed by the database catalog, not by the
       adapter, and find no row carrying the recipient; the erasure record keeps no identity; a suppression
@@ -432,8 +443,8 @@ that lists no red task has no test scheduled.
 
 | Criterion | Proven by | Written (red) in |
 |---|---|---|
-| NS-001 recipient scoping | schema tests 4 and 5 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020, T024, T047, T047a |
-| NS-002 exactly once, per channel | `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T020, T024, T029 |
+| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020, T024, T047, T047a |
+| NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020, T024, T029 |
 | NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020, T033 |
 | NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
 | NS-005 digest burst | burst test | T035 |
