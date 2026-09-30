@@ -20,6 +20,7 @@ excludeFiles:
   - "^.*_test\\.go$"        # tests may reach across layers to set up fixtures
 
 components:
+  config:     { in: . }                  # config.go: the one configuration surface
   domain:     { in: domain }
   ports:      { in: ports }
   driven:     { in: adapters/driven/** }
@@ -33,9 +34,10 @@ components:
 # A component absent from `deps` may depend on nothing in the project: domain is
 # pure, and migrations (like api, later) is data.
 deps:
+  config:     { mayDependOn: [ domain ] }                          # Config.Realm is a domain.Realm
   ports:      { mayDependOn: [ domain ] }
   driven:     { mayDependOn: [ domain, ports, migrations ] }       # implements ports; NOT app
   testing:    { mayDependOn: [ migrations ] }
-  # app:      { mayDependOn: [ domain, ports ] }
+  # app:      { mayDependOn: [ config, domain, ports ] }       # app.New takes a Config
   # driving:  { mayDependOn: [ domain, ports, api ] }
-  # cmd:      { mayDependOn: [ domain, ports, app, driven, driving, api, migrations ] }
+  # cmd:      { mayDependOn: [ config, domain, ports, app, driven, driving, api, migrations ] }
