@@ -3,6 +3,8 @@
 package notify
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/truongpx396/intel-notification/domain"
@@ -60,12 +62,119 @@ type ConfigError struct {
 }
 
 // Error implements error.
-func (e *ConfigError) Error() string { return "" }
+func (e *ConfigError) Error() string {
+	var b strings.Builder
+	b.WriteString("invalid configuration:")
+	for _, p := range e.Problems {
+		b.WriteString("\n  ")
+		b.WriteString(p.Field)
+		b.WriteString(": ")
+		b.WriteString(p.Message)
+	}
+	return b.String()
+}
+
+// minIdempotencyWindow is the shortest window a key can guard replays for. A
+// producer's retries and a bus's redeliveries outlive anything shorter, and the
+// industry norm is the same (D21).
+const minIdempotencyWindow = 24 * time.Hour
 
 // WithDefaults returns a copy of c with every unset field given its default.
-// The receiver is not changed.
-func (c Config) WithDefaults() Config { return c }
+// The receiver is not changed: Config holds no slice, map or pointer, so the
+// copy shares nothing with it.
+func (c Config) WithDefaults() Config {
+	c.Shards = orDefault(c.Shards, 16)
+	c.ClaimLease = orDefault(c.ClaimLease, 5*time.Minute)
+	c.ClaimBatch = orDefault(c.ClaimBatch, 100)
+	c.PollInterval = orDefault(c.PollInterval, 500*time.Millisecond)
+	c.MaxAttempts = orDefault(c.MaxAttempts, 5)
+	c.BackoffBase = orDefault(c.BackoffBase, 10*time.Second)
+	c.BackoffCeiling = orDefault(c.BackoffCeiling, time.Hour)
+	c.IdempotencyWindow = orDefault(c.IdempotencyWindow, 7*24*time.Hour)
+	c.PreCheckTTL = orDefault(c.PreCheckTTL, 24*time.Hour)
+	c.RetentionWindow = orDefault(c.RetentionWindow, 90*24*time.Hour)
+	c.DeliveryLogRetention = orDefault(c.DeliveryLogRetention, 30*24*time.Hour)
+	c.DeadLetterRetention = orDefault(c.DeadLetterRetention, 30*24*time.Hour)
+	c.DigestMax = orDefault(c.DigestMax, 100)
+	c.UnreadCap = orDefault(c.UnreadCap, 99)
+	c.DefaultLocale = orDefault(c.DefaultLocale, "en")
+	c.MaxInlineRecipients = orDefault(c.MaxInlineRecipients, 1000)
+	return c
+}
+
+// orDefault returns v, or def when v is the zero value.
+func orDefault[T comparable](v, def T) T {
+	var zero T
+	if v == zero {
+		return def
+	}
+	return v
+}
 
 // Validate checks the effective configuration — c with its defaults applied to a
-// copy — and reports every problem at once, as a *ConfigError.
-func (c Config) Validate() error { return nil }
+// copy — and reports every problem at once, as a *ConfigError. Judging the
+// effective config matters for the rules that compare two fields: a BackoffBase
+// of two hours is wrong against the default one-hour ceiling although the
+// ceiling was never set.
+func (c Config) Validate() error {
+	e := c.WithDefaults()
+	var ce ConfigError
+	add := func(field, format string, args ...any) {
+		ce.Problems = append(ce.Problems, ConfigProblem{Field: field, Message: fmt.Sprintf(format, args...)})
+	}
+
+	if err := e.Realm.Validate(); err != nil {
+		add("Realm", "%v", err)
+	}
+	if e.StoreDSN == "" {
+		add("StoreDSN", "is required")
+	}
+	if e.RedisURL == "" {
+		add("RedisURL", "is required")
+	}
+
+	for _, n := range []struct {
+		field string
+		value int
+	}{
+		{"Shards", e.Shards},
+		{"ClaimBatch", e.ClaimBatch},
+		{"MaxAttempts", e.MaxAttempts},
+		{"DigestMax", e.DigestMax},
+		{"UnreadCap", e.UnreadCap},
+		{"MaxInlineRecipients", e.MaxInlineRecipients},
+	} {
+		if n.value < 1 {
+			add(n.field, "must be at least 1, got %d", n.value)
+		}
+	}
+
+	for _, d := range []struct {
+		field string
+		value time.Duration
+	}{
+		{"ClaimLease", e.ClaimLease},
+		{"PollInterval", e.PollInterval},
+	} {
+		if d.value <= 0 {
+			add(d.field, "must be positive, got %s", d.value)
+		}
+	}
+
+	if e.BackoffCeiling < e.BackoffBase {
+		add("BackoffCeiling", "%s is below BackoffBase %s, so the first retry interval would exceed its own cap",
+			e.BackoffCeiling, e.BackoffBase)
+	}
+	if e.IdempotencyWindow < minIdempotencyWindow {
+		add("IdempotencyWindow", "must be at least %s, got %s", minIdempotencyWindow, e.IdempotencyWindow)
+	}
+	if e.PreCheckTTL > e.IdempotencyWindow {
+		add("PreCheckTTL", "%s outlives IdempotencyWindow %s, so the pre-check could drop a notification the guard would accept",
+			e.PreCheckTTL, e.IdempotencyWindow)
+	}
+
+	if len(ce.Problems) > 0 {
+		return &ce
+	}
+	return nil
+}
