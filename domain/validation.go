@@ -40,3 +40,15 @@ func (e *ValidationError) Unwrap() []error {
 	}
 	return errs
 }
+
+func (e *ValidationError) add(field, message string, sentinel error) {
+	e.Problems = append(e.Problems, Problem{Field: field, Message: message, Err: sentinel})
+}
+
+// err returns e, or nil when no problem was found.
+func (e *ValidationError) err() error {
+	if len(e.Problems) == 0 {
+		return nil
+	}
+	return e
+}

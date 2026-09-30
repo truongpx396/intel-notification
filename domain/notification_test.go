@@ -19,6 +19,9 @@ func fieldsOf(t *testing.T, err error) []string {
 	if !errors.As(err, &ve) {
 		t.Fatalf("got %T (%v), want a *ValidationError", err, err)
 	}
+	if len(ve.Problems) == 0 {
+		t.Fatal("a *ValidationError with no problems: a clean value must be a nil error")
+	}
 	fields := make([]string, 0, len(ve.Problems))
 	for _, p := range ve.Problems {
 		if p.Message == "" {
