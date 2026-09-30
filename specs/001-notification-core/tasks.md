@@ -128,6 +128,12 @@ rule above.
       **Red first:** the kit is tested where it has logic — an injector fires once, at the named point,
       and disarms; the clock moves only when told; `Probe` counts per key. Each fake later runs the same
       table as the adapter it stands in for (T018, T048), so it cannot drift
+      *Part 1 built: `domain.DispatchStep`, `Clock`, `Injector` (a hold or a crash at any of the nine
+      steps, once), `FaultStore` (`FailNextCommit` through the port's own transaction seam), `Probe` with a
+      `Channel` that honours its declared `Dedup`, and `Registry`, each with its own table test and its
+      mutations in the [ledger](../../docs/mutations.md). Still to do, before this box is ticked: the five
+      read-side fakes and `Env`.*
+
 - [x] **T014** [P] *red → green* `config.go`: `Config`, `WithDefaults` and `Validate` with every rule in the
       contract ([D1](design-decisions.md#d1), [D21](design-decisions.md#d21)). `Validate` returns a
       `*ConfigError` naming each field at fault. *Mutation-checked: 22 mutations, two of them equivalent
