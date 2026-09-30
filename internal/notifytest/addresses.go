@@ -49,7 +49,17 @@ func (b *AddressBook) Put(id domain.Identity, ch domain.ChannelKind, addrs ...do
 // Resolve implements ports.AddressBook. It returns copies, in the order they were
 // put, and no addresses, with no error, for an identity that has none.
 func (b *AddressBook) Resolve(_ context.Context, id domain.Identity, ch domain.ChannelKind) ([]domain.Address, error) {
-	return nil, nil
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	stored := b.m[addressKey{id, ch}]
+	if len(stored) == 0 {
+		return nil, nil
+	}
+	out := make([]domain.Address, len(stored))
+	for i, a := range stored {
+		out[i] = cloneAddress(a)
+	}
+	return out, nil
 }
 
 func cloneAddress(a domain.Address) domain.Address {

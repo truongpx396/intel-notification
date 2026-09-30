@@ -2,6 +2,7 @@ package notifytest
 
 import (
 	"context"
+	"slices"
 	"sync"
 
 	"github.com/truongpx396/intel-notification/domain"
@@ -57,7 +58,49 @@ func NewPreferences() *Preferences {
 
 // Resolve implements ports.PreferenceStore.
 func (p *Preferences) Resolve(_ context.Context, id domain.Identity, topic domain.Topic, def domain.TopicDef) ([]domain.ResolvedPreference, error) {
-	return nil, nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// The channels: the topic's own, then any other a row names, sorted.
+	channels := slices.Concat(def.DefaultChannels, def.Fallback)
+	byDefault := map[domain.ChannelKind]bool{}
+	for _, ch := range channels {
+		byDefault[ch] = true
+	}
+	var extras []domain.ChannelKind
+	note := func(ch domain.ChannelKind) {
+		if !byDefault[ch] && !slices.Contains(extras, ch) {
+			extras = append(extras, ch)
+		}
+	}
+	for k := range p.recipient {
+		if k.id == id && k.topic == topic {
+			note(k.channel)
+		}
+	}
+	for k := range p.tenant {
+		if k.realm == id.Realm && k.tenant == id.Tenant && k.topic == topic {
+			note(k.channel)
+		}
+	}
+	slices.Sort(extras)
+	channels = append(channels, extras...)
+
+	out := make([]domain.ResolvedPreference, 0, len(channels))
+	for _, ch := range channels {
+		r := domain.ResolvedPreference{Topic: topic, Channel: ch, Enabled: byDefault[ch], Source: domain.SourceTopicDefault}
+		if tc, ok := p.tenant[tenantPrefKey{id.Realm, id.Tenant, topic, ch}]; ok {
+			r.Enabled, r.Source, r.Locked = tc.enabled, domain.SourceTenant, tc.locked
+		}
+		if choice, ok := p.recipient[recipientPrefKey{id, topic, ch}]; ok && !r.Locked {
+			r.Enabled, r.Source = choice, domain.SourceRecipient
+		}
+		if def.Essential && byDefault[ch] {
+			r.Enabled, r.Source, r.Locked = true, domain.SourceTopicDefault, true
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // Set upserts the recipient's choices. A pair not named is left as it was.
@@ -81,7 +124,9 @@ func (p *Preferences) SetTenant(_ context.Context, realm domain.Realm, tp domain
 // Schedule implements ports.PreferenceStore. A recipient who never set one has the
 // zero schedule: immediate delivery, no quiet hours.
 func (p *Preferences) Schedule(_ context.Context, id domain.Identity) (domain.DeliverySchedule, error) {
-	return domain.DeliverySchedule{}, nil
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.schedules[id], nil
 }
 
 // SetSchedule replaces the recipient's schedule.

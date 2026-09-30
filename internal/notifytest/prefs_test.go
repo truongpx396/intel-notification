@@ -184,6 +184,20 @@ func TestPreferencesResolvedChannelSet(t *testing.T) {
 		}
 	})
 
+	t.Run("an extra channel named by two rows is listed once", func(t *testing.T) {
+		t.Parallel()
+		p := NewPreferences()
+		setRecipient(t, p, alice, "push", true)
+		setTenant(t, p, alice, "push", false, false)
+		by, order := resolve(t, p, alice, inviteDef) // resolve fails on a duplicate
+		if want := []domain.ChannelKind{"in_app", "email", "sms", "push"}; !slices.Equal(order, want) {
+			t.Fatalf("channels = %v, want %v", order, want)
+		}
+		if got := by["push"]; !got.Enabled || got.Source != domain.SourceRecipient {
+			t.Fatalf("push = %+v, want the recipient's choice over the tenant's unlocked default", got)
+		}
+	})
+
 	t.Run("a row for a default channel does not list it twice", func(t *testing.T) {
 		t.Parallel()
 		p := NewPreferences()
@@ -215,11 +229,15 @@ func TestPreferencesPairsResolveIndependently(t *testing.T) {
 		t.Fatalf("disabling email changed another channel: %+v", by)
 	}
 
+	setRecipient(t, p, alice, "push", true) // a channel only a row for "invite" names
 	other, err := p.Resolve(t.Context(), alice, "a_different_topic", inviteDef)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, r := range other {
+		if r.Channel == "push" {
+			t.Fatalf("a row for one topic added a channel to another: %+v", r)
+		}
 		if r.Channel == "email" && (!r.Enabled || r.Source != domain.SourceTopicDefault) {
 			t.Fatalf("a row for one topic changed another: %+v", r)
 		}
@@ -284,7 +302,9 @@ func TestPreferencesAreScoped(t *testing.T) {
 	t.Parallel()
 	p := NewPreferences()
 	setRecipient(t, p, alice, "email", false)
+	setRecipient(t, p, alice, "push", true) // a channel only alice's own row names
 	setTenant(t, p, alice, "in_app", false, true)
+	setTenant(t, p, alice, "slack", true, false) // a channel only the tenant's row names
 
 	otherKind := alice
 	otherKind.Recipient.Kind = "device"
@@ -301,12 +321,21 @@ func TestPreferencesAreScoped(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			by, _ := resolve(t, p, tc.id, inviteDef)
+			if _, leaked := by["push"]; leaked {
+				t.Fatalf("%s: alice's own push choice appears: %+v", tc.name, by["push"])
+			}
 			if tc.id.Tenant == alice.Tenant && tc.id.Realm == alice.Realm {
-				// Same tenant: the tenant's lock applies, the recipient's row does not.
+				// Same tenant: the tenant's lock and its default apply, the recipient's row does not.
 				if by["in_app"].Enabled || !by["email"].Enabled {
 					t.Fatalf("%s: in_app = %+v, email = %+v, want the tenant lock but not alice's own row", tc.name, by["in_app"], by["email"])
 				}
+				if got := by["slack"]; !got.Enabled || got.Source != domain.SourceTenant {
+					t.Fatalf("%s: slack = %+v, want the tenant's default, which applies to its recipients", tc.name, got)
+				}
 				return
+			}
+			if _, leaked := by["slack"]; leaked {
+				t.Fatalf("%s: the tenant's slack default appears: %+v", tc.name, by["slack"])
 			}
 			for ch, r := range by {
 				if !r.Enabled || r.Source != domain.SourceTopicDefault {

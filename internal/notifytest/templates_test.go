@@ -117,3 +117,24 @@ func TestTemplatesPutReplaces(t *testing.T) {
 		t.Fatalf("Render = %+v, %v, want the later Put", got, err)
 	}
 }
+
+// The renderer returns content a test may edit; the stored template must not change
+// with it.
+func TestTemplatesDoNotShareMemoryWithCallers(t *testing.T) {
+	t.Parallel()
+	tpl := NewTemplates("en")
+	c := domain.RenderedContent{Subject: "s", Data: map[string]any{"k": "v"}}
+	tpl.Put("aisat", "invoice", "email", "en", c)
+	c.Data["k"] = "tampered-after-put"
+
+	req := domain.RenderRequest{Realm: "aisat", TemplateRef: "invoice", Channel: "email", Locale: "en"}
+	got, _ := tpl.Render(t.Context(), req)
+	if got.Data["k"] != "v" {
+		t.Fatalf("a map the caller kept changed the stored template: %v", got.Data)
+	}
+	got.Data["k"] = "tampered-after-render"
+	again, _ := tpl.Render(t.Context(), req)
+	if again.Data["k"] != "v" {
+		t.Fatalf("a map returned by Render changed the stored template: %v", again.Data)
+	}
+}

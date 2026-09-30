@@ -46,7 +46,13 @@ func (t *Topics) Register(realm domain.Realm, topic domain.Topic, def domain.Top
 
 // Lookup implements ports.TopicRegistry. The definition it returns is a copy.
 func (t *Topics) Lookup(_ context.Context, realm domain.Realm, topic domain.Topic) (domain.TopicDef, bool, error) {
-	return domain.TopicDef{}, false, nil
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	def, ok := t.m[topicKey{realm, topic}]
+	if !ok {
+		return domain.TopicDef{}, false, nil
+	}
+	return cloneTopicDef(def), true, nil
 }
 
 func cloneTopicDef(d domain.TopicDef) domain.TopicDef {
