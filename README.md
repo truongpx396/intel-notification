@@ -9,9 +9,10 @@ as a self-contained service that any language can call.
 
 > ## ⚠️ Status: design complete, **implementation started** (Go 1.26)
 > This repository contains the **specification** — ports, data model, migrations — and the first of
-> the implementation: the domain rules and the **PostgreSQL adapter for the delivery queue**, proven
-> against a real PostgreSQL 16 by an integration suite. The notifier, dispatcher, channels and
-> transports are not built yet, so most snippets below still describe the intended interface.
+> the implementation: the domain types and rules, every port, the configuration, and the **PostgreSQL
+> adapter for the delivery queue**, proven against a real PostgreSQL 16 by an integration suite. The
+> notifier, dispatcher, channels and transports are not built yet, so most snippets below still
+> describe the intended interface.
 > [ROADMAP.md](ROADMAP.md) says what exists, what is designed and what is deliberately absent;
 > [tasks.md](specs/001-notification-core/tasks.md) is the build order.
 >
