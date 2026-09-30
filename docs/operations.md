@@ -27,8 +27,8 @@ There is no broker in the default deployment and nothing to scale for one.
 | `notify.lease.lost` | sustained non-zero | Workers are losing claims mid-send: `ClaimLease` is shorter than a channel's send time, or workers are stalling. Each loss may mean a duplicate on a `DedupNone` channel |
 | `notify.digest.overdue` | any window past `flush_at` + one interval | The flush job is not running; members are held, not delivered |
 | `notify.quota.exhausted` | per tenant | A tenant hit its ceiling — abuse, a bug in its producer, or a limit that needs raising |
-| `notify.partition.missing` | next month absent | Provisioning lapsed; inserts start failing at month roll |
-| `notify.partition.unscoped` | any `notifications` partition without `recipient_scope` | **Isolation incident.** A partition queried by name would show every recipient's rows. Apply `notify_apply_recipient_scope()` now |
+| `notify.partition.missing` | this month or next absent from `notifications`, `notification_deliveries` or `dead_letters` (`CheckPartitions.Missing`, one per table and month) | Provisioning lapsed; inserts dated in that month fail. Run `EnsurePartitions` |
+| `notify.partition.unscoped` | any `notifications` partition, at any depth, where recipient scoping does not hold (`CheckPartitions.Unscoped`): row-level security not enabled and forced, the `recipient_scope` policy missing, for one command only or with a different predicate, or any other permissive policy | **Isolation incident.** A partition queried by name would show every recipient's rows. Apply `notify_apply_recipient_scope()` now |
 | `notify.job.stale` | a job's `last_started_at` older than twice its interval | No worker is taking the lease |
 | `notify.db.oldest_xmin_age` | the oldest `backend_xmin` in `pg_stat_activity` older than 60 s (tune to your rate) | A transaction is pinning vacuum, so the queue table will bloat and latency will follow. Find it and end it ([D38](../specs/001-notification-core/design-decisions.md#d38)) |
 | `notify.db.checkpoints_requested` | `checkpoints_req` rising faster than `checkpoints_timed` | Checkpoints are being forced by WAL volume: `max_wal_size` is too small for this write rate |
@@ -119,7 +119,16 @@ until it has run. Its role needs `CREATE` on the schema.
 `make verify-schema` TEST 5 asserts every existing partition is scoped, and `TestEnsurePartitions`
 asserts a provisioned one is. A partition created by hand without the policy is an isolation incident
 (`notify.partition.unscoped`). There is deliberately no default partition: a missing one fails inserts
-loudly rather than filling a catch-all that can never be retired.
+loudly rather than filling a catch-all that can never be retired. TEST 13 asserts none exists, and that
+an insert dated outside every partition is refused.
+
+`Maintenance.CheckPartitions(at)` is how the two alarms above are detected, and it changes nothing: it
+reads the catalog and reports each table with no partition covering `at`'s UTC month or the next, and
+each `notifications` partition whose scope has come loose. Its answer is the catalog's, not the
+provisioning job's: a partition detached by hand is missing even though its table still exists.
+`TestCheckPartitions` asserts each condition. The detection is implemented; **raising the alarms from it
+is not yet** — the maintenance job (T038) does that — so until then nothing emits them. A host that
+wants them earlier can call `CheckPartitions` on its own schedule.
 
 ### Retention
 

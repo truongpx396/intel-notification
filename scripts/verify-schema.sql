@@ -17,12 +17,18 @@
 --   TEST 4   RLS scopes the inbox as the OWNER; unscoped reads see nothing NS-001
 --   TEST 5   every recipient-scoped relation, partitions included, is forced NS-001
 --   TEST 6   the worker reads what it delivers; scope dies with the txn    D17
---   TEST 7   at most one open digest window per (recipient, topic, channel) D4
+--   TEST 7   at most one open digest window per (recipient, topic, channel);
+--            a window cannot be flushed before it is sealed                   D4
 --   TEST 8   the idempotency guard is hash-partitioned and indexed by age  D21
 --   TEST 9   no foreign key references a partitioned table                 D6
---   TEST 10  constrained vocabularies and shapes                           D5 / D9 / D12
+--   TEST 10  constrained vocabularies and shapes: a tenant pair is whole or
+--            empty, one template version is active, a broadcast has one
+--            audience source                                     D5 / D9 / D12 / D27 / D31
 --   TEST 11  suppressions and erasure records hold hashes, not identities  D35
 --   TEST 12  a claim can be a HOT update: no index on the columns it writes D19
+--   TEST 13  no default partition, so a date with no partition is refused  D33 / NR-022
+--   TEST 14  every recipient-scoped table rejects an empty identity component NS-001
+--   TEST 15  at most one pending delivery per address                      NS-002 / D25
 --
 -- The queue's state transitions — the claim, its fence, the terminal move,
 -- fan-out, fairness, digests, cancel, expiry, erasure — are SQL in the Go
@@ -61,6 +67,20 @@ BEGIN
     IF ok IS NOT TRUE THEN
         RAISE EXCEPTION 'FAIL: %', what;
     END IF;
+    RAISE NOTICE 'PASS: %', what;
+END $$;
+
+-- Run one statement a guarantee must ALLOW. It is the control half of a rejection test:
+-- if over-constraining broke it, the failure names the guarantee instead of surfacing as
+-- a raw error from a setup step.
+CREATE FUNCTION pg_temp.accepts(p_sql text, what text) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+    BEGIN
+        EXECUTE p_sql;
+    EXCEPTION WHEN OTHERS THEN
+        RAISE EXCEPTION 'FAIL: % -- but it was rejected: %', what, SQLERRM;
+    END;
     RAISE NOTICE 'PASS: %', what;
 END $$;
 
@@ -253,9 +273,9 @@ DO $$ BEGIN
 END $$;
 DELETE FROM notification_outbox WHERE id = '018f0000-0000-7000-8000-0000000000b1';
 
-\echo '=== TEST 7: at most one open digest window per (recipient, topic, channel) (D4) ==='
+\echo '=== TEST 7: one open digest window per (recipient, topic, channel); flush only after seal (D4) ==='
 DO $$
-DECLARE first_window uuid;
+DECLARE first_window uuid; open_window uuid;
 BEGIN
     INSERT INTO digest_buffer (realm, tenant_kind, tenant_id, recipient_kind, recipient_id,
                                topic, channel, shard, flush_at)
@@ -275,7 +295,8 @@ BEGIN
     INSERT INTO digest_buffer (realm, tenant_kind, tenant_id, recipient_kind, recipient_id,
                                topic, channel, shard, flush_at)
     VALUES ('aisat', 'workspace', 'w1', 'user', 'u1', 'ingestion_complete', 'email', 3,
-            now() + interval '15 minutes');
+            now() + interval '15 minutes')
+    RETURNING id INTO open_window;
     RAISE NOTICE 'PASS: once a window is sealed, the next one can open';
     BEGIN
         UPDATE digest_buffer SET member_count = 5 WHERE id = first_window;
@@ -283,6 +304,24 @@ BEGIN
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'PASS: member_count always equals the members held';
     END;
+    -- A window is flushed once, and only after it stops taking members: flushing an
+    -- open one would enqueue a digest that misses the notifications still to arrive.
+    BEGIN
+        UPDATE digest_buffer SET flushed_at = now() WHERE id = open_window;
+        RAISE EXCEPTION 'FAIL: a window still taking members was flushed';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'PASS: a window cannot be flushed before it is sealed';
+    END;
+    BEGIN
+        INSERT INTO digest_buffer (realm, tenant_kind, tenant_id, recipient_kind, recipient_id,
+                                   topic, channel, shard, flush_at, flushed_at)
+        VALUES ('aisat', 'workspace', 'w1', 'user', 'u1', 'other_topic', 'email', 3, now(), now());
+        RAISE EXCEPTION 'FAIL: a window was created already flushed and never sealed';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'PASS: nor can one be created flushed and unsealed';
+    END;
+    PERFORM pg_temp.accepts(format('UPDATE digest_buffer SET flushed_at = now() WHERE id = %L', first_window),
+                            'a sealed window can be flushed');
 END $$;
 
 \echo '=== TEST 8: the idempotency guard is hash-partitioned and indexed by age (D21) ==='
@@ -353,6 +392,25 @@ DO $$ BEGIN
     INSERT INTO channel_quotas (realm, channel, max_per_hour, max_per_day)
     VALUES ('aisat', 'email', 1000, 10000);
     RAISE NOTICE 'PASS: an empty tenant pair is the realm-wide default quota';
+    -- The pair is whole or empty, in both directions (D5): a half-empty one would be
+    -- neither a tenant's own quota nor the realm default, and no lookup would find it.
+    BEGIN
+        INSERT INTO channel_quotas (realm, tenant_kind, tenant_id, channel, max_per_hour, max_per_day)
+        VALUES ('aisat', 'workspace', '', 'sms', 10, 100);
+        RAISE EXCEPTION 'FAIL: a tenant kind with no tenant id was accepted as a quota';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'PASS: a quota with a tenant kind and no id is rejected';
+    END;
+    BEGIN
+        INSERT INTO channel_quotas (realm, tenant_kind, tenant_id, channel, max_per_hour, max_per_day)
+        VALUES ('aisat', '', 'w1', 'sms', 10, 100);
+        RAISE EXCEPTION 'FAIL: a tenant id with no tenant kind was accepted as a quota';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'PASS: a quota with a tenant id and no kind is rejected';
+    END;
+    PERFORM pg_temp.accepts($q$INSERT INTO channel_quotas (realm, tenant_kind, tenant_id, channel, max_per_hour, max_per_day)
+                                VALUES ('aisat', 'workspace', 'w1', 'sms', 10, 100)$q$,
+                            'a whole tenant pair is that tenant''s own quota');
     BEGIN
         INSERT INTO channel_providers (realm, channel, provider, secret_ref)
         VALUES ('aisat', 'email', 'resend', 're_live_abc123');
@@ -367,17 +425,64 @@ DO $$ BEGIN
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'PASS: a channel is either parallel or a fallback, not both';
     END;
+    -- One version of a template is active (D27): versions are immutable and activated by
+    -- flipping `active`, so two active ones would make the rendering depend on row order.
+    INSERT INTO notification_templates (realm, template_ref, channel, locale, version, body, active)
+    VALUES ('aisat', 'welcome', 'email', 'en', 1, 'v1', true);
     BEGIN
-        -- The case the CHECK exists for: a scope whose realm reads back as ''
-        -- would otherwise match a row with an empty realm.
-        PERFORM pg_temp.scope('', 'workspace', 'w1', 'user', 'u1');
-        INSERT INTO notifications (id, realm, tenant_kind, tenant_id, recipient_kind, recipient_id,
-                                   topic, idem_key, created_at)
-        VALUES (gen_random_uuid(), '', 'workspace', 'w1', 'user', 'u1', 't', 'k', '2026-09-15');
-        RAISE EXCEPTION 'FAIL: an empty realm was accepted';
-    EXCEPTION WHEN check_violation THEN
-        RAISE NOTICE 'PASS: an empty identity component is rejected, keeping RLS fail-closed';
+        INSERT INTO notification_templates (realm, template_ref, channel, locale, version, body, active)
+        VALUES ('aisat', 'welcome', 'email', 'en', 2, 'v2', true);
+        RAISE EXCEPTION 'FAIL: two active versions of one template were accepted';
+    EXCEPTION WHEN unique_violation THEN
+        RAISE NOTICE 'PASS: only one version of a template is active';
     END;
+    PERFORM pg_temp.accepts($q$INSERT INTO notification_templates (realm, template_ref, channel, locale, version, body, active)
+                                VALUES ('aisat', 'welcome', 'email', 'en', 2, 'v2', false)$q$,
+                            'an inactive version can sit beside the active one');
+    PERFORM pg_temp.accepts($q$UPDATE notification_templates SET active = false
+                                WHERE realm = 'aisat' AND template_ref = 'welcome' AND channel = 'email'
+                                  AND locale = 'en' AND version = 1$q$,
+                            'the active version can be retired');
+    PERFORM pg_temp.accepts($q$UPDATE notification_templates SET active = true
+                                WHERE realm = 'aisat' AND template_ref = 'welcome' AND channel = 'email'
+                                  AND locale = 'en' AND version = 2$q$,
+                            'a new version is activated once the old one is retired');
+    -- The rule is per (tenant, template, channel, locale): each of these has its own.
+    PERFORM pg_temp.accepts($q$INSERT INTO notification_templates (realm, template_ref, channel, locale, version, body, active)
+                                VALUES ('aisat', 'welcome', 'email', 'fr', 1, 'fr', true)$q$,
+                            'another locale has its own active version');
+    PERFORM pg_temp.accepts($q$INSERT INTO notification_templates (realm, template_ref, channel, locale, version, body, active)
+                                VALUES ('aisat', 'welcome', 'sms', 'en', 1, 'sms', true)$q$,
+                            'another channel has its own active version');
+    PERFORM pg_temp.accepts($q$INSERT INTO notification_templates (realm, template_ref, channel, locale, version, body, active)
+                                VALUES ('aisat', 'other', 'email', 'en', 1, 'other', true)$q$,
+                            'another template has its own active version');
+    PERFORM pg_temp.accepts($q$INSERT INTO notification_templates (realm, tenant_kind, tenant_id, template_ref,
+                                                                   channel, locale, version, body, active)
+                                VALUES ('aisat', 'workspace', 'w1', 'welcome', 'email', 'en', 1, 'branded', true)$q$,
+                            'a tenant''s override has its own active version');
+    -- A broadcast has exactly one source of recipients (D31).
+    BEGIN
+        INSERT INTO notification_broadcasts (realm, tenant_kind, tenant_id, idem_key, request)
+        VALUES ('aisat', 'workspace', 'w1', 'b-neither', '{}');
+        RAISE EXCEPTION 'FAIL: a broadcast with no audience source was accepted';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'PASS: a broadcast with no audience is rejected';
+    END;
+    BEGIN
+        INSERT INTO notification_broadcasts (realm, tenant_kind, tenant_id, idem_key, audience, recipients, request)
+        VALUES ('aisat', 'workspace', 'w1', 'b-both', 'all-members', '[{"kind":"user","id":"u1"}]', '{}');
+        RAISE EXCEPTION 'FAIL: a broadcast with two audience sources was accepted';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'PASS: a broadcast with two audiences is rejected';
+    END;
+    PERFORM pg_temp.accepts($q$INSERT INTO notification_broadcasts (realm, tenant_kind, tenant_id, idem_key, audience, request)
+                                VALUES ('aisat', 'workspace', 'w1', 'b-selector', 'all-members', '{}')$q$,
+                            'a broadcast can take a host selector as its audience');
+    PERFORM pg_temp.accepts($q$INSERT INTO notification_broadcasts (realm, tenant_kind, tenant_id, idem_key, recipients, request)
+                                VALUES ('aisat', 'workspace', 'w1', 'b-inline', '[{"kind":"user","id":"u1"}]', '{}')$q$,
+                            'a broadcast can take an inline recipient list');
+    -- An empty identity component is rejected on every recipient-scoped table: TEST 14.
 END $$;
 
 \echo '=== TEST 11: suppressions and erasure records hold hashes, not identities (D35) ==='
@@ -421,6 +526,193 @@ DO $$ BEGIN
                     FROM pg_class c, unnest(c.reloptions) AS o
                    WHERE c.oid = 'notification_outbox'::regclass AND o LIKE 'fillfactor=%'), 100) < 100,
         'the queue table leaves free space in each page for a HOT update');
+END $$;
+
+\echo '=== TEST 13: no default partition; a date with no partition is refused (D33, NR-022) ==='
+-- Insert one row of each range-partitioned table, dated d, holding nothing else invalid.
+CREATE FUNCTION pg_temp.put_dated(p_table text, d timestamptz) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_temp.scope('aisat', 'workspace', 'w13', 'user', 'u13');
+    IF p_table = 'notifications' THEN
+        INSERT INTO notifications (id, realm, tenant_kind, tenant_id, recipient_kind, recipient_id,
+                                   topic, idem_key, created_at)
+        VALUES (gen_random_uuid(), 'aisat', 'workspace', 'w13', 'user', 'u13', 't13', 'k13', d);
+    ELSIF p_table = 'notification_deliveries' THEN
+        INSERT INTO notification_deliveries (id, realm, tenant_kind, tenant_id, recipient_kind,
+                                             recipient_id, topic, channel, address_key, outcome,
+                                             attempts, completed_at)
+        VALUES (gen_random_uuid(), 'aisat', 'workspace', 'w13', 'user', 'u13', 't13', 'email', '',
+                'delivered', 1, d);
+    ELSIF p_table = 'dead_letters' THEN
+        INSERT INTO dead_letters (id, realm, source, reason, payload, attempts, last_error, created_at)
+        VALUES (gen_random_uuid(), 'aisat', 'outbox', 'max_attempts', '{"t":"t13"}', 1, 'x', d);
+    ELSE
+        RAISE EXCEPTION 'FAIL: no insert for range-partitioned table % -- add one to put_dated', p_table;
+    END IF;
+END $$;
+DO $$
+DECLARE tbl text; d timestamptz;
+BEGIN
+    -- A default partition would catch a missing month silently, fill up, and never be
+    -- retirable by a metadata operation. So none exists, and a row with nowhere to go fails.
+    PERFORM pg_temp.expect(
+        NOT EXISTS (SELECT 1 FROM pg_partitioned_table WHERE partdefid <> 0),
+        'no partitioned table has a default partition'
+        || coalesce(' -- DEFAULT on: ' || (SELECT string_agg(partrelid::regclass::text, ', ')
+                                             FROM pg_partitioned_table WHERE partdefid <> 0), ''));
+
+    -- The range-partitioned tables come from the catalog, so a new one is decided here.
+    PERFORM pg_temp.expect(
+        (SELECT array_agg(c.relname::text ORDER BY c.relname) FROM pg_partitioned_table p
+           JOIN pg_class c ON c.oid = p.partrelid WHERE p.partstrat = 'r')
+        = ARRAY['dead_letters', 'notification_deliveries', 'notifications'],
+        'the range-partitioned tables are the three this test inserts into');
+
+    FOREACH tbl IN ARRAY ARRAY['notifications', 'notification_deliveries', 'dead_letters'] LOOP
+        PERFORM pg_temp.accepts(format('SELECT pg_temp.put_dated(%L, %L)', tbl, '2026-09-15'),
+                                tbl || ' accepts a row dated inside a partition');   -- the control
+        FOREACH d IN ARRAY ARRAY['2001-01-15', '2099-01-15']::timestamptz[] LOOP
+            BEGIN
+                PERFORM pg_temp.put_dated(tbl, d);
+                RAISE EXCEPTION 'FAIL: % accepted a row dated % with no partition to hold it', tbl, d;
+            EXCEPTION WHEN check_violation THEN
+                PERFORM pg_temp.expect(SQLERRM LIKE 'no partition of relation "' || tbl || '" found for row%',
+                    format('%s refuses a row dated %s: %s', tbl, d::date, SQLERRM));
+            END;
+        END LOOP;
+    END LOOP;
+    DELETE FROM notifications WHERE idem_key = 'k13';
+    DELETE FROM notification_deliveries WHERE topic = 't13';
+    DELETE FROM dead_letters WHERE payload = '{"t":"t13"}';
+END $$;
+
+\echo '=== TEST 14: every recipient-scoped table rejects an empty identity component (NS-001) ==='
+-- An empty component would equal an unset scope setting, which reads back as '' once any
+-- transaction on the connection has set it, so the policy could match the row. The CHECK
+-- keeps RLS fail-closed. Every table carrying the recipient_scope policy is found from
+-- the catalog, and each is given a valid row and then, once per component, the same row
+-- with that component empty.
+--
+-- A literal for each type a required column can have. An unknown type fails, so a new
+-- scoped table with an exotic NOT NULL column has to be decided here, not skipped.
+CREATE FUNCTION pg_temp.sample(p_type text, p_what text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE v text;
+BEGIN
+    v := CASE p_type
+        WHEN 'text'                     THEN quote_literal('x')
+        WHEN 'uuid'                     THEN 'gen_random_uuid()'
+        WHEN 'boolean'                  THEN 'true'
+        WHEN 'integer'                  THEN '1'
+        WHEN 'smallint'                 THEN '1'
+        WHEN 'jsonb'                    THEN quote_literal('{}') || '::jsonb'
+        WHEN 'timestamp with time zone' THEN quote_literal('2026-09-15') || '::timestamptz'
+    END;
+    IF v IS NULL THEN
+        RAISE EXCEPTION 'FAIL: no sample value for type % of % -- extend pg_temp.sample', p_type, p_what;
+    END IF;
+    RETURN v;
+END $$;
+DO $$
+DECLARE
+    t     record;
+    comps text[] := ARRAY['realm', 'tenant_kind', 'tenant_id', 'recipient_kind', 'recipient_id'];
+    good  text[] := ARRAY['aisat', 'workspace', 'w14', 'user', 'u14'];
+    ident text[];
+    cols  text;
+    vals  text;
+    found text[] := '{}';
+    i     int;
+BEGIN
+    FOR t IN
+        SELECT c.oid, c.relname::text AS name FROM pg_class c
+         WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') AND NOT c.relispartition
+           AND EXISTS (SELECT 1 FROM pg_policy p WHERE p.polrelid = c.oid AND p.polname = 'recipient_scope')
+         ORDER BY c.relname
+    LOOP
+        found := found || t.name;
+        -- What a row needs beyond its identity: every NOT NULL column with no default, and
+        -- the partition key, so the row never lands where no partition is.
+        SELECT string_agg(', ' || quote_ident(a.attname), '' ORDER BY a.attnum),
+               string_agg(', ' || pg_temp.sample(format_type(a.atttypid, a.atttypmod), t.name || '.' || a.attname),
+                          '' ORDER BY a.attnum)
+          INTO cols, vals
+          FROM pg_attribute a
+         WHERE a.attrelid = t.oid AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
+           AND a.attname <> ALL (comps)
+           AND ((a.attnotnull AND NOT a.atthasdef)
+                OR a.attnum IN (SELECT unnest(p.partattrs::int2[]) FROM pg_partitioned_table p
+                                 WHERE p.partrelid = t.oid));
+
+        FOR i IN 0..5 LOOP    -- 0 is the control: every component valid
+            ident := good;
+            IF i > 0 THEN ident[i] := ''; END IF;
+            PERFORM pg_temp.scope(ident[1], ident[2], ident[3], ident[4], ident[5]);
+            BEGIN
+                EXECUTE format('INSERT INTO %I (realm, tenant_kind, tenant_id, recipient_kind, recipient_id%s) '
+                               'VALUES (%L, %L, %L, %L, %L%s)',
+                               t.name, coalesce(cols, ''), ident[1], ident[2], ident[3], ident[4], ident[5],
+                               coalesce(vals, ''));
+                IF i > 0 THEN
+                    RAISE EXCEPTION 'FAIL: % accepted an empty %', t.name, comps[i];
+                END IF;
+                RAISE NOTICE 'PASS: % accepts a row with every component set', t.name;
+                EXECUTE format('DELETE FROM %I WHERE recipient_id = %L', t.name, 'u14');
+            EXCEPTION WHEN check_violation THEN
+                IF i = 0 THEN
+                    RAISE EXCEPTION 'FAIL: % rejected a valid row: %', t.name, SQLERRM;
+                END IF;
+                RAISE NOTICE 'PASS: % rejects an empty %', t.name, comps[i];
+            END;
+        END LOOP;
+    END LOOP;
+    -- Not vacuous: the inbox is among the tables the catalog turned up.
+    PERFORM pg_temp.expect('notifications' = ANY (found),
+        'the recipient-scoped tables found in the catalog: ' || array_to_string(found, ', '));
+END $$;
+
+\echo '=== TEST 15: at most one pending delivery per address (NS-002, D25) ==='
+CREATE FUNCTION pg_temp.ob(p_notification uuid, p_digest uuid, p_channel text, p_address text)
+RETURNS void LANGUAGE sql AS $$
+    INSERT INTO notification_outbox (notification_id, notification_created_at, digest_id, realm,
+                                     tenant_kind, tenant_id, recipient_kind, recipient_id,
+                                     topic, channel, address_key, shard)
+    VALUES (p_notification, CASE WHEN p_notification IS NULL THEN NULL ELSE '2026-09-15'::timestamptz END,
+            p_digest, 'aisat', 'workspace', 'w15', 'user', 'u15', 't15', p_channel, p_address, 0);
+$$;
+DO $$
+DECLARE n uuid := gen_random_uuid(); d uuid := gen_random_uuid();
+BEGIN
+    -- A notification: one row per (notification, channel, address).
+    PERFORM pg_temp.ob(n, NULL, 'push', 'phone');
+    BEGIN
+        PERFORM pg_temp.ob(n, NULL, 'push', 'phone');
+        RAISE EXCEPTION 'FAIL: a second pending delivery to one address was accepted';
+    EXCEPTION WHEN unique_violation THEN
+        RAISE NOTICE 'PASS: one pending delivery per (notification, channel, address)';
+    END;
+    PERFORM pg_temp.accepts(format('SELECT pg_temp.ob(%L, NULL, %L, %L)', n, 'push', 'tablet'),
+        'another address on the channel is its own delivery (multi-device push)');
+    PERFORM pg_temp.accepts(format('SELECT pg_temp.ob(%L, NULL, %L, %L)', n, 'sms', 'phone'),
+        'the same address key on another channel is its own delivery');
+    PERFORM pg_temp.accepts(format('SELECT pg_temp.ob(%L, NULL, %L, %L)', gen_random_uuid(), 'push', 'phone'),
+        'another notification to the same address is its own delivery');
+    -- A digest window: one row per (digest, address).
+    PERFORM pg_temp.ob(NULL, d, 'email', 'a1');
+    BEGIN
+        PERFORM pg_temp.ob(NULL, d, 'email', 'a1');
+        RAISE EXCEPTION 'FAIL: a second pending delivery of one digest to one address was accepted';
+    EXCEPTION WHEN unique_violation THEN
+        RAISE NOTICE 'PASS: one pending delivery per (digest, address)';
+    END;
+    PERFORM pg_temp.accepts(format('SELECT pg_temp.ob(NULL, %L, %L, %L)', d, 'email', 'a2'),
+        'another address of the digest is its own delivery');
+    PERFORM pg_temp.accepts(format('SELECT pg_temp.ob(NULL, %L, %L, %L)', gen_random_uuid(), 'email', 'a1'),
+        'another digest to the same address is its own delivery');
+    PERFORM pg_temp.accepts(format('SELECT pg_temp.ob(%L, NULL, %L, %L)', gen_random_uuid(), 'email', 'a1'),
+        'a notification and a digest to one address do not collide');
+    DELETE FROM notification_outbox WHERE topic = 't15';
 END $$;
 
 RESET ROLE;

@@ -96,4 +96,17 @@ type Maintenance interface {
 	// kept: they hold address hashes, and dropping them would resume mailing
 	// someone who complained. Returns rows removed per table.
 	Erase(ctx context.Context, id domain.Identity) (map[string]int, error)
+
+	// EnsurePartitions creates each missing monthly partition of the
+	// range-partitioned tables, for months months from the one containing from,
+	// and scopes every new notifications partition (D17). Returns the partitions
+	// created; a second run creates none.
+	EnsurePartitions(ctx context.Context, from time.Time, months int) ([]string, error)
+
+	// CheckPartitions reports, from the catalog alone, each range-partitioned
+	// table with no partition covering the month containing at or the next one,
+	// and notifications or any of its partitions that recipient scoping does not
+	// hold on. It changes nothing; the report is what the notify.partition.missing
+	// and notify.partition.unscoped alarms fire on.
+	CheckPartitions(ctx context.Context, at time.Time) (domain.PartitionHealth, error)
 }
