@@ -109,12 +109,14 @@ rule above.
       a frozen vector table ([D11](design-decisions.md#d11))
 - [x] **T011** [P] `domain/backoff.go`: full jitter with a `RetryAfter` floor, and a test that the
       distribution spreads rather than synchronizes ([D10](design-decisions.md#d10))
-- [ ] **T012** [P] *setup* `ports/driving.go`: `Notifier`, `Inbox`, `Admin`, `Dispatcher`, `Jobs`.
-      An interface has no behaviour to test; it is the seam the contract suites are written against, so
-      it lands before them, and each implementation adds the compile-time assertion
-- [ ] **T013** [P] *setup* `ports/driven.go`: the remaining driven ports in the contract (NR-016,
-      NR-017, [D7](design-decisions.md#d7)). *(Done: `Queue`, `Digests`, `Maintenance`.)* Same rule as
-      T012
+- [x] **T012** [P] *setup* `ports/driving.go`: `Notifier`, `Inbox`, `Admin`, `Dispatcher`, `Jobs`, and the
+      opaque `Tx`. An interface has no behaviour to test; it is the seam the contract suites are written
+      against, so it lands before them, and each implementation adds the compile-time assertion
+- [x] **T013** [P] *setup* `ports/driven.go`: the remaining driven ports in the contract (NR-016,
+      NR-017, [D7](design-decisions.md#d7)): `Store`, `InboxStore`, `PreferenceStore`, `TopicRegistry`,
+      `TemplateRenderer`, `AddressBook`, `AudienceResolver`, `SuppressionStore`, `QuotaCounter`,
+      `PreCheck`, `StreamPublisher`, `Channel`, `AddressNormalizer`, `ChannelRegistry`, `Clock`,
+      `IDSource`, beside the `Queue`, `Digests` and `Maintenance` already there. Same rule as T012
 - [ ] **T013a** *setup* `internal/notifytest` (an arch-lint `testing` component, like
       `internal/pgtest`): the kit every later suite is written against, so a Red test can exist before the
       code it drives. It holds `Env` (PostgreSQL through `pgtest`, Redis through Testcontainers from T023,

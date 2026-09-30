@@ -23,8 +23,8 @@ this repository *is* the extracted module, so its root is that tree:
 
 ```text
 domain/      pure types, canonical encoding, derived keys, backoff, shard. Imports nothing
-ports/       driving.go (Notifier, Inbox, Admin, Dispatcher, Maintenance) · driven.go (Channel, Store,
-             InboxStore, MaintenanceStore, PreferenceStore, TopicRegistry, TemplateRenderer,
+ports/       driving.go (Notifier, Inbox, Admin, Dispatcher, Jobs) · driven.go (Queue, Digests, Maintenance,
+             Channel, Store, InboxStore, PreferenceStore, TopicRegistry, TemplateRenderer,
              AddressBook, AudienceResolver, SuppressionStore, QuotaCounter, PreCheck,
              StreamPublisher, Clock, IDSource)
 app/         use-cases: notifier · planner · broadcast · dispatcher · digest · quota · inbox ·

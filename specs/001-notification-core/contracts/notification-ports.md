@@ -70,6 +70,14 @@ PRODUCERS — thin: build a Notification, call Notify (or NotifyTx inside their 
 
 ## Domain types
 
+The Go declarations in [`domain/`](../../../domain/) and [`ports/`](../../../ports/) are normative, and
+this sketch is the shape they follow. Where the code differs: the types live in package `domain`
+(`domain.Realm`, `domain.Notification`, …); `Tx` and every interface are in `ports`; the sentinel
+errors are in `domain/errors.go`; and `domain` adds what the sketch leaves out — `ValidationError` with
+the validators on `Notification` and `TopicDef`, `TopicDef.EffectivePriority` and `Digestible`, the
+priority constants, and the inbox, broadcast-job and quota types the ports speak in (`InboxItem`,
+`BroadcastJob`, `PageItem`, `QuotaKey`).
+
 ```go
 package notify
 
@@ -518,10 +526,11 @@ type Dispatcher interface {
 ## Driven ports
 
 ```go
-// Queue, Digests and Maintenance are implemented: ports/driven.go holds them and
-// adapters/driven/postgres implements them as plain SQL, tested against PostgreSQL
-// by the integration suite (D37). The Go declarations there are normative; they are
-// summarized here. Every method taking a Claim is FENCED: it changes state only
+// Every port is declared in ports/driven.go (and ports/driving.go for the driving
+// ones); the Go declarations there are normative and are summarized here. Queue,
+// Digests and Maintenance are implemented: adapters/driven/postgres implements them
+// as plain SQL, tested against PostgreSQL by the integration suite (D37). Every
+// method taking a Claim is FENCED: it changes state only
 // while the claim's lease token is current, and reports ok=false, having written
 // nothing, when the lease was lost (D19).
 type Queue interface {
@@ -561,7 +570,7 @@ type Maintenance interface {
 	// Still to come: RetirePartitions (T038), ReplayDeadLetter (T032).
 }
 
-// Store is the persist and read path, still to be implemented (T015–T017).
+// Store is the persist and read path: declared, to be implemented by T015–T017.
 type Store interface {
 	// PersistAndEnqueue writes, in ONE transaction and under the identity's
 	// transaction-local scope (D17): the notify_idem guard first (a conflict ⇒ replay,
@@ -1178,7 +1187,10 @@ module — no host, no replace directives?**
   go.mod                   module github.com/truongpx396/intel-notification
   config.go                notify.Config — the entire configuration surface
   domain/                  pure types, canonical encoding, keys, backoff, shard. Imports nothing
-    identity.go notification.go delivery.go outcome.go plan.go keys.go backoff.go shard.go
+    identity.go keys.go shard.go backoff.go       identity, derived keys, shard, backoff
+    notification.go plan.go delivery.go           notifications, topics, plans, deliveries
+    queue.go partitions.go status.go inbox.go     queue, maintenance, status and inbox types
+    errors.go validation.go                       sentinels and the validation error
   ports/
     driving.go             Notifier, Inbox, Admin, Dispatcher, Jobs
     driven.go              Queue, Digests, Maintenance (implemented) · Channel, ChannelRegistry,
