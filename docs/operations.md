@@ -30,13 +30,16 @@ There is no broker in the default deployment and nothing to scale for one.
 | `notify.partition.missing` | next month absent | Provisioning lapsed; inserts start failing at month roll |
 | `notify.partition.unscoped` | any `notifications` partition without `recipient_scope` | **Isolation incident.** A partition queried by name would show every recipient's rows. Apply `notify_apply_recipient_scope()` now |
 | `notify.job.stale` | a job's `last_started_at` older than twice its interval | No worker is taking the lease |
+| `notify.db.oldest_xmin_age` | the oldest `backend_xmin` in `pg_stat_activity` older than 60 s (tune to your rate) | A transaction is pinning vacuum, so the queue table will bloat and latency will follow. Find it and end it ([D38](../specs/001-notification-core/design-decisions.md#d38)) |
+| `notify.db.checkpoints_requested` | `checkpoints_req` rising faster than `checkpoints_timed` | Checkpoints are being forced by WAL volume: `max_wal_size` is too small for this write rate |
+| `notify.outbox.dead_tuples` | still rising after the last autovacuum, or `last_autovacuum` older than 5 min | Vacuum is blocked or not keeping up. Tens to hundreds of thousands between runs is normal at 1,000 / s; what matters is that it comes back down |
 | `notify.channel.dedup_none` | informational, per registered channel | Which channels are at-least-once by declaration |
 
 ## Playbooks
 
 ### Queue depth climbing
 
-1. **One tenant or all?** `SELECT tenant_id, channel, count(*) FROM notification_outbox WHERE next_attempt_at <= now() GROUP BY 1, 2 ORDER BY 3 DESC`.
+1. **One tenant or all?** `SELECT tenant_id, channel, count(*) FROM notification_outbox WHERE next_attempt_at <= now() AND (lease_expires_at IS NULL OR lease_expires_at <= now()) GROUP BY 1, 2 ORDER BY 3 DESC`.
    A single tenant with an exhausted quota should already have been deferred out of the due range; if
    it has not, the quota job is not running.
 2. **Read `last_error`** on the oldest due rows. One provider dominating means an external outage and
@@ -59,6 +62,37 @@ There is no broker in the default deployment and nothing to scale for one.
    enqueues one fresh delivery and records `replayed_at`; a second replay of the same dead letter does
    nothing. On a `DedupProvider` channel, a replay after the provider's window (24h for Resend) is a new
    send.
+
+### Protecting the queue from its own database
+
+The queue table is small but churns: every delivery is inserted, updated once or twice and deleted, so
+it lives on WAL and on vacuum. Two things stalled it in `make soak` (ten minutes at 1,000
+notifications/s, fsync on, on a laptop with PostgreSQL in Docker — read the shape, not the figures):
+
+- **Checkpoints sized for a quiet database.** The queue writes 5–6 KB of WAL per notification, so about
+  5 MB/s at 1,000/s. PostgreSQL forces a checkpoint at roughly a third of `max_wal_size`, so with the
+  default 1 GB that is one about every 75 seconds at this rate (the server log showed
+  `checkpoint starting: wal`), and each checkpoint is followed by full-page images that raise the WAL
+  rate further. With the workers waiting on `WALWrite` and `WALSync`, accepts fell to about 200/s,
+  the backlog reached 84,000 and end-to-end p95 reached 76 s. The same run with `max_wal_size=16GB` and
+  `checkpoint_timeout=15min` had no stall in that stretch. Size `max_wal_size` to at least fifteen
+  minutes of your peak WAL rate, and alert when `pg_stat_bgwriter.checkpoints_req` climbs faster than
+  `checkpoints_timed`.
+- **A long-running transaction.** Vacuum cannot reclaim a row version an open snapshot might still see.
+  One held open for two minutes took the outbox heap from about 40–50 MB to 180–230 MB (570,000 to
+  750,000 dead tuples) and cut the share of HOT updates from 67% to as low as 18%. Latency
+  suffered while it was open and for up to about 90 seconds after (claim p95 up to 360 ms, end-to-end
+  p95 up to 31 s) while vacuum caught up. It cleared without intervention and the heap shrank back
+  about 100 seconds after the release, but the indexes stayed at their high-water mark (123–177 MB) until
+  reindexed. Set `idle_in_transaction_session_timeout` and `statement_timeout` on every role that shares
+  the database, and alert on the age of the oldest `backend_xmin` in `pg_stat_activity`. Why the deployment shape
+matters here — a library-mode queue shares the host's transactions — is
+[D38](../specs/001-notification-core/design-decisions.md#d38).
+
+Autovacuum ran about once a minute (the default `autovacuum_naptime`), so between runs the queue held
+tens of thousands to a few hundred thousand dead tuples, and its physical size in steady state was
+50–90 MB for a live set of a few hundred rows. That is bounded and stable, and it is what to expect, not
+a leak. Neither vacuum settings nor the effect of a slower disk have been varied yet.
 
 ### Changing the shard count
 

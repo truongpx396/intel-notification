@@ -7,7 +7,7 @@ This is the core contract: the domain types, every port, the invariants, the con
 the module layout, the lint gates that keep it standalone, and the gRPC facade. It began as a
 reusability seam *inside* the product this engine was extracted from and was carried here with its
 git history ([PROVENANCE.md](../../../PROVENANCE.md)). It was then revised by the architecture review
-recorded as D16–D36. That review found the carried version still described a unique constraint D2
+recorded as D16–D37. That review found the carried version still described a unique constraint D2
 proves cannot exist, a live push channel that leaked across tenants, and a worker that could not read
 what it delivers. Where this contract and prose elsewhere disagree, this contract wins, so it has to
 be right.

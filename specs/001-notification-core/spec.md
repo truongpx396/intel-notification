@@ -1,13 +1,13 @@
 # Specification: Notification core
 
-**Status**: normative, implementation not started.
+**Status**: normative, implementation started — [tasks.md](tasks.md) records what is built.
 **Contracts**: [contracts/](contracts/) · **Data model**: [data-model.md](data-model.md) ·
 **Decisions**: [design-decisions.md](design-decisions.md) · **Build order**: [tasks.md](tasks.md)
 
 This specification describes the engine as a product. Requirements carry `NR-0NN` ids and success
 criteria `NS-0NN`; the mapping from the originating project's `FR-032`–`FR-039` / `SC-011`–`SC-013`
 is recorded in [PROVENANCE.md](../../PROVENANCE.md). NR-027 onward, and the amended wording of
-several earlier requirements, come from the architecture review recorded as D16–D36.
+several earlier requirements, come from the architecture review recorded as D16–D37.
 
 ---
 
@@ -176,6 +176,10 @@ solving six problems that are easy to get subtly wrong and expensive to discover
   for ingest MUST acknowledge only after replication.
 - **NR-036**: The design MUST state its capacity envelope for a single primary database and the path
   beyond it.
+- **NR-037**: The system MUST report, as warnings and never as failures, the database conditions its
+  queue depends on, so that an operator learns of them before their effect: checkpoint sizing against
+  the observed WAL rate, the connected role's transaction timeouts, and any open transaction old enough
+  to pin vacuum.
 
 ---
 

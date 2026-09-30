@@ -4,8 +4,8 @@ How to adopt this engine in a host product. The short version: you supply your c
 templates, addresses and an identity binding — as Go code in library mode, or as data through the API in
 service mode — and you touch nothing in the delivery core.
 
-> Implementation has not started, so the code here describes the intended API. The **checklist** and the
-> **reasoning** are usable today — they are what the design is for.
+> The notifier, dispatcher, channels and transports are not built yet, so the code here describes the
+> intended API. The **checklist** and the **reasoning** are usable today — they are what the design is for.
 
 ## 0. Pick a mode
 
@@ -15,10 +15,21 @@ service mode — and you touch nothing in the delivery core.
 | Topics, templates | Go registrations, or the provided tables | rows, via the `Catalog` API |
 | Addresses | your `AddressBook`, or the provided table | the provided table, via `Catalog.PutAddresses` |
 | Notify inside your own transaction | yes — `NotifyTx` | no — call after commit; retries are safe on the same key |
+| Where the queue lives | your database, so your transactions and settings apply to it ([D38](../specs/001-notification-core/design-decisions.md#d38)) | its own database |
 | Recipient auth for the inbox | your session → `Identity` | a recipient token you sign |
 
 Start embedded if you are a Go shop with one product. Move to the service when a second product, or a
-non-Go one, needs to send from the same channels and templates.
+non-Go one, needs to send from the same channels and templates — or when volume reaches a few hundred
+notifications a second.
+
+The reason for that last one: in library mode the queue lives in your database, and a long transaction of
+yours stops vacuum reclaiming its rows. In a soak, one held open for two minutes at 1,000 notifications a
+second grew the queue four to six times and cost about ninety seconds of degraded latency
+([D38](../specs/001-notification-core/design-decisions.md#d38)). If you stay embedded:
+
+- set `idle_in_transaction_session_timeout` and `statement_timeout` on your application's database role;
+- keep `NotifyTx` transactions short — no provider or network call, and no waiting on a user, inside one;
+- run long reads and reports on a replica, not on the primary the queue lives on.
 
 ## 1. Decide your identity binding
 

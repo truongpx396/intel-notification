@@ -120,6 +120,12 @@ Stages map to [plan.md § Phasing](plan.md#phasing). Stages 1–6 are the releas
 - [ ] **T039** Test: retention succeeds while a dead-lettered delivery references an aged partition
       ([D6](design-decisions.md#d6))
 - [ ] **T040** `app/erasure.go` + `Admin.Erase`; test NS-012
+- [ ] **T040a** `app/maintenance.go`: `Maintenance.Preflight`, at startup and on a schedule, reports as
+      warnings and never failures the database conditions the queue depends on — `max_wal_size` against
+      the observed WAL rate, the connected role's `idle_in_transaction_session_timeout` and
+      `statement_timeout`, the age of the oldest `backend_xmin` — and exports `notify.db.oldest_xmin_age`
+      and `notify.db.checkpoints_requested` (NR-037, [D38](design-decisions.md#d38)). A test that a role
+      with no timeouts and an open old transaction each produce their warning
 
 ## Stage 9 — Broadcast
 
@@ -161,7 +167,10 @@ Stages map to [plan.md § Phasing](plan.md#phasing). Stages 1–6 are the releas
 ## Stage 13 — Load test and release
 
 - [ ] **T055** Load-test harness for every row of [plan.md § Capacity model](plan.md#capacity-model),
-      run against the reference configuration (NS-010)
+      run against the reference configuration (NS-010). *Partly started: `make bench` measures the
+      queue's claim and finish, claim latency under backlog and a proxy for the accept path, and
+      `make soak` runs it under sustained load with a long-running transaction, on a laptop. Broadcast,
+      reconnect, fairness and the reference configuration remain.*
 - [ ] **T056** [P] Fill `docs/integration-guide.md` code samples against the built API
 - [ ] **T057** Tag `v0.1.0` once Stages 1–6 are green; the README status block moves from "designed" to
       "core implemented". A production-ready release additionally requires T055
