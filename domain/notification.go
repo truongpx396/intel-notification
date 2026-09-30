@@ -10,6 +10,9 @@ const (
 	PriorityCritical Priority = "critical"
 )
 
+// Valid reports whether p is one of the three priorities.
+func (p Priority) Valid() bool { return false }
+
 // Notification is what a producer builds. It carries no Realm: the realm comes
 // from configuration or from the authenticated producer, never from the request
 // (NR-009) — see [Notification.Identity].
@@ -55,3 +58,21 @@ type DeliverySchedule struct {
 	Timezone   string        // IANA
 	Digest     time.Duration // 0 means immediate; above 0, same-topic notifications coalesce into a window
 }
+
+// Validate reports every rule n breaks, as a *ValidationError, or nil.
+func (n Notification) Validate() error { return nil }
+
+// Identity is n's full scoping tuple under realm. The realm is an argument, not
+// a field of n: it is never taken from the request (NR-009).
+func (n Notification) Identity(realm Realm) Identity { return Identity{} }
+
+// Validate reports every rule t breaks, as a *ValidationError, or nil.
+func (t TopicDef) Validate() error { return nil }
+
+// EffectivePriority is the priority a notification of priority p is treated at:
+// p itself, or the topic's default when p is empty.
+func (t TopicDef) EffectivePriority(p Priority) Priority { return "" }
+
+// Digestible reports whether a notification of priority p on this topic may be
+// folded into a digest (NR-014, NR-015).
+func (t TopicDef) Digestible(p Priority) bool { return false }
