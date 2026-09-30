@@ -179,6 +179,75 @@ SELECT attempts, deferrals, lease_token IS NOT NULL, next_attempt_at <= now()
 	}
 }
 
+// D19. The lease lives in lease_expires_at and a claim leaves the due time alone:
+// next_attempt_at is indexed, so moving it would make every claim a non-HOT update
+// that writes an entry into every index.
+func TestClaimLeavesTheDueTimeAlone(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	id := ident("w1", "u1")
+	oid := e.enqueue(row{id: id, notification: e.notification(id, "k"), shard: 90, channel: "email",
+		dueIn: -time.Minute})
+	dueTime := func() (due time.Time, leaseEnds *time.Time) {
+		t.Helper()
+		if err := e.db.Admin.QueryRow(t.Context(),
+			`SELECT next_attempt_at, lease_expires_at FROM notification_outbox WHERE id = $1::uuid`, oid).
+			Scan(&due, &leaseEnds); err != nil {
+			t.Fatal(err)
+		}
+		return due, leaseEnds
+	}
+	before, leaseEnds := dueTime()
+	if leaseEnds != nil {
+		t.Fatalf("an unclaimed row has a lease ending %v", leaseEnds)
+	}
+
+	e.claimOne(90)
+
+	after, leaseEnds := dueTime()
+	if !after.Equal(before) {
+		t.Errorf("the claim moved next_attempt_at from %v to %v", before, after)
+	}
+	if leaseEnds == nil || time.Until(*leaseEnds) < lease-time.Minute {
+		t.Errorf("lease_expires_at = %v, want about %v from now", leaseEnds, lease)
+	}
+}
+
+// D19. Retry and Defer end the lease along with the token. A row released and due
+// again at once must be claimable at once, not after the lease it no longer holds
+// would have expired.
+func TestReleasedRowIsClaimableAtOnce(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	past := time.Now().Add(-time.Second)
+	cases := []struct {
+		name    string
+		shard   domain.Shard
+		release func(context.Context, domain.Claim) (bool, error)
+	}{
+		{"retry", 91, func(ctx context.Context, c domain.Claim) (bool, error) {
+			return e.s.Retry(ctx, c, past, "timeout")
+		}},
+		{"defer", 92, func(ctx context.Context, c domain.Claim) (bool, error) {
+			return e.s.Defer(ctx, c, past, "quota")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			id := ident("w1", "u-"+tc.name)
+			e.enqueue(row{id: id, notification: e.notification(id, "k"), shard: tc.shard, channel: "email"})
+			c := e.claimOne(tc.shard)
+			if ok, err := tc.release(t.Context(), c); err != nil || !ok {
+				t.Fatalf("release: ok=%v err=%v", ok, err)
+			}
+			if claims, err := e.s.Claim(t.Context(), tc.shard, 10, lease); err != nil || len(claims) != 1 {
+				t.Fatalf("claimed %d rows (%v) after the %s, want the released row at once", len(claims), err, tc.name)
+			}
+		})
+	}
+}
+
 // D12, D20, D29, D37. The terminal transition for every outcome: the queue row
 // leaves, the history row lands, and the dead letter and next fallback channel
 // follow the disposition the domain decided.

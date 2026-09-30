@@ -7,7 +7,7 @@ disagree, one of them is a bug and the spec says which.
 
 | Directory | Role |
 |---|---|
-| [`specs/001-notification-core/`](../specs/001-notification-core/) | Phase 1 — normative, implementation not started |
+| [`specs/001-notification-core/`](../specs/001-notification-core/) | Phase 1 — normative, implementation started |
 | [`specs/002-escalation-workflows/`](../specs/002-escalation-workflows/) | Phase 2 — designed, not started |
 | [`memory/constitution.md`](memory/constitution.md) | The principles every change is checked against |
 

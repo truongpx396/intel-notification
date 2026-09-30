@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -80,12 +81,24 @@ func Main(m *testing.M, prepare Prepare) int {
 }
 
 func start(ctx context.Context, prepare Prepare) (*cluster, error) {
+	// Parallel tests each hold their own pools.
+	args := []string{"postgres", "-c", "max_connections=500"}
+	// fsync=off keeps the suite fast, and makes a commit free. That is wrong for
+	// a throughput benchmark, where the commit is much of the cost, so `make
+	// bench` sets PGTEST_DURABLE=1 to leave fsync on.
+	if os.Getenv("PGTEST_DURABLE") == "" {
+		args = append(args, "-c", "fsync=off")
+	}
+	// PGTEST_SETTINGS passes extra server settings, space separated, for a run that
+	// tunes the server: PGTEST_SETTINGS="max_wal_size=16GB checkpoint_timeout=15min".
+	for _, setting := range strings.Fields(os.Getenv("PGTEST_SETTINGS")) {
+		args = append(args, "-c", setting)
+	}
 	ctr, err := tcpostgres.Run(ctx, Image,
 		tcpostgres.WithDatabase("postgres"),
 		tcpostgres.WithUsername("postgres"),
 		tcpostgres.WithPassword("postgres"),
-		// Parallel tests each hold their own pools.
-		testcontainers.WithCmd("postgres", "-c", "fsync=off", "-c", "max_connections=500"),
+		testcontainers.WithCmd(args...),
 		tcpostgres.BasicWaitStrategies(),
 	)
 	c := &cluster{container: ctr}

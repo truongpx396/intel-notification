@@ -22,6 +22,7 @@
 --   TEST 9   no foreign key references a partitioned table                 D6
 --   TEST 10  constrained vocabularies and shapes                           D5 / D9 / D12
 --   TEST 11  suppressions and erasure records hold hashes, not identities  D35
+--   TEST 12  a claim can be a HOT update: no index on the columns it writes D19
 --
 -- The queue's state transitions — the claim, its fence, the terminal move,
 -- fan-out, fairness, digests, cancel, expiry, erasure — are SQL in the Go
@@ -397,6 +398,29 @@ DO $$ BEGIN
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'PASS: a suppression key is a 32-byte hash';
     END;
+END $$;
+
+\echo '=== TEST 12: a claim can be a HOT update (D19) ==='
+DO $$ BEGIN
+    -- An update is HOT only if it changes no indexed column, and a column named in an
+    -- index's predicate or expressions counts. The columns a claim writes must be in none.
+    PERFORM pg_temp.expect(
+        NOT EXISTS (
+            SELECT 1
+              FROM pg_index i
+              JOIN pg_attribute a ON a.attrelid = i.indrelid
+             WHERE i.indrelid = 'notification_outbox'::regclass
+               AND a.attname IN ('attempts', 'lease_token', 'claimed_at', 'lease_expires_at')
+               AND (a.attnum = ANY (i.indkey::int2[])
+                    OR coalesce(pg_get_expr(i.indpred,  i.indrelid), '') ~ ('\m' || a.attname || '\M')
+                    OR coalesce(pg_get_expr(i.indexprs, i.indrelid), '') ~ ('\m' || a.attname || '\M'))),
+        'no index covers a column a claim writes, so a claim can be a HOT update');
+    -- ...and the page needs room for the new row version, or the update is not HOT.
+    PERFORM pg_temp.expect(
+        coalesce((SELECT split_part(o, '=', 2)::int
+                    FROM pg_class c, unnest(c.reloptions) AS o
+                   WHERE c.oid = 'notification_outbox'::regclass AND o LIKE 'fillfactor=%'), 100) < 100,
+        'the queue table leaves free space in each page for a HOT update');
 END $$;
 
 RESET ROLE;

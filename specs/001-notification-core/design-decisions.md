@@ -3,7 +3,7 @@
 Each entry states the decision, the alternative, and **what goes wrong without it**. A decision with
 no failure mode attached is a preference, and preferences do not belong in a specification.
 
-Two kinds of entry carry a tag:
+Three kinds of entry carry a tag:
 
 - **inherited-gap** resolves something the originating design left open, contradictory, or
   unimplementable: D1, D2, D3, D4, D5, D6, D7, D9, D10, D11.
@@ -13,6 +13,8 @@ Two kinds of entry carry a tag:
   D16 (a cross-tenant leak on the live stream), D17 (a worker that could not read what it delivers),
   D18 (a pre-check that dropped notifications) and D22 (a delivery mode that reintroduced the bug the
   outbox exists to fix). Read those first.
+- **measured** comes from running the system rather than reading it: D38, and the amendments marked on
+  D19 and D20. Each states what was run and what was not.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
 [`scripts/verify-schema.sql`](../../scripts/verify-schema.sql), `make verify-schema`), an integration
@@ -432,9 +434,9 @@ ordering is `NotifierContract` "a failed transaction leaves no pre-check entry".
 ## D19 — The claim is a fenced lease · *review*
 
 **Decision.** `Queue.Claim(shard, limit, lease)` selects due rows `FOR UPDATE SKIP LOCKED`,
-increments `attempts`, issues a fresh `lease_token`, and moves `next_attempt_at` to `now() + lease`.
-Every state change (`Retry`, `Defer`, `Finish`, `BindAddresses`) must present the current token and
-affects nothing otherwise, reporting `ok=false`.
+increments `attempts`, issues a fresh `lease_token`, and sets `lease_expires_at` to `now() + lease`.
+The due time, `next_attempt_at`, is not touched. Every state change (`Retry`, `Defer`, `Finish`,
+`BindAddresses`) must present the current token and affects nothing otherwise, reporting `ok=false`.
 
 **Alternative.** The first version specified `ClaimOutbox` as "pops up to max due entries" with a
 `claimed_at` column and no lease, lock or fence.
@@ -449,8 +451,40 @@ reach the attempt ceiling instead of looping forever; counting on failure never 
 Verified: `TestClaimLeasesAndSkipsLockedRows` — a second session claims only the row the first does
 not hold; leased rows are invisible until the lease lapses; each claim counts. `TestFencedWrites` —
 every state change, with a forged token and with the token of a lapsed lease, changes nothing.
-Mutation-checked: removing `SKIP LOCKED`, the fence on any write, or the attempt count each fails a
-test.
+`TestClaimLeavesTheDueTimeAlone`, `TestReleasedRowIsClaimableAtOnce`, and the held-row cases of
+`TestDeferTenantChannel` and `TestCancel` — the amendment below. `make verify-schema` TEST 12 — no
+index covers a column a claim writes, and the table leaves room in each page. Mutation-checked:
+removing `SKIP LOCKED`, the fence on any write, or the attempt count each fails a test, and so does
+dropping the lease predicate from the claim, tenant deferral or cancel, leaving the lease set on
+`Retry` or `Defer`, moving `next_attempt_at` in the claim, indexing `lease_expires_at`, or removing
+the fillfactor.
+
+*Amendment (measured with `make bench`).* The first version kept the lease in `next_attempt_at`, an
+indexed column, so no claim could be a HOT update: `hot_upd_%` was 0, and every claim wrote a new row
+version and an entry in all five of the table's indexes. The lease now lives in `lease_expires_at`,
+which is in no index and no index predicate, and the table has `fillfactor = 60` so the new version
+fits in the same page. Measured on a laptop (PostgreSQL 16 in Docker, `fsync` on, a 20,000-row backlog),
+so read the ratios, not the absolute figures:
+
+| | lease in `next_attempt_at` | lease in `lease_expires_at`, fillfactor 60 |
+|---|---|---|
+| HOT updates, in-app style (claim, finish) | 0% | 96–100% |
+| WAL per delivery, in-app style | ≈ 1.7 KB | ≈ 1.1 KB |
+| HOT updates, with address binding | 0% | ≈ 50% |
+| WAL per delivery, with address binding | ≈ 2.4 KB | ≈ 1.9 KB |
+| Claim p95, 4 workers, batch 100 | ≈ 5 ms | ≈ 2 ms |
+| Throughput | | unchanged, within noise |
+
+Fillfactor 80 kept 80% of claims HOT with 16 workers, and 100 kept 30–40%. Three costs:
+
+- A held row stays in the due range of the claim index, and the claim skips it on the heap check.
+  There are only as many as workers hold, spread over `Shards`; claim p95 with 1,000,000 pending rows
+  was 4.7 ms.
+- A delivery that binds an address (email, SMS, push) is still one non-HOT update, because
+  `address_key` is in the unique index. That is the ≈ 50%. Removing it means changing when addresses
+  are bound, which is a separate decision.
+- The lease and the due time are two columns to keep consistent: `Retry`, `Defer` and tenant deferral
+  clear the lease along with the token, and "held" means `lease_expires_at > now()` everywhere.
 
 ## D20 — The queue holds pending work only; history is a separate log · *review*
 
@@ -471,6 +505,12 @@ provider's bounce callback need it: `notification_deliveries` is indexed by noti
 Verified: `TestFinish` — finished deliveries leave the queue; a provider callback finds its delivery
 by provider message id; a refused dead letter leaves the row queued and no history written, because the
 transition is one statement.
+
+*Amendment (measured with `make soak`).* "As small as the work in flight" holds for live rows, not for
+the table's size on disk, which lags by one vacuum cycle. At 1,000 notifications/s the live set stayed at
+a few hundred rows while the table was 50–90 MB in steady state, and it grew four to six times that under
+a long-running transaction. See
+[operations.md](../../docs/operations.md#protecting-the-queue-from-its-own-database).
 
 ## D21 — Idempotency is guaranteed for a window, not forever · *review*
 
@@ -624,6 +664,8 @@ commits "invoice overdue", crashes before `Notify`, and the dunning notice is lo
 PostgreSQL-backed queue (River, Oban, Graphile Worker) offers a transactional insert for this reason; a
 PostgreSQL-backed notification library without one hands its most important guarantee back to the
 caller.
+
+The price is exposure to the host's transaction behaviour: see [D38](#d38).
 
 ## D29 — Delivery lifecycle controls · *review*
 
@@ -790,13 +832,58 @@ functions (`0004_state_transitions.sql`), including the dead-letter and fallback
 
 The functions had one real advantage: they were testable before any Go existed. That is why this
 decision came with the Go that holds the SQL and the integration suite that proves it — including real
-concurrency (two sessions claiming one shard) and 13 mutation checks, each of which removes one
+concurrency (two sessions claiming one shard) and 20 mutation checks, each of which removes one
 guarantee (`SKIP LOCKED`, a fence, the attempt count, the disposition, a table from erasure, the scope on
 a new partition, …) and fails a named test. Without the suite, moving SQL into application code would
 only have moved it out of sight.
 
 Verified: the integration suite (`make test-integration`); `TestFinish` "the store executes the
 disposition it is given, and decides nothing"; `TestDispositionOf`.
+
+## D38 — The queue shares its database's fate, so where it is deployed decides how exposed it is · *measured*
+
+**Decision.** Service mode is the recommended shape once volume passes a few hundred notifications a
+second: the engine owns its database, ideally its own cluster, so no transaction it did not start can pin
+its vacuum, and its checkpoint and WAL settings are its own. Library mode stays supported, because
+`NotifyTx` ([D28](#d28)) is the guarantee it exists to give, but it shares the host's database and
+therefore the host's transactions. In library mode:
+
+- the host's role sets `idle_in_transaction_session_timeout` and `statement_timeout`;
+- `NotifyTx` runs in short transactions — no provider or network call, and no waiting on a user, inside one;
+- long reads and reports run on a replica, not on the primary the queue lives on;
+- the engine reports what it can see (NR-037), as warnings and never as failures: the age of the oldest
+  open snapshot, the connected role's timeouts, and checkpoint sizing against the observed WAL rate.
+
+The queue's mechanism does not change. Revisit a vacuum-free queue — rotating tables emptied by
+truncation — if a rate ramp shows vacuum cannot keep up at the target rate, or if long transactions
+prove uncontrollable in a deployment that cannot move to service mode.
+
+**Alternative.** Three, none adopted:
+
+- **Service only at scale.** Cleaner, but it hands D28's guarantee back to the hosts that would most
+  want it.
+- **A separate database for the library's queue.** Impossible with `NotifyTx`: one transaction cannot
+  span two databases.
+- **Say nothing**, as the first version did. The exposure exists in library mode whether or not it is
+  written down.
+
+**What goes wrong without it.** Vacuum cannot reclaim a row version that an open snapshot might still
+see, and in library mode that snapshot belongs to host code the engine neither sees nor controls: a
+report, an admin session, a forgotten transaction. In `make soak`, one held open for two minutes at
+1,000 notifications/s took the outbox heap from about 40–50 MB to 180–230 MB, cut HOT updates from 67% to
+as low as 18%, and was followed by a latency incident (claim p95 up to 364 ms, end-to-end p95 up to 31 s)
+that took about 90 seconds after the release to clear. Nothing was lost. Bloat scales with the rate times
+how long the snapshot is held, so the same hold costs less at a lower rate; the soak measured only
+1,000/s, so "a few hundred" is a judgment, not a measurement.
+
+Two limits on the mitigation. On PostgreSQL 16 neither timeout ends a transaction that keeps issuing
+short statements for minutes; `transaction_timeout`, added in PostgreSQL 17, does. And the soak did not
+run with the timeouts: its transaction sat idle in transaction, which is what
+`idle_in_transaction_session_timeout` ends, so that they would have contained it is expected, not verified.
+
+Measured: `make soak`, two runs, recorded in
+[operations.md](../../docs/operations.md#protecting-the-queue-from-its-own-database). Not yet verified:
+the timeouts containing it, and the threshold.
 
 ---
 

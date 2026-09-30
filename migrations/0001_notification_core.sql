@@ -235,13 +235,19 @@ CREATE TABLE notification_outbox (
     attempts                int         NOT NULL DEFAULT 0,
     -- Quota and quiet-hours deferrals. Not attempts, so they never dead-letter.
     deferrals               int         NOT NULL DEFAULT 0,
-    -- Due time. While a claim holds the row, it is the lease expiry.
+    -- Due time. A claim does NOT move it: it is in two indexes, so moving it would
+    -- make every claim a non-HOT update that writes an entry into all five of them.
+    -- Only Retry, Defer and tenant deferral change it (D19).
     next_attempt_at         timestamptz NOT NULL DEFAULT now(),
     -- Past this instant the delivery is terminal 'expired', never sent late (D29).
     deliver_before          timestamptz,
     -- The fencing token of the current claim; outcome writes must present it (D19).
     lease_token             uuid,
     claimed_at              timestamptz,
+    -- When the current claim's lease lapses; NULL while no claim holds the row. In
+    -- NO index and no index predicate, so that claiming can be a HOT update
+    -- (verify-schema TEST 12). A held row is one whose lease has not yet lapsed.
+    lease_expires_at        timestamptz,
     -- A critical notification delivered inside quiet hours, recorded for audit (D9).
     quiet_hours_override    boolean     NOT NULL DEFAULT false,
     last_error              text,
@@ -249,9 +255,14 @@ CREATE TABLE notification_outbox (
     CHECK ((notification_id IS NULL) <> (digest_id IS NULL)),
     CHECK ((notification_id IS NULL) = (notification_created_at IS NULL))
 ) WITH (
-    -- A queue churns: every claim, retry and deferral is an UPDATE. Vacuum it
-    -- at 1% dead tuples rather than the default 20%, or the claim index bloats
-    -- faster than autovacuum reclaims it.
+    -- A queue churns: every claim, retry and deferral is an UPDATE. A HOT update
+    -- writes the new row version into the same page, so it needs the room: with
+    -- full pages it falls back to writing every index. With 16 concurrent workers, 60
+    -- kept 96% of claims HOT where 80 kept 80% and 100 kept 30-40%, at no cost in
+    -- throughput (D19). The table holds pending work only (D20), so the space is cheap.
+    fillfactor = 60,
+    -- Vacuum it at 1% dead tuples rather than the default 20%, or the claim index
+    -- bloats faster than autovacuum reclaims it.
     autovacuum_vacuum_scale_factor        = 0.01,
     autovacuum_vacuum_insert_scale_factor = 0.01,
     autovacuum_analyze_scale_factor       = 0.02

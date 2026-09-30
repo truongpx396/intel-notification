@@ -58,7 +58,10 @@ are properties of the schema, checkable by a test, rather than a vendor's assura
 
 ## Phase 1 — Notification core
 
-**Status: designed and normative. Implementation not started.**
+**Status: designed and normative; implementation started.** Built so far: the schema, the domain
+rules, and the PostgreSQL adapter for the delivery queue, digests and maintenance jobs, with the CI
+boundary gates. Not built: the notifier, dispatcher, channels and transports. Task-level status is in
+[tasks.md](specs/001-notification-core/tasks.md).
 → [specs/001-notification-core](specs/001-notification-core/)
 
 The durable inbox, preferences, the transactional outbox, the dispatcher, the channel registry, the
@@ -71,7 +74,7 @@ PostgreSQL commits, workers claim from the queue table, and scheduled jobs are s
 leases. NATS JetStream is supported as an optional ingest path for producers that prefer to publish.
 The schema's guarantees are verified against PostgreSQL 16 by `make verify-schema`.
 
-The design went through an architecture review after the extraction, recorded as decisions D16–D36.
+The design went through an architecture review after the extraction, recorded as decisions D16–D37.
 It fixed a cross-tenant leak on the live stream, a worker that could not read what it delivered under
 row-level security, a pre-check that could drop notifications, and a delivery mode that reintroduced
 the bug the outbox exists to fix — and added what a general-purpose engine is expected to have. The

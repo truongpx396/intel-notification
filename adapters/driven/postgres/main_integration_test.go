@@ -140,7 +140,7 @@ func (e *env) queued(outboxID string) bool {
 func (e *env) lapseLeases(shard domain.Shard) {
 	e.t.Helper()
 	if _, err := e.db.Admin.Exec(e.t.Context(),
-		`UPDATE notification_outbox SET next_attempt_at = now() - interval '1 second' WHERE shard = $1`,
+		`UPDATE notification_outbox SET lease_expires_at = now() - interval '1 second' WHERE shard = $1`,
 		int16(shard)); err != nil {
 		e.t.Fatal(err)
 	}

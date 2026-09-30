@@ -94,6 +94,27 @@ arch-lint: ## go-arch-lint: the hexagonal dependency graph
 	@command -v go-arch-lint >/dev/null || { echo "go-arch-lint not installed: go install github.com/fe3dback/go-arch-lint@v1.19.0"; exit 1; }
 	go-arch-lint check
 
+# Not in `make ci`: timings are for reading, not for gating, and a run takes minutes.
+# No -race: the detector slows the code being measured. PGTEST_DURABLE=1 leaves fsync on,
+# because a commit that costs nothing hides what batching and group commit would save.
+BENCH_N      ?= 20000
+BENCH_CLAIMS ?= 1000
+SOAK_DURATION ?= 10m
+
+.PHONY: bench
+bench: ## Queue throughput benchmarks against PostgreSQL (needs Docker; see docs/testing.md)
+	PGTEST_DURABLE=1 go test -tags integration -run '^$$' -timeout 60m \
+	  -bench 'QueueCycle|AcceptProxy' -benchtime=$(BENCH_N)x ./adapters/driven/postgres
+	PGTEST_DURABLE=1 go test -tags integration -run '^$$' -timeout 60m \
+	  -bench 'ClaimLatencyWithBacklog' -benchtime=$(BENCH_CLAIMS)x ./adapters/driven/postgres
+
+# SOAK_RATE, SOAK_WORKERS, SOAK_HOLD and the rest are read from the environment (see
+# queue_soak_integration_test.go). -timeout 0: a soak may run for hours.
+.PHONY: soak
+soak: ## Sustained-load soak of the queue for SOAK_DURATION (default 10m); needs Docker
+	SOAK_DURATION=$(SOAK_DURATION) PGTEST_DURABLE=1 go test -tags integration -run '^TestSoak$$' \
+	  -v -count=1 -timeout 0 ./adapters/driven/postgres
+
 # ------------------------------------------------------------------ e2e -------
 .PHONY: e2e e2e-list
 e2e: ## Playwright end-to-end tests against the compose stack (needs Docker, Node 24)

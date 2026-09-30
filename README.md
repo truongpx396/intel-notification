@@ -156,7 +156,7 @@ commit, that can skip a database round-trip and can never skip a notification.
 | [ROADMAP.md](ROADMAP.md) | scope, phases, and when to use something else |
 | [specs/001-notification-core/](specs/001-notification-core/) | the normative specification |
 | [contracts/notification-ports.md](specs/001-notification-core/contracts/notification-ports.md) | every port, the 16 invariants, the dispatcher algorithm, contract tests, the gRPC surface |
-| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 37 decisions, each with what it prevents — D16–D37 from the architecture review |
+| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 38 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement |
 | [data-model.md](specs/001-notification-core/data-model.md) | tables, keys, RLS, state transitions, retention |
 | [plan.md](specs/001-notification-core/plan.md) | build order and the capacity model |
 | [research.md](specs/001-notification-core/research.md) | the originating research the design rests on, carried with its history |

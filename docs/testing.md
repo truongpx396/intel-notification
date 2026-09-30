@@ -16,6 +16,7 @@ PostgreSQL, a user-visible behaviour through the running service.
 | **Schema** | `psql` against a throwaway PostgreSQL 16 | What the schema alone holds: constraints, forced row-level security on every scoped table and partition, key spaces, shapes | `make verify-schema` | `schema` |
 | **Integration** | `go test -tags integration` + **Testcontainers** | Every state transition in `adapters/driven/postgres`, against a real PostgreSQL, as the non-superuser table owner — including real concurrency | `make test-integration` | `integration` |
 | **End to end** | **Playwright** | The running service as a host's front end sees it: the REST inbox, the SSE stream, unsubscribe links, provider callbacks | `make e2e` | `e2e-suite` (typecheck + list) now; `e2e` once the service exists |
+| **Benchmark** | `go test -bench` + Testcontainers | What one PostgreSQL primary sustains: queue throughput, WAL and HOT-update share per delivery, claim latency under backlog. Not a pass/fail gate. `soak` runs the queue under sustained load and watches for bloat and drift | `make bench`, `make soak` | — |
 | **Boundaries** | `golangci-lint` (depguard, paralleltest…), `go-arch-lint` | The hexagon's dependency graph, the extraction guarantee, and the test conventions below | `make lint arch-lint` | `lint` |
 
 `make ci` runs everything that runs today.
@@ -108,7 +109,7 @@ Rules:
 
 A test that cannot fail proves nothing. For each guarantee worth a test, break it on purpose once and
 confirm the test goes red: remove `SKIP LOCKED`, drop a lease fence, skip a table in erasure. The queue's
-integration suite was checked this way against 13 such mutations, every one caught (two of them only
+integration suite was checked this way against 20 such mutations, every one caught (two of them only
 after the tests were strengthened — which is the point). Do this whenever you add or change a guarantee.
 
 ### End to end: Playwright
@@ -132,6 +133,70 @@ The service does not exist yet, so every spec is written against the REST contra
 `test.describe.fixme` with the tasks that will enable it (T044, T049); T047a switches the suite on. CI typechecks and lists the suite
 on every change, so it cannot rot before the service arrives, and the full `e2e` job switches on with
 those tasks.
+
+## Benchmarks
+
+`make bench` measures what one PostgreSQL primary sustains. It answers "where is the ceiling and what is
+it made of" so a scaling change (batching, fillfactor, an index) is judged on the number that moved. It
+is not a gate and is not in `make ci`.
+
+| Benchmark | Measures |
+|---|---|
+| `BenchmarkQueueCycle` | Drain a backlog: claim a batch, finish each delivery. Matrix of 1, 4 and 16 workers by batch 10 and 100, with and without the address-binding step that email, SMS and push add (in-app has none). The provider call is free, so this is the database's ceiling, not a provider's |
+| `BenchmarkClaimLatencyWithBacklog` | One `Claim` against a large backlog of due rows — the plan's "claim p95 < 20 ms with 1 M pending rows" (`BENCH_BACKLOG=1000000`) |
+| `BenchmarkAcceptProxy` | The write footprint of accepting a notification: inbox row, idempotency guard, two queue rows, in one statement under the recipient's scope |
+
+Each run reports throughput, p50/p95/p99 latency, **WAL bytes per delivery** and, for the queue, the
+share of **HOT updates** (`hot_upd_%`). Read the last two before the first: WAL volume is what caps a
+single primary, and a HOT ratio near zero means every claim rewrites the claim indexes.
+
+Read the numbers with these limits in mind:
+
+- **It runs in a container, on your machine.** Absolute figures are not a capacity claim. Use them to
+  compare two builds on one machine, or point the same benchmarks at the reference configuration in
+  `plan.md` before quoting anything against NS-010.
+- **`make bench` keeps `fsync` on** (`PGTEST_DURABLE=1`). The ordinary integration suite turns it off;
+  with it off a commit costs nothing, which hides exactly what batching and group commit save. The run
+  logs the setting it used.
+- **`BenchmarkAcceptProxy` is a proxy.** `PersistAndEnqueue` does not exist yet, and the real one also
+  resolves preferences, peeks quota and may append to a digest. Treat the result as an upper bound, and
+  swap in the real call when it lands.
+- **WAL is cluster-wide and starts from a fresh checkpoint**, so it includes one full-page image per
+  page first touched. It is pessimistic for a short run; compare it between runs rather than quoting it.
+- **No `-race`.** The detector slows the code being measured, so `make bench` does not use it.
+
+`BENCH_N` (default 20000) is the backlog for the cycle and accept benchmarks and `BENCH_CLAIMS`
+(default 1000) the number of claims; both are passed as `-benchtime=<n>x`, because a duration would
+re-seed the table on every retry.
+
+### Soak
+
+`make soak` answers what the benchmarks cannot: whether the queue holds up under *sustained* load. A
+PostgreSQL-backed queue fails by bloat, not by slowness: dead tuples and index entries pile up faster
+than autovacuum clears them, and latency and table size drift while throughput still looks fine. A
+20,000-row benchmark finishes in seconds and never sees it.
+
+`TestSoak` (in `queue_soak_integration_test.go`, skipped unless `SOAK_DURATION` is set) runs producers
+and dispatcher-style workers together at a fixed rate, samples the queue table every ten seconds, and,
+part-way through, holds one long-running transaction open. That is the usual way a queue table bloats in
+production: vacuum cannot reclaim a row version that an open snapshot might still see. It prints a time
+series (throughput, backlog, end-to-end and claim p95, heap and index size, dead tuples, HOT share, WAL
+rate, autovacuum runs) and a summary.
+
+It **fails** on lost or duplicated work or a backlog that does not drain. It **flags** drift (claim or
+end-to-end p95 more than doubling, the heap still growing in the last third, the load not being
+sustained) but does not fail on it, because how much drift is too much is for the person reading the
+table to judge. Ten minutes at the default rate is about 1.2 million deliveries; the duration and rate
+are `SOAK_DURATION` and `SOAK_RATE`, and `queue_soak_integration_test.go` lists the rest.
+
+Pass server settings with `PGTEST_SETTINGS` to compare a tuning like for like, for example
+`PGTEST_SETTINGS="max_wal_size=16GB checkpoint_timeout=15min" make soak`. The first two runs used it, and
+[operations.md](operations.md#protecting-the-queue-from-its-own-database) records what they showed. As with
+the benchmarks, the figures come from a container on a laptop: compare runs, do not quote them.
+
+Slow leaks are outside a ten-minute run's reach: the idempotency table's growth over its window,
+monthly partition provisioning, replica lag under sustained WAL. Those are checked by extrapolating
+per-row sizes, or by running `make soak SOAK_DURATION=8h` overnight.
 
 ## Editor setup
 

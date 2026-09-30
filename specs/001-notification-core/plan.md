@@ -34,7 +34,8 @@ adapters/
   driving/   inprocess/ · httpapi/ · grpcserver/ · grpcclient/ · natsingest/
 api/         notifyv1 (generated)
 cmd/notifyd  the service binary
-migrations/  owns the schema, including the state-transition functions
+migrations/  owns the schema: constraints, row-level security, indexes. The state transitions are SQL
+             in adapters/driven/postgres, not functions here (D37)
 config.go    the entire configuration surface
 ```
 
@@ -44,11 +45,13 @@ asserts the module builds and tests green with **no host present** (NS-009).
 
 ## Capacity model
 
-The design envelope for **one PostgreSQL primary**. These are targets, not measurements: nothing is
-built yet. NS-010 gates the first production-ready release on a load test that meets every row.
+The design envelope for **one PostgreSQL primary**. These are targets, not measurements: the queue's
+claim and finish and a proxy for the accept path have been benchmarked on a laptop
+([testing.md](../../docs/testing.md#benchmarks)), but nothing has run on the reference configuration below. NS-010 gates the first production-ready release on a load test that meets every row.
 
 **Reference configuration:** PostgreSQL 16 on 16 vCPU / 64 GiB / NVMe (≥ 16k IOPS),
-`synchronous_commit = on`; Redis 7, single node; four worker replicas; two channels per notification on
+`synchronous_commit = on`, `max_wal_size = 16GB`, `checkpoint_timeout = 15min` (the default 1 GB stalled the queue in a
+soak — [operations.md](../../docs/operations.md#protecting-the-queue-from-its-own-database)); Redis 7, single node; four worker replicas; two channels per notification on
 average, one address per channel.
 
 | Dimension | Target | What it exercises |
@@ -73,6 +76,12 @@ before adopting:
 | `notify_idem` | notify rate × `IdempotencyWindow` — at 1,000 / s and 7 days, about 600 M across 16 hash partitions. Shorten the window if that is too large; 24 hours is the floor |
 | `notification_outbox` | the backlog only |
 | `notification_deliveries` | delivery rate × `DeliveryLogRetention` |
+
+**WAL.** Measured on a laptop, the queue writes 5–6 KB of WAL per notification with both deliveries
+included: about 5 MB/s at 1,000 / s, and about 0.5 TB a day at 86 M / day before compression. Size
+replica bandwidth and WAL archiving for it, and `max_wal_size` for at least fifteen minutes of it
+([operations.md](../../docs/operations.md#protecting-the-queue-from-its-own-database)). The figure is a
+proxy for the accept path, not the real one.
 
 **Past one primary.** Every table is keyed by realm and tenant except the catalog
 (`notification_topics`, `notification_templates`, `channel_providers` — per realm) and
@@ -123,6 +132,8 @@ blockers. Stages 7–13 are required for the stated scope.
 | Lease shorter than a slow provider call | `ClaimLease` validated against channel timeouts; a lost lease is fenced and counted (`notify.lease.lost`) |
 | `LISTEN/NOTIFY` serializes commits at high write rates | Off by default; polling plus in-memory wakeup meets NS-004 without it ([D22](design-decisions.md#d22)) |
 | `notify_idem` larger than expected | Sizing formula published; window configurable down to 24 hours |
+| Default checkpoint sizing stalls the queue: at about 5 MB/s of WAL a 1 GB `max_wal_size` forces a checkpoint every ~75 s, and a soak's end-to-end p95 reached 76 s | `max_wal_size` sized to at least 15 minutes of peak WAL, set in the reference configuration; `notify.db.checkpoints_requested` alarm; the preflight (T040a) warns |
+| A long-running transaction pins vacuum and bloats the queue: two minutes at 1,000 / s took the heap from ~45 MB to ~200 MB and cost ~90 s of degraded latency | Service mode owns its database; library-mode roles set `idle_in_transaction_session_timeout` and `statement_timeout`; `NotifyTx` stays short ([D38](design-decisions.md#d38)); `notify.db.oldest_xmin_age` alarm; `transaction_timeout` on PostgreSQL 17 |
 | Digest windows leak | `flush_at` plus a leased flush job; `notify.digest.overdue` alarm; finished windows expire |
 | Two products adopt one deployment without setting `Realm` | `Config.Validate` rejects an empty or malformed `Realm`; service mode binds realms to producer principals |
 
