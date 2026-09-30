@@ -1215,6 +1215,8 @@ module — no host, no replace directives?**
   cmd/notifyd/             the service binary: the only place concrete adapters are assembled
   migrations/              owns the schema — travels with the module; migrations.go embeds it
   internal/pgtest/         integration-test support: Testcontainers, one cloned database per test
+  internal/notifytest/     the kit every suite is written against: fake clock, fault injection, probe,
+                           read-side fakes, Env (docs/testing.md)
   e2e/                     Playwright suite against the running service (docs/testing.md)
 ```
 

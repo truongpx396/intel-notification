@@ -117,7 +117,7 @@ rule above.
       `TemplateRenderer`, `AddressBook`, `AudienceResolver`, `SuppressionStore`, `QuotaCounter`,
       `PreCheck`, `StreamPublisher`, `Channel`, `AddressNormalizer`, `ChannelRegistry`, `Clock`,
       `IDSource`, beside the `Queue`, `Digests` and `Maintenance` already there. Same rule as T012
-- [ ] **T013a** *setup* `internal/notifytest` (an arch-lint `testing` component, like
+- [x] **T013a** *setup* `internal/notifytest` (an arch-lint `testing` component, like
       `internal/pgtest`): the kit every later suite is written against, so a Red test can exist before the
       code it drives. It holds `Env` (PostgreSQL through `pgtest`, Redis through Testcontainers from T023,
       one cloned database per test), fault injection (`FailNextCommit`, and a hook at each of the
@@ -128,6 +128,15 @@ rule above.
       **Red first:** the kit is tested where it has logic — an injector fires once, at the named point,
       and disarms; the clock moves only when told; `Probe` counts per key. Each fake later runs the same
       table as the adapter it stands in for (T018, T048), so it cannot drift
+      *Built: `Clock`, `Injector` (a hold or a crash at any of the nine `domain.DispatchStep`s, once),
+      `FaultStore` (`FailNextCommit` through the port's own transaction seam), `Probe` with a `Channel`
+      that honours its declared `Dedup`, `Registry`, the five fakes, and `Env` with `Main`. Each has its
+      own table test and its mutations are in the [ledger](../../docs/mutations.md). Not yet in `Env`,
+      each arriving with its task: Redis (T023), and the `Notifier`, `Dispatcher` and `Store`. The fakes
+      implement the semantics the contract states; where it is silent (the fallback chain being subject
+      to preferences, what an essential topic resolves to, locale fallback being tag, language, default)
+      the choice is in the fake's doc comment, and T018's and T048's shared tables decide it for both.*
+
 - [x] **T014** [P] *red → green* `config.go`: `Config`, `WithDefaults` and `Validate` with every rule in the
       contract ([D1](design-decisions.md#d1), [D21](design-decisions.md#d21)). `Validate` returns a
       `*ConfigError` naming each field at fault. *Mutation-checked: 22 mutations, two of them equivalent
