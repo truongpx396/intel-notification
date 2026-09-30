@@ -122,8 +122,10 @@ rule above.
       **Red first:** the kit is tested where it has logic — an injector fires once, at the named point,
       and disarms; the clock moves only when told; `Probe` counts per key. Each fake later runs the same
       table as the adapter it stands in for (T018, T048), so it cannot drift
-- [ ] **T014** [P] *red → green* `config.go`: `Config`, defaults and `Validate` with every rule in the
-      contract ([D1](design-decisions.md#d1), [D21](design-decisions.md#d21)).
+- [x] **T014** [P] *red → green* `config.go`: `Config`, `WithDefaults` and `Validate` with every rule in the
+      contract ([D1](design-decisions.md#d1), [D21](design-decisions.md#d21)). `Validate` returns a
+      `*ConfigError` naming each field at fault. *Mutation-checked: 22 mutations, two of them equivalent
+      ([ledger](../../docs/mutations.md)).*
       **Red first:** `TestConfigValidate`, one row per rule in the contract's list — each rejection row
       changes exactly one field of a valid config; boundary rows (`Realm` at 63 and 64 characters, a
       leading hyphen, uppercase; `IdempotencyWindow` at 24h and one nanosecond under;
