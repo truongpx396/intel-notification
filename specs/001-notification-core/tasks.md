@@ -94,13 +94,17 @@ rule above.
 - [x] **T008** `domain/keys.go`: pre-check key, stream key, delivery idempotency key, address key,
       broadcast member key, suppression and subject hashes — each with a frozen vector
       ([D16](design-decisions.md#d16), [D25](design-decisions.md#d25))
-- [ ] **T009** [P] `domain/`: `Notification`, `TopicDef`, `DeliverySchedule`, `DeliveryPlan`, `Receipt`,
-      `Delivery`, `DeliveryResult`, `UnreadCount`, broadcast and status types. *(Done: `Address`,
-      `OutboxEntry`, `Claim`, `TerminalOutcome`, `Disposition` and the dead-letter/fallback policy,
-      `Finish`, `Binding`, `CancelReceipt`, `DigestMember`.)* Imports nothing outside the module.
-      **Red first:** plain data gets no test. Any constructor or validator these types grow is written
-      as a table test first — for example an essential `TopicDef` that is also digestible, or a fallback
-      chain that repeats a channel (NR-015, NR-031)
+- [x] **T009** [P] `domain/`: `Notification`, `TopicDef`, `DeliverySchedule`, `DeliveryPlan`, `Receipt`,
+      `Delivery`, `DeliveryResult`, `UnreadCount`, broadcast and status types, and the inbox and
+      preference types the ports speak in. Imports nothing outside the module. Plain data got no test.
+      The behaviour these types grew was written test-first: `TopicDef.Validate` (a fallback chain that
+      repeats a channel, a channel both fanned out and a fallback), `TopicDef.Digestible` and
+      `EffectivePriority` (an essential or critical notification is never digestible, including one that
+      is critical only by its topic's default; NR-014, NR-015), `Notification.Validate` (the `IdemKey`
+      bounds and the identity components the schema checks) and `Notification.Identity`, which takes the
+      realm as an argument (NR-009). *Mutation-checked: 42 mutations, one of which survived until the
+      test helper was strengthened ([ledger](../../docs/mutations.md)). `DeliverySchedule` has no
+      validator yet: its quiet-hours format and time zone rules belong with the planner (T021).*
 - [x] **T010** [P] `domain/shard.go`: `ShardFor(identity, n)` over the canonical encoding, stable against
       a frozen vector table ([D11](design-decisions.md#d11))
 - [x] **T011** [P] `domain/backoff.go`: full jitter with a `RetryAfter` floor, and a test that the
