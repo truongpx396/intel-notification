@@ -59,8 +59,10 @@ are properties of the schema, checkable by a test, rather than a vendor's assura
 ## Phase 1 — Notification core
 
 **Status: designed and normative; implementation started.** Built so far: the schema, the domain
-rules, and the PostgreSQL adapter for the delivery queue, digests and maintenance jobs, with the CI
-boundary gates. Not built: the notifier, dispatcher, channels and transports. Task-level status is in
+types and rules, every port in the contract, the configuration and its validation, the test kit
+(`internal/notifytest`), and the PostgreSQL adapter for the delivery queue, digests and maintenance
+jobs, with the CI boundary gates. Not built: the store's persist and read paths, the notifier,
+dispatcher, channels and transports. Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
 → [specs/001-notification-core](specs/001-notification-core/)
 
