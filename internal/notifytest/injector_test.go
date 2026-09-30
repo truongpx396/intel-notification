@@ -66,24 +66,38 @@ func TestInjectorFiredIsPerStep(t *testing.T) {
 }
 
 // Faults armed for one step fire in the order they were armed, one per Reach: the
-// shape of "the first worker crashes, and its replacement is held".
+// shape of "the first worker crashes, and its replacement is held". A crash armed
+// before a hold must fire first; fired the other way round, the first worker would
+// be the one held.
 func TestInjectorFaultsAtOneStepFireInTheOrderArmed(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
-		ctx := context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel() // frees a worker the test finds held when it should not be
 		inj := NewInjector()
 		inj.PanicAt(domain.StepDeliver)
 		stall := inj.StallAt(domain.StepDeliver)
-		inj.PanicAt(domain.StepDeliver)
 
-		if Survive(func() { inj.Reach(ctx, domain.StepDeliver) }) == nil {
+		var crash *Crash
+		first := make(chan struct{})
+		go func() {
+			crash = Survive(func() { inj.Reach(ctx, domain.StepDeliver) })
+			close(first)
+		}()
+		synctest.Wait()
+		select {
+		case <-first:
+		default:
+			t.Fatal("the first Reach was held, but the crash was armed before the hold")
+		}
+		if crash == nil {
 			t.Fatal("the first Reach should have crashed: it was armed first")
 		}
 
-		held := make(chan struct{})
+		second := make(chan struct{})
 		go func() {
 			inj.Reach(ctx, domain.StepDeliver)
-			close(held)
+			close(second)
 		}()
 		synctest.Wait()
 		select {
@@ -91,18 +105,24 @@ func TestInjectorFaultsAtOneStepFireInTheOrderArmed(t *testing.T) {
 		default:
 			t.Fatal("the second Reach should have been held: it was armed second")
 		}
+		select {
+		case <-second:
+			t.Fatal("the second Reach passed the step while it was held")
+		default:
+		}
 		stall.Release()
 		synctest.Wait()
-		<-held
+		select {
+		case <-second:
+		default:
+			t.Fatal("Release did not let the second worker go on")
+		}
 
-		if Survive(func() { inj.Reach(ctx, domain.StepDeliver) }) == nil {
-			t.Fatal("the third Reach should have crashed: it was armed third")
-		}
 		if Survive(func() { inj.Reach(ctx, domain.StepDeliver) }) != nil {
-			t.Fatal("a fourth Reach crashed, with nothing left armed")
+			t.Fatal("a third Reach crashed, with nothing left armed")
 		}
-		if got := inj.Fired(domain.StepDeliver); got != 3 {
-			t.Fatalf("Fired(deliver) = %d, want 3", got)
+		if got := inj.Fired(domain.StepDeliver); got != 2 {
+			t.Fatalf("Fired(deliver) = %d, want 2", got)
 		}
 	})
 }

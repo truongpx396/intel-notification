@@ -14,6 +14,7 @@ type fakeTx struct {
 	mu                 sync.Mutex
 	commits, rollbacks int
 	commitErr          error
+	rollbackCtxErr     error // the state of the context the last Rollback was given
 }
 
 func (f *fakeTx) Commit(context.Context) error {
@@ -23,10 +24,11 @@ func (f *fakeTx) Commit(context.Context) error {
 	return f.commitErr
 }
 
-func (f *fakeTx) Rollback(context.Context) error {
+func (f *fakeTx) Rollback(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rollbacks++
+	f.rollbackCtxErr = ctx.Err()
 	return nil
 }
 
@@ -39,15 +41,19 @@ func (f *fakeTx) counts() (commits, rollbacks int) {
 // innerStore records what the wrapper hands the store it wraps.
 type innerStore struct {
 	ports.Store
-	calls   int
-	gotTx   ports.Tx
-	err     error
-	receipt domain.Receipt
+	calls     int
+	gotTx     ports.Tx
+	err       error
+	receipt   domain.Receipt
+	onPersist func() // runs inside PersistAndEnqueue, after the writes
 }
 
 func (s *innerStore) PersistAndEnqueue(_ context.Context, tx ports.Tx, _ domain.Identity, _ domain.Notification, _ domain.DeliveryPlan) (domain.Receipt, error) {
 	s.calls++
 	s.gotTx = tx
+	if s.onPersist != nil {
+		s.onPersist()
+	}
 	return s.receipt, s.err
 }
 
@@ -240,5 +246,38 @@ func TestFaultStoreDelegatesTheRest(t *testing.T) {
 	st, err := f.store.Status(t.Context(), domain.Identity{}, "k")
 	if err != nil || st.NotificationID != "from-inner" {
 		t.Fatalf("Status = %+v, %v, want the inner store's answer", st, err)
+	}
+}
+
+// A request whose context ends mid-notify must still have its transaction rolled
+// back: the rollback that frees the connection runs on a context that outlives the
+// caller's.
+func TestFaultStoreRollsBackEvenWhenTheContextWasCanceled(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(*fixture)
+	}{
+		{"after an inner error", func(f *fixture) { f.inner.err = errors.New("inner failed") }},
+		{"for an injected commit failure", func(f *fixture) { f.store.FailNextCommit() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			ctx, cancel := context.WithCancel(t.Context())
+			f.inner.onPersist = cancel
+			tc.setup(f)
+
+			if _, err := f.notify(ctx, nil); err == nil {
+				t.Fatal("Notify succeeded")
+			}
+			tx := f.tx(t, 0)
+			if _, rb := tx.counts(); rb != 1 {
+				t.Fatalf("rollbacks = %d, want 1", rb)
+			}
+			if tx.rollbackCtxErr != nil {
+				t.Fatalf("the rollback ran on a context that was already %v: it cannot free the connection", tx.rollbackCtxErr)
+			}
+		})
 	}
 }

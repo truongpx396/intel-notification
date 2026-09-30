@@ -124,6 +124,9 @@ func TestChannelTurnsAFailureIntoItsOutcome(t *testing.T) {
 				t.Fatalf("Sends = %d, Calls = %d, want 0 and 1: a failed send did not reach the provider",
 					probe.Sends("k1"), probe.Calls("k1"))
 			}
+			if got := probe.Keys(); !slices.Equal(got, []string{"k1"}) {
+				t.Fatalf("Keys() = %v, want [k1]: a key that was only ever asked for is still listed", got)
+			}
 		})
 	}
 }

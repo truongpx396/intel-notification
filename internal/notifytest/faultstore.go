@@ -54,9 +54,47 @@ func NewFaultStore(inner ports.Store, begin BeginFunc) *FaultStore {
 // rolled back instead, and reported as ErrInjectedCommit. Calling it twice arms
 // two. A failure fires only at a commit, so an inner error, or a transaction the
 // caller owns, leaves it armed.
-func (s *FaultStore) FailNextCommit() {}
+func (s *FaultStore) FailNextCommit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failNext++
+}
+
+// consumeFailure spends one armed failure, if there is one.
+func (s *FaultStore) consumeFailure() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failNext == 0 {
+		return false
+	}
+	s.failNext--
+	return true
+}
 
 // PersistAndEnqueue implements ports.Store.
 func (s *FaultStore) PersistAndEnqueue(ctx context.Context, tx ports.Tx, id domain.Identity, n domain.Notification, plan domain.DeliveryPlan) (domain.Receipt, error) {
-	return s.Store.PersistAndEnqueue(ctx, tx, id, n, plan)
+	if tx != nil {
+		return s.Store.PersistAndEnqueue(ctx, tx, id, n, plan)
+	}
+
+	own, err := s.begin(ctx)
+	if err != nil {
+		return domain.Receipt{}, err
+	}
+	// A canceled ctx must not stop the rollback that frees the connection.
+	rollback := func() { _ = own.Rollback(context.WithoutCancel(ctx)) }
+
+	receipt, err := s.Store.PersistAndEnqueue(ctx, own, id, n, plan)
+	if err != nil {
+		rollback()
+		return domain.Receipt{}, err
+	}
+	if s.consumeFailure() {
+		rollback()
+		return domain.Receipt{}, ErrInjectedCommit
+	}
+	if err := own.Commit(ctx); err != nil {
+		return domain.Receipt{}, err
+	}
+	return receipt, nil
 }
