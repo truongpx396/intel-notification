@@ -15,6 +15,10 @@ vendor/
 .golangci-cache/
 *.log
 
+# Claude Code: .claude/ is shared, personal overrides are not
+.claude/settings.local.json
+CLAUDE.local.md
+
 # OS / editor
 .DS_Store
 .idea/
