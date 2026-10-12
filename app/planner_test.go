@@ -342,6 +342,14 @@ func TestPlan(t *testing.T) {
 		{name: "a digest cadence folds each enabled channel into its window (NR-014)",
 			setup: func(f *planFx) { f.setSchedule(cadence) },
 			want:  wantPlan{ds: []wd{digest("in_app"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 50}},
+		{name: "the configuration's defaults reach the plan: a window holds 100 members and there are 16 shards",
+			why: "an unset DigestMax would reach the store as 0, which it refuses",
+			setup: func(f *planFx) {
+				f.cfg = notify.Config{Realm: planRealm, StoreDSN: "x", RedisURL: "y"}
+				f.setSchedule(cadence)
+			},
+			want: wantPlan{ds: []wd{digest("in_app"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 100,
+				shard: func() *domain.Shard { s := domain.ShardFor(planID, 16); return &s }()}},
 		{name: "no cadence, no digest",
 			setup: func(f *planFx) { f.setSchedule(domain.DeliverySchedule{Digest: 0}) },
 			want:  wantPlan{ds: []wd{imm("in_app"), imm("email")}, visible: true}},
@@ -562,8 +570,10 @@ var errPort = errors.New("test: the port failed")
 
 type failingQuota struct{}
 
+// Peek fails and, as a misbehaving adapter might, also says the budget is spent
+// until an hour from now: the error is the answer, and the rest is not to be read.
 func (failingQuota) Peek(context.Context, domain.QuotaKey) (bool, time.Time, error) {
-	return false, time.Time{}, errPort
+	return true, noon.Add(time.Hour), errPort
 }
 
 func (failingQuota) Take(context.Context, domain.QuotaKey) (bool, time.Time, error) {

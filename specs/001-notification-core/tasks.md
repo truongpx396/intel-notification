@@ -306,6 +306,21 @@ rule above.
       under `drop_non_essential` for a non-essential, non-critical topic; the fallback order is kept.
       **Mutate:** defer `critical`; digest an essential topic; drop an essential notification; accept a
       time zone the database does not know
+      *Built as `app.Planner` with `domain.DeliverySchedule.Validate` and `QuietUntil` and
+      `domain.QuotaPolicy.Drops`, and 60 rows in the [ledger](../../docs/mutations.md): two survivors, both
+      gaps in the table (the configuration's defaults, and a failing counter that returned a zero reset),
+      and one equivalent mutant, a redundant guard that was removed. The contract was silent on several
+      points and the choices are in `Planner.Plan`'s doc comment: the planner reads a quota's `on_exhausted`
+      through a new `ports.QuotaPolicies` (nil, or a lookup that fails, defers; quota fails open and a
+      lookup that fails must not discard); a fallback channel is never fanned out and the chain rides each
+      fanned-out delivery, skipping a channel the recipient disabled; a channel only a tenant row enables
+      does fan out (D30's "everyone gets security email"); quiet hours are judged at the instant a
+      delivery would otherwise be due, so a send scheduled for the morning is not held by tonight's, and of
+      quota and quiet hours the later wins; a scheduled send and one with an expiry are never digested,
+      since a window could deliver them early or late; a schedule that does not validate is not applied,
+      cadence and all, rather than lose the notification; and the inbox shows a scheduled notification
+      from its send time whatever quiet hours do to the deliveries. The zone database is embedded
+      (`time/tzdata`) so two hosts end quiet hours at the same instant.*
 - [ ] **T023** *red → green* `redis/precheck.go`: read before, write after commit, never for `NotifyTx`;
       a test that a failed transaction leaves no entry ([D18](design-decisions.md#d18)).
       **Red first:** against Redis under Testcontainers — a commit failure leaves no entry; `NotifyTx`

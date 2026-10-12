@@ -6,6 +6,9 @@ package app
 
 import (
 	"errors"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/truongpx396/intel-notification/ports"
 )
@@ -33,6 +36,38 @@ type Deps struct {
 	PreCheck      ports.PreCheck // nil: every Notify takes the durable path
 	Clock         ports.Clock    // nil: the system clock
 	IDs           ports.IDSource // nil: UUIDv7
+}
+
+// systemClock is the default ports.Clock.
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }
+
+// clockOf is d's clock, or the system clock when none was given.
+func (d Deps) clockOf() ports.Clock {
+	if d.Clock == nil {
+		return systemClock{}
+	}
+	return d.Clock
+}
+
+// gaps collects the ports a constructor needs and d leaves nil, so a host fixes
+// its wiring in one pass instead of one error per start.
+type gaps []string
+
+// need records that the port called name is required, and absent says it is nil.
+func (g *gaps) need(name string, absent bool) {
+	if absent {
+		*g = append(*g, "Deps."+name)
+	}
+}
+
+// err is nil when nothing is missing.
+func (g gaps) err(use string) error {
+	if len(g) == 0 {
+		return nil
+	}
+	return fmt.Errorf("app: %s needs %s", use, strings.Join(g, ", "))
 }
 
 var errNotImplemented = errors.New("not implemented")
