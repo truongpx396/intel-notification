@@ -9,7 +9,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	notify "github.com/truongpx396/intel-notification"
 	"github.com/truongpx396/intel-notification/adapters/driven/postgres"
+	"github.com/truongpx396/intel-notification/app"
 	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/internal/pgtest"
 	"github.com/truongpx396/intel-notification/ports"
@@ -58,10 +60,16 @@ func prepare(ctx context.Context, owner *pgxpool.Pool, now time.Time) error {
 // partition a row lands in. The queue's due times stay the database's now(): a
 // claim is decided inside one statement, which the fake clock cannot reach.
 //
-// Redis arrives with T023, and the Notifier and Dispatcher with the tasks that
-// build them; each lands here as one more field.
+// The Notifier is the real one, over the Env's own pieces: the real Store, the
+// fakes, the fake clock and a pre-check. Redis arrives with T023 and the
+// Dispatcher with the task that builds it; each lands here as one more field.
 type Env struct {
 	DB *pgtest.DB
+
+	// Config is the configuration the Notifier was built with: the Env's realm and
+	// the library defaults. The two connection strings are placeholders, because
+	// the Env hands the engine its adapters ready-made and nothing dials them.
+	Config notify.Config
 
 	Clock    *Clock
 	Faults   *Injector
@@ -77,7 +85,18 @@ type Env struct {
 	Queue       ports.Queue
 	Digests     ports.Digests
 	Maintenance ports.Maintenance
-	Store       ports.Store
+	// Store is the real one behind a FaultStore, so a test can fail the next
+	// commit (FailNextCommit) and a Notify still goes through the port's own seam.
+	Store *FaultStore
+
+	// PreCheck is the pre-check the Notifier is built with: the in-memory one here.
+	// Memory is that same pre-check as its own type, for a test that wants the
+	// instant each entry was written; it is nil when PreCheck is not the fake.
+	PreCheck ports.PreCheck
+	Memory   *PreCheck
+
+	// Notifier is the use-case under test.
+	Notifier ports.Notifier
 }
 
 // NewEnv returns an Env over a database cloned for tb alone, which is dropped when
@@ -87,8 +106,9 @@ func NewEnv(tb testing.TB) *Env {
 	db := pgtest.New(tb)
 	clock := NewClock(Epoch)
 	store := postgres.New(db.Owner, postgres.WithClock(clock))
-	return &Env{
+	e := &Env{
 		DB:          db,
+		Config:      notify.Config{Realm: Realm, StoreDSN: "notifytest", RedisURL: "notifytest"},
 		Clock:       clock,
 		Faults:      NewInjector(),
 		Probe:       NewProbe(),
@@ -101,8 +121,32 @@ func NewEnv(tb testing.TB) *Env {
 		Queue:       store,
 		Digests:     store,
 		Maintenance: store,
-		Store:       store,
+		Store: NewFaultStore(store, func(ctx context.Context) (Transaction, error) {
+			tx, err := db.Owner.Begin(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return tx, nil
+		}),
+		Memory: NewPreCheck(clock),
 	}
+	e.PreCheck = e.Memory
+	notifier, err := app.NewNotifier(e.Config, app.Deps{
+		Channels:      e.Channels,
+		Topics:        e.Topics,
+		Prefs:         e.Prefs,
+		Quotas:        e.Quotas,
+		QuotaPolicies: e.Quotas,
+		Store:         e.Store,
+		Queue:         e.Queue,
+		PreCheck:      e.PreCheck,
+		Clock:         clock,
+	})
+	if err != nil {
+		tb.Fatalf("notifytest: build the Notifier: %v", err)
+	}
+	e.Notifier = notifier
+	return e
 }
 
 // AddChannel registers a fake channel of the given kind, reporting to the Env's
