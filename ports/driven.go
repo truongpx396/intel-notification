@@ -163,16 +163,29 @@ type Store interface {
 }
 
 // InboxStore is the recipient read and write path. Every call runs under the
-// identity's scope.
+// identity's scope, and sees only what the inbox shows: a notification that is
+// inbox-visible, not canceled, and whose send time has passed (D26, D29). One
+// that is none of those is, to every method here, as if it did not exist.
 type InboxStore interface {
+	// List returns a page of the identity's notifications, newest first. A zero or
+	// negative q.Limit takes a default, and a large one is capped. q.Cursor is a
+	// NextCursor from an earlier page; one the store did not issue is
+	// domain.ErrInvalidCursor. Title and Body are the stored fallback copy: the
+	// Inbox use-case renders from the template (D27).
 	List(ctx context.Context, id domain.Identity, q domain.ListQuery) (domain.Page, error)
 	// Unread counts unread, visible, unarchived, uncanceled notifications, and
-	// stops at limit (D15).
+	// stops at limit (D15): Count never exceeds it, and Capped says there were more.
 	Unread(ctx context.Context, id domain.Identity, limit int) (domain.UnreadCount, error)
 	// Get returns one of the identity's notifications, or nil when it is not
 	// theirs: a caller cannot tell "absent" from "someone else's".
 	Get(ctx context.Context, id domain.Identity, notificationID string) (*domain.Notification, error)
+	// MarkSeen marks every notification created at or before the instant seen. It
+	// leaves read and archived alone (D26).
 	MarkSeen(ctx context.Context, id domain.Identity, before time.Time) error
+	// MarkRead, MarkAllRead and Archive each change one state and leave the other
+	// two alone, and are idempotent: a state already set keeps the time it was set.
+	// MarkRead and Archive return domain.ErrNotFound, having changed nothing, when
+	// any id is not the identity's.
 	MarkRead(ctx context.Context, id domain.Identity, ids []string) error
 	MarkAllRead(ctx context.Context, id domain.Identity) error
 	Archive(ctx context.Context, id domain.Identity, ids []string, archived bool) error

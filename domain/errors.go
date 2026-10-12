@@ -21,4 +21,12 @@ var (
 	// was never recorded, or one that arrived before the delivery's outcome did.
 	// The caller decides whether to ask the provider to try again (NR-032).
 	ErrUnknownDelivery = errors.New("notify: no delivery with that provider message id")
+	// ErrNotFound is returned by the inbox when a notification is not one of the
+	// caller's: it does not exist, or belongs to someone else, or is not in their
+	// inbox. The two are never told apart, so an id cannot be probed for existence
+	// (NR-008); the REST surface answers it with a 404.
+	ErrNotFound = errors.New("notify: no such notification for this recipient")
+	// ErrInvalidCursor is returned for a list cursor the store did not issue. A
+	// cursor is client input, so a bad one is a request error, not a fault.
+	ErrInvalidCursor = errors.New("notify: invalid list cursor")
 )

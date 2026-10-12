@@ -60,12 +60,19 @@ func (c *stepClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
+func (c *stepClock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = t
+}
+
 // env is one test's database, store and fixture helpers. The store reads its
 // clock from clock, which starts at fixtureDay.
 type env struct {
 	t     *testing.T
 	db    *pgtest.DB
 	s     *Store
+	inbox *Inbox
 	clock *stepClock
 }
 
@@ -73,7 +80,17 @@ func newEnv(t *testing.T) *env {
 	t.Helper()
 	db := pgtest.New(t)
 	clock := &stepClock{now: fixtureDay}
-	return &env{t: t, db: db, s: New(db.Owner, WithClock(clock)), clock: clock}
+	return &env{t: t, db: db, s: New(db.Owner, WithClock(clock)), inbox: NewInbox(db.Owner, WithClock(clock)), clock: clock}
+}
+
+// with returns the env bound to t, a subtest's own. The helpers fail the test they
+// were built for, and a parallel subtest that fails the parent's t from its own
+// goroutine takes the whole test binary down with it.
+func (e *env) with(t *testing.T) *env {
+	t.Helper()
+	c := *e
+	c.t = t
+	return &c
 }
 
 // notification persists an inbox row and its guard, as the superuser, and

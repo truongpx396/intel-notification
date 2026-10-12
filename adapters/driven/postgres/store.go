@@ -29,9 +29,8 @@ import (
 // recipient scope per transaction wherever it reads or writes recipient-scoped
 // tables.
 type Store struct {
-	pool  *pgxpool.Pool
-	clock ports.Clock
-	ids   ports.IDSource
+	pool *pgxpool.Pool
+	settings
 }
 
 var (
@@ -41,33 +40,43 @@ var (
 	_ ports.Store       = (*Store)(nil)
 )
 
-// Option configures a Store.
-type Option func(*Store)
+// settings are what every store in this package is built with.
+type settings struct {
+	clock ports.Clock
+	ids   ports.IDSource
+}
+
+// Option configures a store of this package.
+type Option func(*settings)
 
 // WithClock sets the clock the persist and read paths stamp rows with and judge
 // visibility by: a notification's created_at, the instant a scheduled one
 // becomes visible. The default is the system clock. The queue's own due times
 // stay the database's now(), because a claim is decided inside one statement.
 func WithClock(c ports.Clock) Option {
-	return func(s *Store) { s.clock = c }
+	return func(s *settings) { s.clock = c }
 }
 
 // WithIDSource sets where the persist path takes a notification's id from. The
 // default is a UUIDv7 stamped from the store's clock, so ids sort by creation time.
 func WithIDSource(ids ports.IDSource) Option {
-	return func(s *Store) { s.ids = ids }
+	return func(s *settings) { s.ids = ids }
 }
 
-// New returns a Store over pool.
-func New(pool *pgxpool.Pool, opts ...Option) *Store {
-	s := &Store{pool: pool, clock: systemClock{}}
+func newSettings(opts []Option) settings {
+	s := settings{clock: systemClock{}}
 	for _, opt := range opts {
-		opt(s)
+		opt(&s)
 	}
 	if s.ids == nil {
 		s.ids = uuidSource{clock: s.clock}
 	}
 	return s
+}
+
+// New returns a Store over pool.
+func New(pool *pgxpool.Pool, opts ...Option) *Store {
+	return &Store{pool: pool, settings: newSettings(opts)}
 }
 
 // systemClock is the default ports.Clock.
