@@ -363,6 +363,22 @@ rule above.
       T023a and T023 in place; add `var _ ports.Notifier = (*Notifier)(nil)`.
       **Mutate:** take the realm from the request; return `Applied == true` on a replay; treat a pre-check
       hit as authoritative and skip the guard; write the pre-check before the commit
+      *Built as `app.Notifier`, with 24 rows in the [ledger](../../docs/mutations.md), none surviving;
+      `NotifierContract` passes on the in-memory pre-check and on Redis, and `Broadcast` says it is T042's.
+      The contract was silent on what a pre-check hit does, and the choice is in `Notifier.notify`'s doc
+      comment: a hit answers the replay on its own, with no plan and no transaction, because it was written
+      only after a commit, under the durable guard's key, for no longer than the window, and it is read to
+      be used (D18 says `NotifyTx` reads it too, which is only worth doing to skip work). The receipt it
+      gives names the notification and not whether the inbox shows it, because the entry holds an id and
+      nothing else. A miss, and a fault in reading, is only a miss: the guard inside the store's transaction
+      is the one thing that decides a key is new, so a lost Redis costs a transaction and never a
+      notification (`TestNotifierStillFindsAReplayAfterRedisIsLost`). So the line above, "treat a pre-check
+      hit as authoritative and skip the guard", is the design and not a mutation of it; what can go wrong
+      is a miss believed, which the structure makes unwritable, and the ledger records the nearest, a lost
+      Redis answered as new. Only a first apply by `Notify` is remembered, never a replay (the receipt does
+      not say how old the guard row is, and an entry that outlived it would answer "replay" past the
+      window), a failed commit or a `NotifyTx`. `NewNotifier` validates the whole configuration, as the
+      contract's `New` does, and names every port it lacks.*
 - [ ] **T017a** *red → green* `app/inbox.go`: the driving `Inbox` over `InboxStore` and
       `TemplateRenderer`, rendering each item at read time in the viewer's locale and falling back to the
       stored title and body (NR-019, [D27](design-decisions.md#d27)). [plan.md](plan.md#architecture)

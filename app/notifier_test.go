@@ -539,6 +539,9 @@ func TestCancelAndStatusAskForTheEnginesRealm(t *testing.T) {
 	if f.store.id != want {
 		t.Errorf("Store.Status asked for %+v, want %+v", f.store.id, want)
 	}
+	if got := f.ev.all(); !slices.Contains(got, "status:k1") {
+		t.Errorf("events %v, want Store.Status asked for the request's key k1", got)
+	}
 }
 
 // Broadcast is built with T042; until then it says so rather than pretend.
