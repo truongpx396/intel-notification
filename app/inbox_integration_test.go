@@ -128,14 +128,14 @@ func TestInboxRendersInTheViewersLocale(t *testing.T) {
 		name      string
 		templates []tpl
 		locale    string
-		cfgLocale string // the configured default; "" leaves "en"
+		cfgLocale string // the configured default; "" leaves "en". The renderer's own default stays "en".
 		want      string
 	}{
 		{"the requested locale", []tpl{{"fr", "Terminé"}, {"en", "Done"}}, "fr", "", "Terminé"},
 		{"a regional tag with its own template", []tpl{{"fr-CA", "Fini"}, {"fr", "Terminé"}, {"en", "Done"}}, "fr-CA", "", "Fini"},
 		{"a regional tag falls back to its language", []tpl{{"fr", "Terminé"}, {"en", "Done"}}, "fr-CA", "", "Terminé"},
 		{"a locale with no template falls back to the default", []tpl{{"fr", "Terminé"}, {"en", "Done"}}, "de", "", "Done"},
-		{"no locale asked: the configured default", []tpl{{"fr", "Terminé"}, {"en", "Done"}}, "", "fr", "Terminé"},
+		{"no locale asked: the configured default, not the renderer's", []tpl{{"fr", "Terminé"}, {"en", "Done"}}, "", "fr", "Terminé"},
 		{"no locale asked, and the default is en", []tpl{{"fr", "Terminé"}, {"en", "Done"}}, "", "", "Done"},
 		{"nothing in the ladder: the stored copy", []tpl{{"fr", "Terminé"}}, "de", "", "Done k1"},
 	}
@@ -147,12 +147,6 @@ func TestInboxRendersInTheViewersLocale(t *testing.T) {
 					c.DefaultLocale = tc.cfgLocale
 				}
 			})
-			if tc.cfgLocale != "" {
-				// The renderer's own ladder ends at its default locale, which an
-				// operator sets to the same value.
-				f.e.Templates = notifytest.NewTemplates(tc.cfgLocale)
-				f.rend.inner = f.e.Templates
-			}
 			for _, tp := range tc.templates {
 				f.put(string(inboxTopic), "in_app", tp.locale, tp.subject, "body in "+tp.locale)
 			}
@@ -397,5 +391,68 @@ func TestInboxMarksActOnTheCallersOwnNotifications(t *testing.T) {
 	}
 	if got, _ := f.inbox.Unread(t.Context(), other); got.Count != 1 {
 		t.Fatalf("the other tenant's unread = %d, want its own 1: nothing leaked across", got.Count)
+	}
+}
+
+// countingTopics counts the lookups a page makes.
+type countingTopics struct {
+	ports.TopicRegistry
+	n int
+}
+
+func (c *countingTopics) Lookup(ctx context.Context, r domain.Realm, t domain.Topic) (domain.TopicDef, bool, error) {
+	c.n++
+	return c.TopicRegistry.Lookup(ctx, r, t)
+}
+
+// A page of many notifications on one topic looks the topic up once, not once per
+// item.
+func TestInboxLooksEachTopicUpOncePerPage(t *testing.T) {
+	t.Parallel()
+	f := newInboxFx(t)
+	for _, k := range []string{"k1", "k2", "k3"} {
+		f.accept(f.id, k)
+	}
+	counting := &countingTopics{TopicRegistry: f.e.Topics}
+	inbox, err := app.NewInbox(f.e.Config, app.Deps{Inbox: f.e.Inbox, Renderer: f.rend, Topics: counting, Channels: f.e.Channels})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := inbox.List(t.Context(), f.id, domain.ListQuery{})
+	if err != nil || len(page.Items) != 3 {
+		t.Fatalf("List = %d items, %v, want 3", len(page.Items), err)
+	}
+	if counting.n != 1 {
+		t.Fatalf("%d topic lookups for one topic on one page, want 1", counting.n)
+	}
+}
+
+// With no inbox-backed channel registered there is no template to read: every item
+// shows its stored copy, and the renderer is not asked.
+func TestInboxWithNoInboxBackedChannelShowsStoredCopyAndAsksNoRenderer(t *testing.T) {
+	t.Parallel()
+	e := notifytest.NewEnv(t)
+	e.AddChannel("in_app", domain.ChannelCapabilities{InboxBacked: true})
+	e.Topics.Register(notifytest.Realm, inboxTopic, domain.TopicDef{DefaultChannels: []domain.ChannelKind{"in_app"}, DefaultPriority: domain.PriorityInfo})
+	id := domain.Identity{Realm: notifytest.Realm, Tenant: domain.Tenant{Kind: "workspace", ID: "w1"}, Recipient: domain.Recipient{Kind: "user", ID: "u1"}}
+	if r, err := e.Notifier.Notify(t.Context(), domain.Notification{Tenant: id.Tenant, Recipient: id.Recipient, Topic: inboxTopic,
+		IdemKey: "k1", Title: "Stored title", Body: "Stored body"}); err != nil || !r.InboxVisible {
+		t.Fatalf("Notify = %+v, %v", r, err)
+	}
+	e.Templates.Put(notifytest.Realm, string(inboxTopic), "in_app", "en", domain.RenderedContent{Subject: "From a template"})
+
+	// An Inbox built over a registry that holds no inbox-backed channel.
+	rend := &recRenderer{inner: e.Templates}
+	inbox, err := app.NewInbox(e.Config, app.Deps{Inbox: e.Inbox, Renderer: rend, Topics: e.Topics,
+		Channels: notifytest.NewRegistry(notifytest.NewChannel("email", domain.ChannelCapabilities{NeedsAddress: true}, notifytest.NewProbe()))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := inbox.List(t.Context(), id, domain.ListQuery{})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Title != "Stored title" || page.Items[0].Body != "Stored body" {
+		t.Fatalf("List = %+v, %v, want the stored copy", page, err)
+	}
+	if n := len(rend.requests()); n != 0 {
+		t.Fatalf("the renderer was asked %d times with no inbox-backed channel to render for", n)
 	}
 }
