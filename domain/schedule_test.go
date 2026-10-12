@@ -40,8 +40,6 @@ func TestDeliveryScheduleValidate(t *testing.T) {
 		{"a window that starts where it ends", func(s *DeliverySchedule) { s.QuietEnd = "22:00" }, []string{"QuietEnd"},
 			"empty or all day: the schedule cannot say which"},
 		{"a time zone the database does not know", func(s *DeliverySchedule) { s.Timezone = "Mars/Olympus_Mons" }, []string{"Timezone"}, ""},
-		{"a time zone with the wrong case", func(s *DeliverySchedule) { s.Timezone = "europe/paris" }, []string{"Timezone"},
-			"the zone is a key into the tz database, which is case-sensitive"},
 		{"Local, which is the host's", func(s *DeliverySchedule) { s.Timezone = "Local" }, []string{"Timezone"},
 			"two replicas would disagree about when quiet hours end"},
 		{"a bad time zone with no quiet hours", func(s *DeliverySchedule) {
@@ -193,5 +191,40 @@ func TestDeliveryScheduleQuietUntilNeverQuietWithoutAUsableWindow(t *testing.T) 
 				t.Fatalf("QuietUntil = %v, %v, want not quiet", end, quiet)
 			}
 		})
+	}
+}
+
+// A zone that loaded is remembered, and a name is remembered as itself: asking for
+// one zone and then another, and then the first again, answers each in its own
+// time, never the last one loaded.
+func TestDeliveryScheduleRemembersEachZoneUnderItsOwnName(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2031, 3, 1, 12, 0, 0, 0, time.UTC)
+	// 12:00 UTC is 17:45 in Kathmandu (UTC+5:45), 12:00 in UTC and 21:00 in Tokyo.
+	cases := []struct {
+		zone     string
+		start    string
+		wantEnd  time.Time
+		wantFrom string
+	}{
+		{"Asia/Kathmandu", "17:00", time.Date(2031, 3, 1, 18, 0, 0, 0, time.UTC).Add(-5*time.Hour - 45*time.Minute), "after the 18:00 end, local"},
+		{"", "11:00", time.Date(2031, 3, 1, 13, 0, 0, 0, time.UTC), "UTC for no zone"},
+		{"Asia/Tokyo", "20:00", time.Date(2031, 3, 1, 22, 0, 0, 0, time.UTC).Add(-9 * time.Hour), "after the 22:00 end, local"},
+		{"Asia/Kathmandu", "17:00", time.Date(2031, 3, 1, 18, 0, 0, 0, time.UTC).Add(-5*time.Hour - 45*time.Minute), "asked a second time"},
+		{"", "11:00", time.Date(2031, 3, 1, 13, 0, 0, 0, time.UTC), "asked a second time"},
+	}
+	for i, tc := range cases {
+		end := "18:00"
+		switch tc.zone {
+		case "":
+			end = "13:00"
+		case "Asia/Tokyo":
+			end = "22:00"
+		}
+		s := DeliverySchedule{QuietStart: tc.start, QuietEnd: end, Timezone: tc.zone}
+		got, quiet := s.QuietUntil(at)
+		if !quiet || !got.Equal(tc.wantEnd) {
+			t.Fatalf("ask %d, zone %q: QuietUntil = %v, %v, want quiet until %v (%s)", i+1, tc.zone, got.UTC(), quiet, tc.wantEnd, tc.wantFrom)
+		}
 	}
 }

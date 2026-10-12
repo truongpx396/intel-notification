@@ -16,4 +16,6 @@ const (
 // Drops reports whether an exhausted budget under policy p drops a notification of
 // priority pr on topic def, instead of deferring it. It never drops an essential
 // topic or a critical notification (D5).
-func (p QuotaPolicy) Drops(def TopicDef, pr Priority) bool { return false }
+func (p QuotaPolicy) Drops(def TopicDef, pr Priority) bool {
+	return p == QuotaDropNonEssential && !def.Essential && def.EffectivePriority(pr) != PriorityCritical
+}
