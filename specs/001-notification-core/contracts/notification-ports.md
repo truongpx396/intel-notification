@@ -43,9 +43,10 @@ PRODUCERS — thin: build a Notification, call Notify (or NotifyTx inside their 
    │  Notify / NotifyTx / Broadcast / Cancel / Status
    ▼
 ┌── Notifier (app) ─────────────────────────────────────────────────────────────┐
+│  PreCheck.Seen (read-only) — a hit answers the replay, nothing else runs       │
 │  TopicRegistry.Lookup → PreferenceStore.Resolve → Schedule → QuotaCounter.Peek │
+│      (+ QuotaPolicies.Policy when spent)                                       │
 │      → DeliveryPlan {inbox_visible, per-channel: immediate|deferred|digest|drop}│
-│  PreCheck.Seen (read-only)                                                     │
 │  Store.PersistAndEnqueue(identity, n, plan) — ONE transaction:                 │
 │      notify_idem guard · inbox row · queue rows · digest appends · drop records│
 │  after commit: PreCheck.Remember · wake local dispatcher                       │
@@ -531,7 +532,7 @@ type Dispatcher interface {
 // Digests, Maintenance, Store (all but its three broadcast methods), InboxStore,
 // PreferenceStore and SuppressionStore are implemented: adapters/driven/postgres
 // implements them as plain SQL, tested against PostgreSQL by the integration
-// suite (D37). Every
+// suite (D37). PreCheck is implemented by adapters/driven/redis. Every
 // method taking a Claim is FENCED: it changes state only
 // while the claim's lease token is current, and reports ok=false, having written
 // nothing, when the lease was lost (D19).
@@ -685,7 +686,21 @@ type QuotaCounter interface {
 	Take(ctx context.Context, k QuotaKey) (allowed bool, resetAt time.Time, err error)
 }
 
-// PreCheck is the OPTIONAL fast duplicate check (D18). nil ⇒ every Notify takes the
+// QuotaPolicies reads what a budget says to do when it is spent: channel_quotas.on_exhausted,
+// with the realm-wide row as the default (D5). Configuration, not counter state, so losing
+// Redis does not reset it. QuotaDefer for a key nothing configures, and a nil QuotaPolicies
+// defers too: deferring discards nothing. Without this the planner could not tell a defer from
+// a drop_non_essential, which only a spent budget ever asks (NR-023).
+type QuotaPolicies interface {
+	Policy(ctx context.Context, k QuotaKey) (QuotaPolicy, error)
+}
+
+type QuotaPolicy string // "defer" | "drop_non_essential"
+
+// PreCheck is the OPTIONAL fast duplicate check (D18). A hit was written after a commit, under
+// the durable guard's key, for no longer than the idempotency window, so it answers the replay
+// with the notification's id and nothing more; a miss, or a fault, is only a miss, and the guard
+// in the store's transaction is what decides a key is new. nil ⇒ every Notify takes the
 // durable path, and stays correct. Keys are the durable guard's key space, hashed.
 type PreCheck interface {
 	Seen(ctx context.Context, key string) (notificationID string, ok bool, err error)
@@ -950,6 +965,8 @@ func ChannelContract(t *testing.T, newChannel func(t *testing.T) (notify.Channel
 }
 
 // NotifierContract runs against a real Notifier.                        //go:build integration
+// Built: notifytest.NotifierContract, run in memory and on Redis. The cases that join a caller's
+// transaction (NotifyTx) hold for the in-process Notifier; a remote one returns ErrTxUnsupported.
 func NotifierContract(t *testing.T, env func(t *testing.T) Env) {
 	t.Run("replay is a no-op: one row, one enqueue per channel", ...)
 	t.Run("the same user in two tenants gets both (D18)", ...)
@@ -1210,7 +1227,7 @@ module — no host, no replace directives?**
     driven.go              Queue, Digests, Maintenance, Store, InboxStore, PreferenceStore,
                            SuppressionStore (implemented) · Channel, ChannelRegistry,
                            TopicRegistry, TemplateRenderer, AddressBook, AudienceResolver,
-                           QuotaCounter, PreCheck, StreamPublisher, Clock, IDSource
+                           QuotaCounter, QuotaPolicies, PreCheck, StreamPublisher, Clock, IDSource
   app/                     use-cases; own the invariants
     notifier.go planner.go broadcast.go dispatcher.go digest.go quota.go inbox.go
     maintenance.go erasure.go
@@ -1323,6 +1340,7 @@ type Deps struct {
 	Prefs        ports.PreferenceStore
 	Suppressions ports.SuppressionStore
 	Quotas       ports.QuotaCounter
+	QuotaPolicies ports.QuotaPolicies // nil ⇒ an exhausted budget always defers
 	Stream       ports.StreamPublisher
 	PreCheck     ports.PreCheck // optional
 	Clock        ports.Clock    // default: system clock

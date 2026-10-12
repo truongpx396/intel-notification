@@ -22,7 +22,7 @@ commit gate, so a violation is a build failure, not a review comment.
   grpc, `net/http` or testcontainers. Transport lives in `adapters/driving`, storage in `adapters/driven`.
 - **Never import a host product.** Nothing may import `github.com/aisat/...`. The module must build with
   no host present (constitution III).
-- **Layers not built yet are commented out** in `.go-arch-lint.yml` (`app`, `adapters/driving`, `api`,
+- **Layers not built yet are commented out** in `.go-arch-lint.yml` (`adapters/driving`, `api`,
   `cmd`). When you create one of those directories, uncomment its `components` and `deps` lines in the
   same change. go-arch-lint refuses a component whose directory does not exist, which is why they wait.
 

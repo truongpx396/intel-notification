@@ -21,13 +21,21 @@ type QuotaCounter struct {
 	mu      sync.Mutex
 	budgets map[domain.QuotaKey]*budget
 	taken   map[domain.QuotaKey]int
+	policy  map[domain.QuotaKey]domain.QuotaPolicy
 }
 
-var _ ports.QuotaCounter = (*QuotaCounter)(nil)
+var (
+	_ ports.QuotaCounter  = (*QuotaCounter)(nil)
+	_ ports.QuotaPolicies = (*QuotaCounter)(nil)
+)
 
 // NewQuotaCounter returns a counter with every key unlimited.
 func NewQuotaCounter() *QuotaCounter {
-	return &QuotaCounter{budgets: map[domain.QuotaKey]*budget{}, taken: map[domain.QuotaKey]int{}}
+	return &QuotaCounter{
+		budgets: map[domain.QuotaKey]*budget{},
+		taken:   map[domain.QuotaKey]int{},
+		policy:  map[domain.QuotaKey]domain.QuotaPolicy{},
+	}
 }
 
 // SetBudget gives k n units to take until the window resets at resetAt, replacing
@@ -39,7 +47,27 @@ func (q *QuotaCounter) SetBudget(k domain.QuotaKey, n int, resetAt time.Time) {
 	q.budgets[k] = &budget{remaining: n, resetAt: resetAt}
 }
 
+// SetPolicy gives k the policy to follow when its budget is spent, replacing any
+// earlier one.
+func (q *QuotaCounter) SetPolicy(k domain.QuotaKey, p domain.QuotaPolicy) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.policy[k] = p
+}
+
+// Policy implements ports.QuotaPolicies. A key nothing configures defers, as an
+// unconfigured channel_quotas row does (D5).
+func (q *QuotaCounter) Policy(_ context.Context, k domain.QuotaKey) (domain.QuotaPolicy, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if p, ok := q.policy[k]; ok {
+		return p, nil
+	}
+	return domain.QuotaDefer, nil
+}
+
 // Lose forgets every budget, as losing Redis does. Every key is unlimited again.
+// Policies are configuration, held in a table, so they stay.
 func (q *QuotaCounter) Lose() {
 	q.mu.Lock()
 	defer q.mu.Unlock()

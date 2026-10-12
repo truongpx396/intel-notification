@@ -10,9 +10,10 @@ import (
 	"github.com/truongpx396/intel-notification/adapters/driven/postgres"
 	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/internal/pgtest"
+	"github.com/truongpx396/intel-notification/ports"
 )
 
-func TestMain(m *testing.M) { os.Exit(Main(m)) }
+func TestMain(m *testing.M) { os.Exit(Main(m, WithRedis())) }
 
 // Every Env has a database of its own, so two tests can lease the same job name
 // and neither sees the other's rows. Within one Env a second owner is refused,
@@ -137,5 +138,41 @@ func TestEnvAddChannelRegistersOneAndReportsToItsProbe(t *testing.T) {
 	}
 	if e.Probe.Sends("k1") != 1 {
 		t.Fatalf("Sends(k1) = %d, want 1: the channel reports to the Env's probe", e.Probe.Sends("k1"))
+	}
+}
+
+// Without WithRedis the Notifier's pre-check is the in-memory one, and Memory is that
+// same object; with it the pre-check is Redis, over a database of the test's own, and
+// there is no Memory. Either way PreCheck is what the Notifier was built with.
+func TestEnvPreCheckIsInMemoryUnlessRedisIsAsked(t *testing.T) {
+	t.Parallel()
+	mem := NewEnv(t)
+	if mem.Redis != nil || mem.Memory == nil || mem.PreCheck != ports.PreCheck(mem.Memory) {
+		t.Fatalf("a plain Env has Redis %v, Memory %v, PreCheck %T, want the in-memory pre-check alone", mem.Redis, mem.Memory, mem.PreCheck)
+	}
+
+	a, b := NewEnv(t, WithRedis()), NewEnv(t, WithRedis())
+	if a.Redis == nil || a.Memory != nil {
+		t.Fatalf("a Redis Env has Redis %v and Memory %v, want Redis and no Memory", a.Redis, a.Memory)
+	}
+	if a.Redis.Index == b.Redis.Index {
+		t.Fatalf("two Envs share Redis database %d", a.Redis.Index)
+	}
+	if err := a.PreCheck.Remember(t.Context(), "k", "n-1", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := a.Redis.Client.Get(t.Context(), "k").Result(); err != nil || got != "n-1" {
+		t.Fatalf("Redis holds %q, %v after the Env's pre-check remembered, want n-1", got, err)
+	}
+	if _, seen, _ := b.PreCheck.Seen(t.Context(), "k"); seen {
+		t.Fatal("another Env's pre-check sees the entry: the databases are shared")
+	}
+	// The Env's pre-check is capped at the idempotency window, as a deployment's is.
+	if err := a.PreCheck.Remember(t.Context(), "long", "n-2", 30*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	window := a.Config.WithDefaults().IdempotencyWindow
+	if ttl, _ := a.Redis.Client.PTTL(t.Context(), "long").Result(); ttl <= 0 || ttl > window {
+		t.Fatalf("an entry lives %v, want at most the idempotency window %v", ttl, window)
 	}
 }

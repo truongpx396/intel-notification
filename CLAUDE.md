@@ -50,14 +50,19 @@ has the rules):
 - `domain/`: pure rules, imports nothing from the module. Canonical encoding and every derived key
   (`keys.go`), shard, backoff, the terminal-outcome policy, dispatch steps.
 - `ports/`: `driven.go` and `driving.go`, the interfaces. Every other layer depends on these.
+- `app/`: the use-cases, which own the invariants: the planner, the `Notifier` and the recipient `Inbox`
+  (rendered at read time). `Deps` is the one struct they are all built from.
 - `adapters/driven/postgres/`: the delivery queue, digests and maintenance jobs, the store's persist and
   read paths, the inbox, preferences and suppressions. Broadcast (T041) and the catalog adapters (T048)
   are not built yet.
+- `adapters/driven/redis/`: the pre-check. A fast path that only ever misses; the stream and the quota
+  counters are not built yet.
 - `migrations/`: the schema, embedded as `migrations.FS` so hosts, the service binary and the integration
   tests apply the same files. `config.go` is the one configuration surface.
 - `internal/notifytest/` is the kit every suite is written against (fake clock, fault injection, probe,
-  in-memory fakes, `Env`); `internal/pgtest/` starts Testcontainers. Both are test support only.
-- Not created yet: `app/`, `adapters/driving/`, `api/`, `cmd/`. Their lines in `.go-arch-lint.yml` are
+  in-memory fakes, `Env`, `NotifierContract`); `internal/pgtest/` and `internal/redistest/` start
+  Testcontainers. All are test support only.
+- Not created yet: `adapters/driving/`, `api/`, `cmd/`. Their lines in `.go-arch-lint.yml` are
   commented out and are uncommented in the change that creates the directory.
 
 How a notification moves, which spans several files: accepting one is a single transaction (the `notify_idem`

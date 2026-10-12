@@ -61,9 +61,11 @@ are properties of the schema, checkable by a test, rather than a vendor's assura
 **Status: designed and normative; implementation started.** Built so far: the schema, the domain
 types and rules, every port in the contract, the configuration and its validation, the test kit
 (`internal/notifytest`), and the PostgreSQL adapter for the delivery queue, digests, maintenance jobs,
-the store's persist and read paths, the inbox, preferences and suppressions, with the CI boundary gates.
-Not built: the notifier, dispatcher, channels and transports, and the adapters behind them (broadcast,
-topics, templates and addresses, Redis). Task-level status is in
+the store's persist and read paths, the inbox, preferences and suppressions, with the CI boundary gates;
+and the use-cases a producer and a recipient meet first: the planner, `Notifier` (`Notify`, `NotifyTx`,
+`Cancel`, `Status`) with its Redis pre-check, and the inbox that renders at read time.
+Not built: the dispatcher, channels and transports, `Notifier.Broadcast`, and the adapters behind them
+(broadcast, topics, templates and addresses, and the Redis stream and quota counters). Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
 → [specs/001-notification-core](specs/001-notification-core/)
 

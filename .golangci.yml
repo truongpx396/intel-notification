@@ -78,9 +78,10 @@ linters:
             - "$all"
             - "!$test"
             - "!**/internal/pgtest/**"
+            - "!**/internal/redistest/**"
           deny:
             - pkg: "github.com/testcontainers"
-              desc: "Testcontainers belongs to integration tests and internal/pgtest"
+              desc: "Testcontainers belongs to integration tests, internal/pgtest and internal/redistest"
 
     paralleltest:
       # Table-driven subtests must be parallel too, not only top-level tests.
