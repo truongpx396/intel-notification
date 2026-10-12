@@ -23,7 +23,10 @@ type QuotaCounter struct {
 	taken   map[domain.QuotaKey]int
 }
 
-var _ ports.QuotaCounter = (*QuotaCounter)(nil)
+var (
+	_ ports.QuotaCounter  = (*QuotaCounter)(nil)
+	_ ports.QuotaPolicies = (*QuotaCounter)(nil)
+)
 
 // NewQuotaCounter returns a counter with every key unlimited.
 func NewQuotaCounter() *QuotaCounter {
@@ -37,6 +40,16 @@ func (q *QuotaCounter) SetBudget(k domain.QuotaKey, n int, resetAt time.Time) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.budgets[k] = &budget{remaining: n, resetAt: resetAt}
+}
+
+// SetPolicy gives k the policy to follow when its budget is spent, replacing any
+// earlier one.
+func (q *QuotaCounter) SetPolicy(k domain.QuotaKey, p domain.QuotaPolicy) {}
+
+// Policy implements ports.QuotaPolicies. A key nothing configures defers, as an
+// unconfigured channel_quotas row does (D5).
+func (q *QuotaCounter) Policy(_ context.Context, k domain.QuotaKey) (domain.QuotaPolicy, error) {
+	return "", nil
 }
 
 // Lose forgets every budget, as losing Redis does. Every key is unlimited again.

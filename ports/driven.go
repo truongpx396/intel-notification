@@ -247,6 +247,16 @@ type QuotaCounter interface {
 	Take(ctx context.Context, k domain.QuotaKey) (allowed bool, resetAt time.Time, err error)
 }
 
+// QuotaPolicies reads what a (realm, tenant, channel) budget says to do when it
+// is spent: the on_exhausted column of channel_quotas, with the realm-wide row as
+// the default for a tenant with none of its own (D5). It is configuration, not
+// counter state, so losing Redis does not reset it. An implementation answers
+// domain.QuotaDefer for a key nothing configures, and the planner treats a nil
+// QuotaPolicies the same way: deferring discards nothing, and dropping can.
+type QuotaPolicies interface {
+	Policy(ctx context.Context, k domain.QuotaKey) (domain.QuotaPolicy, error)
+}
+
 // PreCheck is the optional fast duplicate check (D18). A nil PreCheck means
 // every Notify takes the durable path and stays correct. Its keys are the
 // durable guard's key space, hashed, and it can only ever miss.

@@ -165,3 +165,47 @@ func TestQuotaCounterIsSafeForConcurrentUse(t *testing.T) {
 		t.Fatalf("%d of %d concurrent Takes were allowed, want exactly the budget, %d", got, workers, budget)
 	}
 }
+
+// A key nothing configures defers, because the schema's on_exhausted defaults to
+// it and deferring is the only policy that discards nothing (D5).
+func TestQuotaCounterPolicyDefaultsToDefer(t *testing.T) {
+	t.Parallel()
+	q := NewQuotaCounter()
+	got, err := q.Policy(t.Context(), quotaKey("aisat", "w1", "email"))
+	if err != nil || got != domain.QuotaDefer {
+		t.Fatalf("Policy of an unconfigured key = %q, %v, want %q", got, err, domain.QuotaDefer)
+	}
+}
+
+// A policy belongs to one (realm, tenant, channel), and what the policy says is
+// configuration: losing the counters, as losing Redis does, does not forget it.
+func TestQuotaCounterPolicyIsPerKeyAndSurvivesLose(t *testing.T) {
+	t.Parallel()
+	q := NewQuotaCounter()
+	email := quotaKey("aisat", "w1", "email")
+	q.SetPolicy(email, domain.QuotaDropNonEssential)
+
+	for name, tc := range map[string]struct {
+		key  domain.QuotaKey
+		want domain.QuotaPolicy
+	}{
+		"the key it was set on": {email, domain.QuotaDropNonEssential},
+		"another channel":       {quotaKey("aisat", "w1", "sms"), domain.QuotaDefer},
+		"another tenant":        {quotaKey("aisat", "w2", "email"), domain.QuotaDefer},
+		"another realm":         {quotaKey("other", "w1", "email"), domain.QuotaDefer},
+	} {
+		if got, _ := q.Policy(t.Context(), tc.key); got != tc.want {
+			t.Errorf("Policy(%s) = %q, want %q", name, got, tc.want)
+		}
+	}
+
+	q.Lose()
+	if got, _ := q.Policy(t.Context(), email); got != domain.QuotaDropNonEssential {
+		t.Fatalf("Policy after Lose = %q: losing the counters forgot configuration", got)
+	}
+
+	q.SetPolicy(email, domain.QuotaDefer)
+	if got, _ := q.Policy(t.Context(), email); got != domain.QuotaDefer {
+		t.Fatalf("Policy after setting defer again = %q, want it replaced", got)
+	}
+}
