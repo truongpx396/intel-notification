@@ -16,4 +16,9 @@ var (
 	// ErrMissingIdem is returned for a notification or broadcast with no IdemKey:
 	// without one there is no exactly-once identity (NR-002).
 	ErrMissingIdem = errors.New("notify: IdemKey is required")
+	// ErrUnknownDelivery is returned by RecordProviderStatus when no delivery on
+	// the channel carries the provider message id: a callback for a message that
+	// was never recorded, or one that arrived before the delivery's outcome did.
+	// The caller decides whether to ask the provider to try again (NR-032).
+	ErrUnknownDelivery = errors.New("notify: no delivery with that provider message id")
 )

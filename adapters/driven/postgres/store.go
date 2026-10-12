@@ -23,24 +23,47 @@ import (
 	"github.com/truongpx396/intel-notification/ports"
 )
 
-// Store implements the queue, digest and maintenance ports over one pool. The
-// pool's role should own the tables and must NOT be a superuser or BYPASSRLS:
-// the store relies on forced row-level security, and sets the recipient scope
-// per transaction wherever it reads or writes recipient-scoped tables.
+// Store implements the queue, digest, maintenance and persist-and-read ports over
+// one pool. The pool's role should own the tables and must NOT be a superuser or
+// BYPASSRLS: the store relies on forced row-level security, and sets the
+// recipient scope per transaction wherever it reads or writes recipient-scoped
+// tables.
 type Store struct {
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	clock ports.Clock
 }
 
 var (
 	_ ports.Queue       = (*Store)(nil)
 	_ ports.Digests     = (*Store)(nil)
 	_ ports.Maintenance = (*Store)(nil)
+	_ ports.Store       = (*Store)(nil)
 )
 
-// New returns a Store over pool.
-func New(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+// Option configures a Store.
+type Option func(*Store)
+
+// WithClock sets the clock the persist and read paths stamp rows with and judge
+// visibility by: a notification's created_at, the instant a scheduled one
+// becomes visible. The default is the system clock. The queue's own due times
+// stay the database's now(), because a claim is decided inside one statement.
+func WithClock(c ports.Clock) Option {
+	return func(s *Store) { s.clock = c }
 }
+
+// New returns a Store over pool.
+func New(pool *pgxpool.Pool, opts ...Option) *Store {
+	s := &Store{pool: pool, clock: systemClock{}}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// systemClock is the default ports.Clock.
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }
 
 // querier is what both a pool and a transaction offer, so a helper can run in
 // either.

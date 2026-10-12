@@ -5,6 +5,7 @@ package postgres
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,17 +41,39 @@ func ident(tenant, recipient string) domain.Identity {
 	}
 }
 
-// env is one test's database, store and fixture helpers.
+// stepClock is a ports.Clock that moves only when told, so a test that stamps rows
+// with the store's clock never reads the wall clock.
+type stepClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *stepClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *stepClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// env is one test's database, store and fixture helpers. The store reads its
+// clock from clock, which starts at fixtureDay.
 type env struct {
-	t  *testing.T
-	db *pgtest.DB
-	s  *Store
+	t     *testing.T
+	db    *pgtest.DB
+	s     *Store
+	clock *stepClock
 }
 
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	db := pgtest.New(t)
-	return &env{t: t, db: db, s: New(db.Owner)}
+	clock := &stepClock{now: fixtureDay}
+	return &env{t: t, db: db, s: New(db.Owner, WithClock(clock)), clock: clock}
 }
 
 // notification persists an inbox row and its guard, as the superuser, and

@@ -136,7 +136,10 @@ type Store interface {
 	// sending it.
 	Load(ctx context.Context, c domain.Claim) (n *domain.Notification, digest []domain.Notification, canceled bool, err error)
 
-	// Status reads one notification's deliveries by channel and address.
+	// Status reads one notification's deliveries by channel and address: those
+	// still pending, those finished, and, for a digested channel, the window's.
+	// Found is false when the key is unknown to this identity or has passed out of
+	// the idempotency window.
 	Status(ctx context.Context, id domain.Identity, idemKey string) (domain.NotificationStatus, error)
 
 	// CreateBroadcast records a broadcast, idempotently on its key (NR-020).
@@ -152,7 +155,10 @@ type Store interface {
 	CommitBroadcastPage(ctx context.Context, job domain.BroadcastJob, page []domain.PageItem, nextCursor string, done bool) error
 
 	// RecordProviderStatus records a provider's delivery callback against the
-	// delivery it concerns, found by provider message id (NR-032).
+	// delivery it concerns, found by channel and provider message id (NR-032). A
+	// message id is the provider's, so two channels may use the same one: it never
+	// matches across channels. It returns domain.ErrUnknownDelivery, having written
+	// nothing, when no delivery matches.
 	RecordProviderStatus(ctx context.Context, ch domain.ChannelKind, providerMessageID, status string) error
 }
 
