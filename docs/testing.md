@@ -124,11 +124,14 @@ per idempotency key, a channel registry, in-memory fakes for the read-side ports
   coming send; the channel honours the `Dedup` level it declares, so a re-drive collapses only where a
   real channel at that level would.
 - **The fakes** (`Topics`, `Preferences`, `QuotaCounter`, `AddressBook`, `Templates`) are real
-  in-memory implementations of their ports, each with its own table test. There is no fake `Queue` or
+  in-memory implementations of their ports, each with its own table test. Where a fake stands in for an
+  adapter, the table is shared so the two cannot drift: `PreferenceStoreContract` is run by the
+  `Preferences` fake as a unit test and by the PostgreSQL store against a database. There is no fake `Queue` or
   `Store`, on purpose: their leases, fencing and row-level security only PostgreSQL can hold, and a fake
   that passed where the real one fails would be worse than none.
-- **`Env`.** A private database (cloned for that test alone) with the real queue, digest and
-  maintenance ports, and the rest of the kit. A suite starts with
+- **`Env`.** A private database (cloned for that test alone) with the real queue, digest, maintenance and
+  store ports, and the rest of the kit. The store dates what it persists from the fake clock; the queue's
+  due times stay the database's `now()`, which a claim compares against. A suite starts with
   `func TestMain(m *testing.M) { os.Exit(notifytest.Main(m)) }` and then `e := notifytest.NewEnv(t)`.
   `Env` imports `adapters/driven/postgres`, so a suite that lives in that package and uses it must be an
   external test package (`package postgres_test`): an internal one would be an import cycle.
@@ -191,9 +194,11 @@ Read the numbers with these limits in mind:
 - **`make bench` keeps `fsync` on** (`PGTEST_DURABLE=1`). The ordinary integration suite turns it off;
   with it off a commit costs nothing, which hides exactly what batching and group commit save. The run
   logs the setting it used.
-- **`BenchmarkAcceptProxy` is a proxy.** `PersistAndEnqueue` does not exist yet, and the real one also
-  resolves preferences, peeks quota and may append to a digest. Treat the result as an upper bound, and
-  swap in the real call when it lands.
+- **`BenchmarkAcceptProxy` is a proxy.** `PersistAndEnqueue` now exists, but the benchmark still runs the
+  single statement it was written against, not the real call, which is several statements in one
+  transaction (the guard, the inbox row, the queue rows, and a digest append or a drop record where the
+  plan has one), and the notifier around it also resolves preferences and peeks quota. Treat the result as
+  an upper bound, and move the benchmark onto the real call with T055.
 - **WAL is cluster-wide and starts from a fresh checkpoint**, so it includes one full-page image per
   page first touched. It is pessimistic for a short run; compare it between runs rather than quoting it.
 - **No `-race`.** The detector slows the code being measured, so `make bench` does not use it.

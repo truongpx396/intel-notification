@@ -335,8 +335,8 @@ func TestSuppressRefuses(t *testing.T) {
 		{"a hash that is too short", "aisat", "email", good[:16], domain.SuppressHardBounce, "32 bytes"},
 		{"a hash that is too long", "aisat", "email", append(slices.Clone(good), 0), domain.SuppressHardBounce, "32 bytes"},
 		{"no hash", "aisat", "email", nil, domain.SuppressHardBounce, "32 bytes"},
-		{"an unknown reason", "aisat", "email", good, "annoyed", "reason"},
-		{"no reason", "aisat", "email", good, "", "reason"},
+		{"an unknown reason", "aisat", "email", good, "annoyed", "not a suppression reason"},
+		{"no reason", "aisat", "email", good, "", "not a suppression reason"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

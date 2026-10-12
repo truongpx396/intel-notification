@@ -243,13 +243,23 @@ rule above.
       (the T013a rule). The store adds what only a database holds: a choice stored under the recipient's
       scope and no other, sixteen writers on one pair leaving one row, three hundred pairs in one call, and a
       schedule that keeps its clock times, seconds and all.*
-- [ ] **T019** [P] *red → green* `postgres/suppressions.go`. The job lease is already
+- [x] **T019** [P] *red → green* `postgres/suppressions.go`. The job lease is already
       `Maintenance.TryLeaseJob` with `TestTryLeaseJob`, so no separate `leases.go` is planned; add one only
       if the leased flush job (T034) finds a gap (NR-006, NS-012).
       **Red first:** a catalog scan finds no plaintext address in any column of the suppression table; a
       live suppression is found by address hash and an expired one is not; suppressions are per channel;
       recording the same suppression twice is one row; one survives `Erase`.
       **Mutate:** store the address; ignore the expiry; delete suppressions in `Erase`
+      *Built as `postgres.Suppressions`, with 27 rows in the [ledger](../../docs/mutations.md) (eight of them for
+      `domain.SuppressionReason.Valid`, which the store uses to refuse a reason before the schema's check does).
+      "Store the address" cannot be done through the port, which receives only the hash, so the mutation is the
+      one that could put an address in the table: a new `address` column, caught by reading the table's columns
+      from the catalog and dumping every stored row as text. One mutation survived (a reason not checked,
+      which the schema's own `CHECK` also refuses) and the test was made to ask for the store's own wording.
+      Where the contract was silent: a later record can only strengthen a suppression. A permanent one stays
+      permanent and keeps its reason when a soft bounce follows it, an expiring one becomes permanent when a
+      permanent record arrives, and of two expiries the later wins, so a stale callback cannot quietly
+      resume mail to someone who complained. A suppression ends at its expiry, not after it.*
 
 ## Stage 4 — Notifier
 
@@ -578,9 +588,9 @@ that lists no red task has no test scheduled.
 
 | Criterion | Proven by | Written (red) in |
 |---|---|---|
-| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020, T024, T047, T047a |
-| NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020, T024, T029 |
-| NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020, T033 |
+| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024, T047, T047a |
+| NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024, T029 |
+| NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020 (done), T033 |
 | NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
 | NS-005 digest burst | burst test | T035 |
 | NS-006 poison terminates | `DispatcherContract` (worker panic, attempt ceiling); dead-letter inspect and replay | T033, T032 |
@@ -600,18 +610,18 @@ construction or by a gate and no task adds a behaviour test for it.
 | Requirement | Proven by | Written (red) in |
 |---|---|---|
 | NR-001 durable record | schema tests; the record exists with every channel disabled | T005 (done), T021, T024 |
-| NR-002 idempotency key and window | `StoreContract` and `NotifierContract` replay cases; `Config.Validate` window floor; `IdemKey` bounds | T009 (done), T014 (done), T020, T024 |
-| NR-003 one transaction | `StoreContract` failure after each statement; `NotifyTx` rollback | T020, T024 |
+| NR-002 idempotency key and window | `StoreContract` and `NotifierContract` replay cases; `Config.Validate` window floor; `IdemKey` bounds | T009 (done), T014 (done), T020 (done), T024 |
+| NR-003 one transaction | `StoreContract` failure after each statement; `NotifyTx` rollback | T020 (done), T024 |
 | NR-004 claim, lease, fence; pre-check after commit | the queue's integration suite; `DispatcherContract` crash points; pre-check tests | T016 (done), T023, T024, T033 |
 | NR-005 channel idempotency at its declared level | frozen delivery-key vector; `ChannelContract`; per-channel tests | T008 (done), T025, T026, T027, T029 |
-| NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019, T031, T033 |
+| NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031, T033 |
 | NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032, T033 |
-| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020, T024, T047, T047a |
+| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020 (done), T024, T047, T047a |
 | NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case; realm bindings | T009 (done), T024, T049 |
-| NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 |
-| NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018, T021, T024 |
-| NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017, T021, T024 |
-| NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018, T021, T024 |
+| NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 (done) |
+| NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021, T024 |
+| NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021, T024 |
+| NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021, T024 |
 | NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021, T034a, T035 |
 | NR-015 unsubscribe | email golden files; REST unsubscribe handler rows; the `unsubscribe` spec | T026, T044, T047a |
 | NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a, T053 (done) |
@@ -622,18 +632,18 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-021 stable shard, changeable count | shard vectors; `RehomeShards` integration test | T010 (done), T016 (done) |
 | NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding; `n_tup_del` unmoved | T006 (done), T038, T039 |
 | NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; quota table; noisy-neighbour test | T016 (done), T036, T037 |
-| NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017, T025, T028 |
+| NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017 (done), T025, T028 |
 | NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
 | NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |
-| NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020, T024 |
+| NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020 (done), T024 |
 | NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033, T048 |
 | NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021, T024, T033 |
 | NR-030 cancel | `NotifierContract` cancel cases; the queue's `Cancel` | T016 (done), T024 |
 | NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021, T033 |
-| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020, T024, T047a |
-| NR-033 seen, read, archived | inbox table, independent flags | T017 |
-| NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext | T019, T040 |
-| NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack | T020, T052 |
+| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020 (done), T024, T047a |
+| NR-033 seen, read, archived | inbox table, independent flags | T017 (done) |
+| NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext | T019 (done), T040 |
+| NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack | T020 (done), T052 |
 | NR-036 capacity envelope stated | stated in [plan.md § Capacity model](plan.md#capacity-model); the load-test thresholds | T055 |
 | NR-037 preflight warnings | preflight table | T040a |
 

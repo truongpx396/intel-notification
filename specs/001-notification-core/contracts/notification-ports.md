@@ -528,8 +528,10 @@ type Dispatcher interface {
 ```go
 // Every port is declared in ports/driven.go (and ports/driving.go for the driving
 // ones); the Go declarations there are normative and are summarized here. Queue,
-// Digests and Maintenance are implemented: adapters/driven/postgres implements them
-// as plain SQL, tested against PostgreSQL by the integration suite (D37). Every
+// Digests, Maintenance, Store (all but its three broadcast methods), InboxStore,
+// PreferenceStore and SuppressionStore are implemented: adapters/driven/postgres
+// implements them as plain SQL, tested against PostgreSQL by the integration
+// suite (D37). Every
 // method taking a Claim is FENCED: it changes state only
 // while the claim's lease token is current, and reports ok=false, having written
 // nothing, when the lease was lost (D19).
@@ -570,7 +572,11 @@ type Maintenance interface {
 	// Still to come: RetirePartitions (T038), ReplayDeadLetter (T032).
 }
 
-// Store is the persist and read path: declared, to be implemented by T015–T017.
+// Store is the persist and read path: implemented by adapters/driven/postgres (T015),
+// but for the three broadcast methods, which arrive with T041. Status reads one
+// snapshot of a notification's deliveries and includes a digested channel's window.
+// PersistAndEnqueue requires the effective priority, not "": the store cannot know the
+// topic's default.
 type Store interface {
 	// PersistAndEnqueue writes, in ONE transaction and under the identity's
 	// transaction-local scope (D17): the notify_idem guard first (a conflict ⇒ replay,
@@ -593,10 +599,15 @@ type Store interface {
 	LeaseBroadcast(ctx context.Context, lease time.Duration) (*BroadcastJob, error)
 	CommitBroadcastPage(ctx context.Context, job BroadcastJob, page []PageItem, nextCursor string, done bool) error
 
+	// Matches the provider's message id within its channel; ErrUnknownDelivery, having
+	// written nothing, when no delivery matches (NR-032).
 	RecordProviderStatus(ctx context.Context, ch ChannelKind, providerMessageID, status string) error
 }
 
-// InboxStore is the recipient read/write path. Every call runs under the identity's scope.
+// InboxStore is the recipient read/write path. Every call runs under the identity's scope,
+// and sees only what the inbox shows: visible, uncanceled, send time passed. A notification
+// that is not the caller's, or not shown, is ErrNotFound to MarkRead and Archive (all or
+// nothing, one text for every id) and nil to Get.
 type InboxStore interface {
 	List(ctx context.Context, id Identity, q ListQuery) (Page, error)
 	Unread(ctx context.Context, id Identity, cap int) (UnreadCount, error) // bounded (D15)
@@ -875,9 +886,11 @@ with no infrastructure, integration suites against real PostgreSQL and Redis via
 (`//go:build integration`, one cloned database per test), and the REST and SSE surface end to end with
 Playwright. Schema-level guarantees are asserted separately by `make verify-schema`.
 
-The queue, digest and maintenance transitions already have their integration suite in
+The queue, digest and maintenance transitions, the store's persist and read paths (`StoreContract`),
+the inbox, the preferences and the suppressions already have their integration suites in
 [`adapters/driven/postgres`](../../../adapters/driven/postgres/) — every transition, real concurrency
 for the claim, and a mutation check behind each guarantee ([D37](../design-decisions.md#d37)). The
+preference table is `notifytest.PreferenceStoreContract`, which the in-memory fake runs as well. The
 suites below are the ones still to be written, with their shape fixed now.
 
 ```go
@@ -988,8 +1001,9 @@ func StreamIsolationContract(t *testing.T, env func(t *testing.T) Env) {
 	t.Run("reconnect delivers the bounded authoritative count first", ...)
 }
 
-// StoreContract: atomic persist, replay, crash-after-commit leaves drivable work,
-// retention with a pending delivery outstanding, erasure. TransportContract runs
+// StoreContract is written (store_integration_test.go): atomic persist, replay,
+// crash-after-commit leaves drivable work. Retention with a pending delivery
+// outstanding moved to T039, and erasure to T040. TransportContract runs
 // NotifierContract through grpcserver + grpcclient: identical semantics, identical suite.
 ```
 
@@ -1193,10 +1207,10 @@ module — no host, no replace directives?**
     errors.go validation.go                       sentinels and the validation error
   ports/
     driving.go             Notifier, Inbox, Admin, Dispatcher, Jobs
-    driven.go              Queue, Digests, Maintenance (implemented) · Channel, ChannelRegistry,
-                           Store, InboxStore, PreferenceStore, TopicRegistry, TemplateRenderer,
-                           AddressBook, AudienceResolver, SuppressionStore, QuotaCounter,
-                           PreCheck, StreamPublisher, Clock, IDSource
+    driven.go              Queue, Digests, Maintenance, Store, InboxStore, PreferenceStore,
+                           SuppressionStore (implemented) · Channel, ChannelRegistry,
+                           TopicRegistry, TemplateRenderer, AddressBook, AudienceResolver,
+                           QuotaCounter, PreCheck, StreamPublisher, Clock, IDSource
   app/                     use-cases; own the invariants
     notifier.go planner.go broadcast.go dispatcher.go digest.go quota.go inbox.go
     maintenance.go erasure.go

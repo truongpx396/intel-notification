@@ -3,11 +3,11 @@
 //
 // driving.go holds what callers use: Notifier, Inbox, Admin, Dispatcher and
 // Jobs. This file holds what the engine uses: the delivery queue, digest windows
-// and maintenance operations, which adapters/driven/postgres implements as plain
-// SQL, and the persist and read paths, preferences, catalog, channels and
-// counters whose implementations land with their own tasks. The Go declarations
-// are normative; specs/001-notification-core/contracts/notification-ports.md
-// explains them.
+// and maintenance operations, the persist and read paths, the inbox, preferences
+// and suppressions, which adapters/driven/postgres implements as plain SQL, and
+// the catalog, channels and counters whose implementations land with their own
+// tasks. The Go declarations are normative;
+// specs/001-notification-core/contracts/notification-ports.md explains them.
 //
 // An interface has no behaviour to test. It is the seam the contract suites are
 // written against, and each implementation asserts it at compile time:

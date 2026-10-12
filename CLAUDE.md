@@ -50,8 +50,9 @@ has the rules):
 - `domain/`: pure rules, imports nothing from the module. Canonical encoding and every derived key
   (`keys.go`), shard, backoff, the terminal-outcome policy, dispatch steps.
 - `ports/`: `driven.go` and `driving.go`, the interfaces. Every other layer depends on these.
-- `adapters/driven/postgres/`: the delivery queue, digests and maintenance jobs. The store's persist and
-  read paths are not built yet.
+- `adapters/driven/postgres/`: the delivery queue, digests and maintenance jobs, the store's persist and
+  read paths, the inbox, preferences and suppressions. Broadcast (T041) and the catalog adapters (T048)
+  are not built yet.
 - `migrations/`: the schema, embedded as `migrations.FS` so hosts, the service binary and the integration
   tests apply the same files. `config.go` is the one configuration surface.
 - `internal/notifytest/` is the kit every suite is written against (fake clock, fault injection, probe,
