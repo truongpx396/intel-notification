@@ -491,6 +491,14 @@ same mutations against the code's new homes and add the PostgreSQL store's.
 | 2026-10-12 | T018 | …on `Set` | `id.Validate()` removed | Killed by `PreferenceStoreContract/a_write_is_refused_whole_or_not_at_all/an_identity_with_an_empty_component_is_refused` | `Set: err = <nil>, want ErrEmptyIdentity` |
 | 2026-10-12 | T018 | …on `Schedule` | `id.Validate()` removed | Killed by `PreferenceStoreContract/a_write_is_refused_whole_or_not_at_all/an_identity_with_an_empty_component_is_refused` | `Schedule: err = <nil>, want ErrEmptyIdentity` |
 | 2026-10-12 | T018 | …on `SetSchedule` | `id.Validate()` removed | Killed by `PreferenceStoreContract/a_write_is_refused_whole_or_not_at_all/an_identity_with_an_empty_component_is_refused` | `SetSchedule: err = <nil>, want ErrEmptyIdentity` |
+| 2026-10-12 | T019 | `hard_bounce` is a suppression reason ([D13](../specs/001-notification-core/design-decisions.md#d13)) | removed from `SuppressionReason.Valid` | Killed by `TestSuppressionReasonValid/hard_bounce` | `SuppressionReason("hard_bounce").Valid() = false, want true` |
+| 2026-10-12 | T019 | `complaint` is | removed | Killed by `TestSuppressionReasonValid/complaint` | `SuppressionReason("complaint").Valid() = false, want true` |
+| 2026-10-12 | T019 | `unsubscribe` is | removed | Killed by `TestSuppressionReasonValid/unsubscribe` | `SuppressionReason("unsubscribe").Valid() = false, want true` |
+| 2026-10-12 | T019 | `invalid_address` is | removed | Killed by `TestSuppressionReasonValid/invalid_address` | `SuppressionReason("invalid_address").Valid() = false, want true` |
+| 2026-10-12 | T019 | `token_revoked` is | removed | Killed by `TestSuppressionReasonValid/token_revoked` | `SuppressionReason("token_revoked").Valid() = false, want true` |
+| 2026-10-12 | T019 | `soft_bounce` is | removed | Killed by `TestSuppressionReasonValid/soft_bounce` | `SuppressionReason("soft_bounce").Valid() = false, want true` |
+| 2026-10-12 | T019 | Nothing else is a reason | `return false` → `return r != ""` | Killed by `TestSuppressionReasonValid` (`bounce`, `HARD_BOUNCE`, ` hard_bounce`) | `SuppressionReason("bounce").Valid() = true, want false` |
+| 2026-10-12 | T019 | The empty reason is not one | `return false` → `return r == ""` | Killed by `TestSuppressionReasonValid/` | `SuppressionReason("").Valid() = true, want false` |
 
 ## Before this ledger
 
