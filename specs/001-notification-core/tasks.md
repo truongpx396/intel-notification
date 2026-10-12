@@ -263,7 +263,7 @@ rule above.
 
 ## Stage 4 — Notifier
 
-- [ ] **T023a** *setup* `internal/notifytest`: an in-memory `PreCheck` and the `Env.PreCheck` field the
+- [x] **T023a** *setup* `internal/notifytest`: an in-memory `PreCheck` and the `Env.PreCheck` field the
       `Notifier` is built with. It stands where Redis will, so `NotifierContract` can be written, and fail
       on its assertions, before any Redis adapter exists (T013a puts Redis in `Env` with T023, after
       T024). It follows the port: `Seen` only reads, `Remember` writes, an entry lapses after its `ttl` on
@@ -274,6 +274,14 @@ rule above.
       entry is present one nanosecond before its `ttl` and gone at it; `Seen` creates nothing; a key is
       stored exactly as given.
       **Mutate:** ignore the `ttl`; let `Seen` create the entry
+      *Built as `notifytest.PreCheck`, with 8 rows in the [ledger](../../docs/mutations.md), none surviving.
+      Its table is `notifytest.PreCheckContract`, written once and run by the fake as a unit test; T023 runs
+      it against Redis (the T018 device). Where the port is silent: a `ttl` that is not positive is refused
+      by `Remember` and stores nothing, because Redis reads a zero TTL as "never expires" and an entry that
+      outlives the idempotency window could drop a notification the guard would accept (D18). The lapse at
+      the `ttl` needs a clock the test can move, so it is the fake's own table, not the shared one. `Writes`
+      lists each stored `Remember` with its instant on the fake clock; a read and a refused write are not
+      in it.*
 - [ ] **T024** *red* **Contract test** `NotifierContract` (integration, on the T013a `Env` and T023a's
       `PreCheck`). Write it before the notifier, against the ports with nothing behind them. Cases from
       the contract: a replay is one row and one enqueue per channel; the same user in two tenants gets
