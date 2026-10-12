@@ -73,6 +73,7 @@ type env struct {
 	db    *pgtest.DB
 	s     *Store
 	inbox *Inbox
+	sup   *Suppressions
 	clock *stepClock
 }
 
@@ -80,7 +81,8 @@ func newEnv(t *testing.T) *env {
 	t.Helper()
 	db := pgtest.New(t)
 	clock := &stepClock{now: fixtureDay}
-	return &env{t: t, db: db, s: New(db.Owner, WithClock(clock)), inbox: NewInbox(db.Owner, WithClock(clock)), clock: clock}
+	return &env{t: t, db: db, s: New(db.Owner, WithClock(clock)), inbox: NewInbox(db.Owner, WithClock(clock)),
+		sup: NewSuppressions(db.Owner, WithClock(clock)), clock: clock}
 }
 
 // with returns the env bound to t, a subtest's own. The helpers fail the test they
