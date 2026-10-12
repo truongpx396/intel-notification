@@ -115,6 +115,8 @@ type Env struct {
 	Queue       ports.Queue
 	Digests     ports.Digests
 	Maintenance ports.Maintenance
+	// Inbox is the real recipient read and write path, on the Env's clock.
+	Inbox ports.InboxStore
 	// Store is the real one behind a FaultStore, so a test can fail the next
 	// commit (FailNextCommit) and a Notify still goes through the port's own seam.
 	Store *FaultStore
@@ -155,6 +157,7 @@ func NewEnv(tb testing.TB, opts ...Option) *Env {
 		Queue:       store,
 		Digests:     store,
 		Maintenance: store,
+		Inbox:       postgres.NewInbox(db.Owner, postgres.WithClock(clock)),
 		Store: NewFaultStore(store, func(ctx context.Context) (Transaction, error) {
 			tx, err := db.Owner.Begin(ctx)
 			if err != nil {

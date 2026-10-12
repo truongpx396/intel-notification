@@ -5,6 +5,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -68,3 +69,5 @@ func (g gaps) err(use string) error {
 	}
 	return fmt.Errorf("app: %s needs %s", use, strings.Join(g, ", "))
 }
+
+var errNotImplemented = errors.New("not implemented")
