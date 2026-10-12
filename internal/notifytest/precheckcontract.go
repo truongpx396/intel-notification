@@ -93,6 +93,10 @@ func PreCheckContract(t *testing.T, newPreCheck PreCheckFactory) {
 			t.Run(ttl.String(), func(t *testing.T) {
 				t.Parallel()
 				p := newPreCheck(t)
+				// A control first, so a pre-check that stores nothing cannot pass.
+				if err := p.Remember(t.Context(), "control", "n0", time.Hour); err != nil {
+					t.Fatalf("Remember with a good ttl: %v", err)
+				}
 				// A zero TTL is "no expiry" to Redis. An entry that never lapses would
 				// outlive the idempotency window and drop a notification the guard
 				// would accept (D18).
