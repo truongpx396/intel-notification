@@ -168,8 +168,8 @@ rule above.
       `BindAddresses`, `DeferTenantChannel`, `Cancel`, the digest windows, and the maintenance
       operations — each fenced where it takes a claim, with an integration suite against PostgreSQL 16
       and a mutation check behind every guarantee (NR-004, [D19](design-decisions.md#d19),
-      [D37](design-decisions.md#d37)). *Still to do: `Load`, with T015.*
-- [ ] **T020** *red* **Contract test** `StoreContract` (integration, against PostgreSQL as the table
+      [D37](design-decisions.md#d37)). *`Load` came with T015.*
+- [x] **T020** *red* **Contract test** `StoreContract` (integration, against PostgreSQL as the table
       owner). Write it first against a `Store` that returns an error, and watch each case fail on its
       assertion. Cases: a replay reports `Applied == false` and writes nothing else; the guard is written
       first and a conflict writes no inbox, queue or digest row; a failure injected after each statement
@@ -181,14 +181,35 @@ rule above.
       delivery named by its channel and provider message id and on no other (NR-002, NR-003, NR-027,
       NR-032, NS-001, NS-002, NS-003).
       *The retention case that was here moved to T039, because it needs `RetirePartitions` (T038)*
-- [ ] **T015** *green* `postgres/store.go`: `PersistAndEnqueue` — scope, guard first, inbox row, queue
+      *Built: `store_integration_test.go`, ten tests. Written against the `Store` as stubs returning
+      `errors.New("not implemented")`; 10 tests and 47 subtests failed on their first assertion, none on a
+      fixture. A failure "after each statement" is a database trigger that refuses inserts into one of the
+      five tables, so it needs no seam in the store and fires the same in the store's own transaction and a
+      caller's. "The guard is written first" is shown by refusing every table but the guard and replaying: a
+      store that wrote the inbox row first fails instead of reporting a replay. Refusals carry a control write
+      first, so a store that accepts nothing cannot pass them. The three broadcast methods have no case;
+      they are T042's.*
+- [x] **T015** *green* `postgres/persist.go`, `load.go`, `status.go`: `PersistAndEnqueue` — scope, guard first, inbox row, queue
       rows, digest appends, drop records, one transaction; `tx` for `NotifyTx`; `Load`, `Status` and
       `RecordProviderStatus` (NR-002, NR-003, NR-027, NR-032). Make T020 pass one case at a time, in the
       order listed there.
       **Mutate:** write the inbox row before the guard; run the enqueue outside the transaction; commit
       or roll back the caller's `tx`; drop the scope from `Load`; match a provider message id without
       its channel
-- [ ] **T017** [P] *red → green* `postgres/inbox.go`: list, bounded unread, seen / read / archive — all
+      *Built, with 62 rows in the [ledger](../../docs/mutations.md). Four survived and the tests were
+      strengthened until they died; three more are equivalent and left, each said why. Where the contract
+      was silent the choice is in the code's doc comment: the store takes the notification's id and
+      `created_at` from a `Clock` and an `IDSource` it is built with (`postgres.WithClock`,
+      `WithIDSource`; UUIDv7 by default) and leaves a queue row's due time to the database's `now()`, which
+      is what a claim compares against; it refuses an unresolved priority, because it cannot know the
+      topic's default and storing `info` for a critical topic would let quiet hours defer it, so T022 must
+      resolve it first; a replay names the first notification and its visibility; `Load` reports a gone
+      row (an erased recipient) as canceled, not as an error a retry would dead-letter; `Status` reads one
+      snapshot and includes a digested channel's window; and `RecordProviderStatus` returns
+      `domain.ErrUnknownDelivery` for a callback that names no delivery, so the webhook handler (T044) can
+      ask the provider to try again when a callback beats the delivery's own record. `notifytest.Env` gains
+      `Store`, dated from the Env's clock.*
+- [x] **T017** [P] *red → green* `postgres/inbox.go`: list, bounded unread, seen / read / archive — all
       scoped (NR-024, NR-033).
       **Red first:** an integration table — `list` returns only the caller's rows when two tenants share
       a recipient id; seen, read and archive are independent, each transition leaving the other two flags
@@ -196,20 +217,49 @@ rule above.
       `UnreadCap + k` unread the count stops at the cap and reports `Capped`; a row with no inbox-backed
       channel enabled is neither listed nor counted (NR-012).
       **Mutate:** drop the scope from `list`; count without the cap; let `read` clear `seen`
-- [ ] **T018** [P] *red → green* `postgres/prefs.go`: recipient → tenant (locked) → topic resolution with
+      *Built as `postgres.Inbox`, a `ports.InboxStore`, with 39 rows in the [ledger](../../docs/mutations.md);
+      two survivors are equivalent and left, three were repaired. The contract left several things open, and the
+      choices are in `ports.InboxStore` and the tests: what the inbox shows (inbox-visible, uncanceled, send
+      time passed) is, to every method including `Get` and the marks, all there is, so a hidden row reads as
+      absent; `MarkRead` and `Archive` are all-or-nothing and answer `domain.ErrNotFound` for a foreign,
+      unknown or malformed id with one text, which names no id; `MarkAllRead` leaves what is archived; the
+      list's cursor is a keyset on `(created_at, id)`, refused as `domain.ErrInvalidCursor` when malformed; a
+      missing limit is `DefaultPageSize` and a large one `MaxPageSize`. The badge's "reads at most cap+1 rows"
+      is asserted on the executed plan, captured from the statement `Unread` runs, not on its answer.*
+- [x] **T018** [P] *red → green* `postgres/prefs.go`: recipient → tenant (locked) → topic resolution with
       source reporting (NR-011, [D30](design-decisions.md#d30)).
       **Red first:** a resolution matrix over {recipient set or unset} × {tenant set, unset or locked} ×
       {topic default}, asserting both the winner and the reported source; a locked tenant default beats
       the recipient's opposite choice; a pair is resolved independently per channel; the quiet-hours and
       cadence schedule round-trips; one recipient's preferences never appear for another.
       **Mutate:** swap the precedence; ignore `locked`; report the wrong source
-- [ ] **T019** [P] *red → green* `postgres/suppressions.go`. The job lease is already
+      *Built as `postgres.Preferences`, with 66 rows in the [ledger](../../docs/mutations.md); three survivors
+      are equivalent and left, three were gaps in the shared table (a tenant row for another topic, a
+      tenant of another kind, and a refusal the fake and the store would both have failed to make) and
+      the table was strengthened until they died. D30's precedence is written once, in
+      `domain.ResolvePreferences`, which the fake and the store both call, with `Preference.Validate` and
+      `TenantPreference.Validate` beside it. The fake's own table became `notifytest.PreferenceStoreContract`,
+      which the fake runs as a unit test and the store runs against PostgreSQL, so the two cannot drift
+      (the T013a rule). The store adds what only a database holds: a choice stored under the recipient's
+      scope and no other, sixteen writers on one pair leaving one row, three hundred pairs in one call, and a
+      schedule that keeps its clock times, seconds and all.*
+- [x] **T019** [P] *red → green* `postgres/suppressions.go`. The job lease is already
       `Maintenance.TryLeaseJob` with `TestTryLeaseJob`, so no separate `leases.go` is planned; add one only
       if the leased flush job (T034) finds a gap (NR-006, NS-012).
       **Red first:** a catalog scan finds no plaintext address in any column of the suppression table; a
       live suppression is found by address hash and an expired one is not; suppressions are per channel;
       recording the same suppression twice is one row; one survives `Erase`.
       **Mutate:** store the address; ignore the expiry; delete suppressions in `Erase`
+      *Built as `postgres.Suppressions`, with 27 rows in the [ledger](../../docs/mutations.md) (eight of them for
+      `domain.SuppressionReason.Valid`, which the store uses to refuse a reason before the schema's check does).
+      "Store the address" cannot be done through the port, which receives only the hash, so the mutation is the
+      one that could put an address in the table: a new `address` column, caught by reading the table's columns
+      from the catalog and dumping every stored row as text. One mutation survived (a reason not checked,
+      which the schema's own `CHECK` also refuses) and the test was made to ask for the store's own wording.
+      Where the contract was silent: a later record can only strengthen a suppression. A permanent one stays
+      permanent and keeps its reason when a soft bounce follows it, an expiring one becomes permanent when a
+      permanent record arrives, and of two expiries the later wins, so a stale callback cannot quietly
+      resume mail to someone who complained. A suppression ends at its expiry, not after it.*
 
 ## Stage 4 — Notifier
 
@@ -538,9 +588,9 @@ that lists no red task has no test scheduled.
 
 | Criterion | Proven by | Written (red) in |
 |---|---|---|
-| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020, T024, T047, T047a |
-| NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020, T024, T029 |
-| NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020, T033 |
+| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024, T047, T047a |
+| NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024, T029 |
+| NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020 (done), T033 |
 | NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
 | NS-005 digest burst | burst test | T035 |
 | NS-006 poison terminates | `DispatcherContract` (worker panic, attempt ceiling); dead-letter inspect and replay | T033, T032 |
@@ -560,18 +610,18 @@ construction or by a gate and no task adds a behaviour test for it.
 | Requirement | Proven by | Written (red) in |
 |---|---|---|
 | NR-001 durable record | schema tests; the record exists with every channel disabled | T005 (done), T021, T024 |
-| NR-002 idempotency key and window | `StoreContract` and `NotifierContract` replay cases; `Config.Validate` window floor; `IdemKey` bounds | T009 (done), T014 (done), T020, T024 |
-| NR-003 one transaction | `StoreContract` failure after each statement; `NotifyTx` rollback | T020, T024 |
+| NR-002 idempotency key and window | `StoreContract` and `NotifierContract` replay cases; `Config.Validate` window floor; `IdemKey` bounds | T009 (done), T014 (done), T020 (done), T024 |
+| NR-003 one transaction | `StoreContract` failure after each statement; `NotifyTx` rollback | T020 (done), T024 |
 | NR-004 claim, lease, fence; pre-check after commit | the queue's integration suite; `DispatcherContract` crash points; pre-check tests | T016 (done), T023, T024, T033 |
 | NR-005 channel idempotency at its declared level | frozen delivery-key vector; `ChannelContract`; per-channel tests | T008 (done), T025, T026, T027, T029 |
-| NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019, T031, T033 |
+| NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031, T033 |
 | NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032, T033 |
-| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020, T024, T047, T047a |
+| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020 (done), T024, T047, T047a |
 | NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case; realm bindings | T009 (done), T024, T049 |
-| NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 |
-| NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018, T021, T024 |
-| NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017, T021, T024 |
-| NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018, T021, T024 |
+| NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 (done) |
+| NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021, T024 |
+| NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021, T024 |
+| NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021, T024 |
 | NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021, T034a, T035 |
 | NR-015 unsubscribe | email golden files; REST unsubscribe handler rows; the `unsubscribe` spec | T026, T044, T047a |
 | NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a, T053 (done) |
@@ -582,18 +632,18 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-021 stable shard, changeable count | shard vectors; `RehomeShards` integration test | T010 (done), T016 (done) |
 | NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding; `n_tup_del` unmoved | T006 (done), T038, T039 |
 | NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; quota table; noisy-neighbour test | T016 (done), T036, T037 |
-| NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017, T025, T028 |
+| NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017 (done), T025, T028 |
 | NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
 | NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |
-| NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020, T024 |
+| NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020 (done), T024 |
 | NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033, T048 |
 | NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021, T024, T033 |
 | NR-030 cancel | `NotifierContract` cancel cases; the queue's `Cancel` | T016 (done), T024 |
 | NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021, T033 |
-| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020, T024, T047a |
-| NR-033 seen, read, archived | inbox table, independent flags | T017 |
-| NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext | T019, T040 |
-| NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack | T020, T052 |
+| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020 (done), T024, T047a |
+| NR-033 seen, read, archived | inbox table, independent flags | T017 (done) |
+| NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext | T019 (done), T040 |
+| NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack | T020 (done), T052 |
 | NR-036 capacity envelope stated | stated in [plan.md § Capacity model](plan.md#capacity-model); the load-test thresholds | T055 |
 | NR-037 preflight warnings | preflight table | T040a |
 

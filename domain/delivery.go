@@ -57,6 +57,16 @@ const (
 	SuppressSoftBounce     SuppressionReason = "soft_bounce"
 )
 
+// Valid reports whether r is one of the six reasons channel_suppressions accepts.
+func (r SuppressionReason) Valid() bool {
+	switch r {
+	case SuppressHardBounce, SuppressComplaint, SuppressUnsubscribe,
+		SuppressInvalidAddress, SuppressTokenRevoked, SuppressSoftBounce:
+		return true
+	}
+	return false
+}
+
 // RenderRequest asks the TemplateRenderer for the content of one delivery.
 type RenderRequest struct {
 	Realm       Realm

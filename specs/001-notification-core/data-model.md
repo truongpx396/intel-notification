@@ -245,6 +245,10 @@ runs every transition against PostgreSQL 16 as the table owner.
 | `Maintenance.Erase(identity)` | Erase one recipient everywhere; record by hash | `TestErase` |
 | `Maintenance.EnsurePartitions(from, months)` | Create missing monthly partitions; scope every new `notifications` partition | `TestEnsurePartitions` |
 | `Maintenance.CheckPartitions(at)` | Read the catalog for the alarms: each table with no partition covering `at`'s month or the next, and each `notifications` partition the recipient scope does not hold on. Changes nothing | `TestCheckPartitions` |
+| `Store.PersistAndEnqueue(tx, identity, n, plan)` | Under the identity's transaction-local scope: the guard, then the inbox row, the queue rows, the dropped-channel records and the digest appends. One transaction, the store's own or the caller's, which it never commits or rolls back | `TestPersistAndEnqueue`, `TestPersistAndEnqueueReplay`, `TestPersistAndEnqueueIsAtomic`, `TestPersistAndEnqueueInCallersTransaction` |
+| `Store.Load(claim)` | Read the notification, or a digest's members without the canceled ones, under the claim's identity | `TestLoad` |
+| `Store.Status(identity, idem_key)` | Read a notification's pending and finished deliveries, and a digested channel's window, in one snapshot | `TestStatus` |
+| `Store.RecordProviderStatus(channel, provider message id, status)` | Record a provider callback on the one delivery with that id on that channel | `TestRecordProviderStatus` |
 
 Every state change on a claim takes its lease token and changes nothing without it.
 

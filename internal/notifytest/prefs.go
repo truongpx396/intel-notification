@@ -2,7 +2,8 @@ package notifytest
 
 import (
 	"context"
-	"slices"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/truongpx396/intel-notification/domain"
@@ -22,25 +23,16 @@ type tenantPrefKey struct {
 	channel domain.ChannelKind
 }
 
-type tenantChoice struct {
-	enabled, locked bool
-}
-
-// Preferences is an in-memory ports.PreferenceStore that resolves as D30 says: a
-// recipient's row wins, unless the tenant's row for that (topic, channel) is
-// locked, then the tenant's row, then the topic's registered default. Essential
-// topics cannot be disabled at any level.
-//
-// A topic's resolved channels are its default channels and its fallback chain,
-// each enabled by the topic's default, and any other channel that a recipient or
-// tenant row names. They come back in that order, the extras sorted. Where the
-// contract leaves room — the fallback chain being subject to preferences, and what
-// an essential topic resolves to — this is the choice made, and the PostgreSQL
-// store's table (T018) decides it for both.
+// Preferences is an in-memory ports.PreferenceStore. It resolves with
+// domain.ResolvePreferences, the one implementation of D30's precedence, and holds
+// the rows: a recipient's choices, a tenant's defaults, and the schedules. It
+// refuses what the PostgreSQL store refuses (an incomplete identity or pair, a
+// negative digest window), and the shared table in [PreferenceStoreContract] holds
+// the two to the same behaviour (T018).
 type Preferences struct {
 	mu        sync.Mutex
 	recipient map[recipientPrefKey]bool
-	tenant    map[tenantPrefKey]tenantChoice
+	tenant    map[tenantPrefKey]domain.TenantChoice
 	schedules map[domain.Identity]domain.DeliverySchedule
 }
 
@@ -51,60 +43,44 @@ var _ ports.PreferenceStore = (*Preferences)(nil)
 func NewPreferences() *Preferences {
 	return &Preferences{
 		recipient: map[recipientPrefKey]bool{},
-		tenant:    map[tenantPrefKey]tenantChoice{},
+		tenant:    map[tenantPrefKey]domain.TenantChoice{},
 		schedules: map[domain.Identity]domain.DeliverySchedule{},
 	}
 }
 
 // Resolve implements ports.PreferenceStore.
 func (p *Preferences) Resolve(_ context.Context, id domain.Identity, topic domain.Topic, def domain.TopicDef) ([]domain.ResolvedPreference, error) {
+	if err := id.Validate(); err != nil {
+		return nil, fmt.Errorf("notifytest: resolve: %w", err)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-
-	// The channels: the topic's own, then any other a row names, sorted.
-	channels := slices.Concat(def.DefaultChannels, def.Fallback)
-	byDefault := map[domain.ChannelKind]bool{}
-	for _, ch := range channels {
-		byDefault[ch] = true
-	}
-	var extras []domain.ChannelKind
-	note := func(ch domain.ChannelKind) {
-		if !byDefault[ch] && !slices.Contains(extras, ch) {
-			extras = append(extras, ch)
-		}
-	}
-	for k := range p.recipient {
+	recipient := map[domain.ChannelKind]bool{}
+	for k, enabled := range p.recipient {
 		if k.id == id && k.topic == topic {
-			note(k.channel)
+			recipient[k.channel] = enabled
 		}
 	}
-	for k := range p.tenant {
+	tenant := map[domain.ChannelKind]domain.TenantChoice{}
+	for k, choice := range p.tenant {
 		if k.realm == id.Realm && k.tenant == id.Tenant && k.topic == topic {
-			note(k.channel)
+			tenant[k.channel] = choice
 		}
 	}
-	slices.Sort(extras)
-	channels = append(channels, extras...)
-
-	out := make([]domain.ResolvedPreference, 0, len(channels))
-	for _, ch := range channels {
-		r := domain.ResolvedPreference{Topic: topic, Channel: ch, Enabled: byDefault[ch], Source: domain.SourceTopicDefault}
-		if tc, ok := p.tenant[tenantPrefKey{id.Realm, id.Tenant, topic, ch}]; ok {
-			r.Enabled, r.Source, r.Locked = tc.enabled, domain.SourceTenant, tc.locked
-		}
-		if choice, ok := p.recipient[recipientPrefKey{id, topic, ch}]; ok && !r.Locked {
-			r.Enabled, r.Source = choice, domain.SourceRecipient
-		}
-		if def.Essential && byDefault[ch] {
-			r.Enabled, r.Source, r.Locked = true, domain.SourceTopicDefault, true
-		}
-		out = append(out, r)
-	}
-	return out, nil
+	return domain.ResolvePreferences(topic, def, recipient, tenant), nil
 }
 
-// Set upserts the recipient's choices. A pair not named is left as it was.
+// Set upserts the recipient's choices, all or none. A pair not named is left as it
+// was, and a pair named twice takes the later.
 func (p *Preferences) Set(_ context.Context, id domain.Identity, prefs []domain.Preference) error {
+	if err := id.Validate(); err != nil {
+		return fmt.Errorf("notifytest: set: %w", err)
+	}
+	for _, pref := range prefs {
+		if err := pref.Validate(); err != nil {
+			return fmt.Errorf("notifytest: set: %w", err)
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, pref := range prefs {
@@ -115,15 +91,24 @@ func (p *Preferences) Set(_ context.Context, id domain.Identity, prefs []domain.
 
 // SetTenant upserts a tenant's default, and whether it is locked.
 func (p *Preferences) SetTenant(_ context.Context, realm domain.Realm, tp domain.TenantPreference) error {
+	if realm == "" {
+		return errors.New("notifytest: set tenant: realm is required")
+	}
+	if err := tp.Validate(); err != nil {
+		return fmt.Errorf("notifytest: set tenant: %w", err)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.tenant[tenantPrefKey{realm, tp.Tenant, tp.Topic, tp.Channel}] = tenantChoice{enabled: tp.Enabled, locked: tp.Locked}
+	p.tenant[tenantPrefKey{realm, tp.Tenant, tp.Topic, tp.Channel}] = domain.TenantChoice{Enabled: tp.Enabled, Locked: tp.Locked}
 	return nil
 }
 
 // Schedule implements ports.PreferenceStore. A recipient who never set one has the
 // zero schedule: immediate delivery, no quiet hours.
 func (p *Preferences) Schedule(_ context.Context, id domain.Identity) (domain.DeliverySchedule, error) {
+	if err := id.Validate(); err != nil {
+		return domain.DeliverySchedule{}, fmt.Errorf("notifytest: schedule: %w", err)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.schedules[id], nil
@@ -131,6 +116,12 @@ func (p *Preferences) Schedule(_ context.Context, id domain.Identity) (domain.De
 
 // SetSchedule replaces the recipient's schedule.
 func (p *Preferences) SetSchedule(_ context.Context, id domain.Identity, s domain.DeliverySchedule) error {
+	if err := id.Validate(); err != nil {
+		return fmt.Errorf("notifytest: set schedule: %w", err)
+	}
+	if s.Digest < 0 {
+		return fmt.Errorf("notifytest: set schedule: digest window %v is negative", s.Digest)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.schedules[id] = s

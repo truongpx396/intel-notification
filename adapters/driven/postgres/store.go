@@ -23,24 +23,66 @@ import (
 	"github.com/truongpx396/intel-notification/ports"
 )
 
-// Store implements the queue, digest and maintenance ports over one pool. The
-// pool's role should own the tables and must NOT be a superuser or BYPASSRLS:
-// the store relies on forced row-level security, and sets the recipient scope
-// per transaction wherever it reads or writes recipient-scoped tables.
+// Store implements the queue, digest, maintenance and persist-and-read ports over
+// one pool. The pool's role should own the tables and must NOT be a superuser or
+// BYPASSRLS: the store relies on forced row-level security, and sets the
+// recipient scope per transaction wherever it reads or writes recipient-scoped
+// tables.
 type Store struct {
 	pool *pgxpool.Pool
+	settings
 }
 
 var (
 	_ ports.Queue       = (*Store)(nil)
 	_ ports.Digests     = (*Store)(nil)
 	_ ports.Maintenance = (*Store)(nil)
+	_ ports.Store       = (*Store)(nil)
 )
 
-// New returns a Store over pool.
-func New(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+// settings are what every store in this package is built with.
+type settings struct {
+	clock ports.Clock
+	ids   ports.IDSource
 }
+
+// Option configures a store of this package.
+type Option func(*settings)
+
+// WithClock sets the clock the persist and read paths stamp rows with and judge
+// visibility by: a notification's created_at, the instant a scheduled one
+// becomes visible. The default is the system clock. The queue's own due times
+// stay the database's now(), because a claim is decided inside one statement.
+func WithClock(c ports.Clock) Option {
+	return func(s *settings) { s.clock = c }
+}
+
+// WithIDSource sets where the persist path takes a notification's id from. The
+// default is a UUIDv7 stamped from the store's clock, so ids sort by creation time.
+func WithIDSource(ids ports.IDSource) Option {
+	return func(s *settings) { s.ids = ids }
+}
+
+func newSettings(opts []Option) settings {
+	s := settings{clock: systemClock{}}
+	for _, opt := range opts {
+		opt(&s)
+	}
+	if s.ids == nil {
+		s.ids = uuidSource{clock: s.clock}
+	}
+	return s
+}
+
+// New returns a Store over pool.
+func New(pool *pgxpool.Pool, opts ...Option) *Store {
+	return &Store{pool: pool, settings: newSettings(opts)}
+}
+
+// systemClock is the default ports.Clock.
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }
 
 // querier is what both a pool and a transaction offer, so a helper can run in
 // either.
@@ -69,6 +111,25 @@ func setScope(ctx context.Context, tx pgx.Tx, id domain.Identity) error {
 		id.Recipient.Kind, id.Recipient.ID)
 	return err
 }
+
+// readScoped runs fn in one read-only transaction, under id's scope, at
+// REPEATABLE READ: every statement in it sees the same snapshot, so a delivery
+// that finishes meanwhile is read as pending or as finished, never as both.
+func readScoped(ctx context.Context, pool *pgxpool.Pool, id domain.Identity, fn func(pgx.Tx) error) error {
+	return pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			if err := setScope(ctx, tx, id); err != nil {
+				return err
+			}
+			return fn(tx)
+		})
+}
+
+// identityPredicate matches one recipient's rows, taking the identity as $1-$5, the
+// order identityArgs gives it. Statements on a recipient-scoped table state it as
+// well as relying on the policy: the policy is the guarantee, and the predicate lets
+// the planner use the recipient index.
+const identityPredicate = `realm = $1 AND tenant_kind = $2 AND tenant_id = $3 AND recipient_kind = $4 AND recipient_id = $5`
 
 // identityArgs is the (realm, tenant, recipient) argument list most statements
 // start with.

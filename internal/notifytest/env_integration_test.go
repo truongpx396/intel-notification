@@ -82,6 +82,45 @@ func TestEnvWiresTheRealQueue(t *testing.T) {
 	}
 }
 
+// The store is the real one, and it reads the Env's clock: what it persists is dated
+// from the fake clock, so a test controls the partition a row lands in and the
+// instant a scheduled notification becomes visible.
+func TestEnvWiresTheRealStoreOnItsClock(t *testing.T) {
+	t.Parallel()
+	e := NewEnv(t)
+	id := domain.Identity{Realm: Realm, Tenant: domain.Tenant{Kind: "workspace", ID: "w1"},
+		Recipient: domain.Recipient{Kind: "user", ID: "u1"}}
+	persist := func(key string) string {
+		t.Helper()
+		n := domain.Notification{Tenant: id.Tenant, Recipient: id.Recipient, Topic: "t",
+			Priority: domain.PriorityInfo, IdemKey: key}
+		r, err := e.Store.PersistAndEnqueue(t.Context(), nil, id, n, domain.DeliveryPlan{Shard: 1})
+		if err != nil || !r.Applied {
+			t.Fatalf("PersistAndEnqueue(%s) = %+v, %v", key, r, err)
+		}
+		return r.NotificationID
+	}
+	createdAt := func(nid string) time.Time {
+		t.Helper()
+		var at time.Time
+		if err := e.DB.Admin.QueryRow(t.Context(),
+			`SELECT created_at FROM notifications WHERE id = $1::uuid`, nid).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+
+	first := persist("k1")
+	e.Clock.Advance(90 * time.Minute)
+	second := persist("k2")
+	if got := createdAt(first); !got.Equal(Epoch) {
+		t.Errorf("created_at = %v, want the Env's clock, Epoch %v", got, Epoch)
+	}
+	if got := createdAt(second); !got.Equal(Epoch.Add(90 * time.Minute)) {
+		t.Errorf("created_at = %v after advancing the clock, want %v", got, Epoch.Add(90*time.Minute))
+	}
+}
+
 // Registering a channel is one line, and what it sends is counted by the Env's
 // probe.
 func TestEnvAddChannelRegistersOneAndReportsToItsProbe(t *testing.T) {

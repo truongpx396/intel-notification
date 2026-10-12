@@ -3,11 +3,11 @@
 //
 // driving.go holds what callers use: Notifier, Inbox, Admin, Dispatcher and
 // Jobs. This file holds what the engine uses: the delivery queue, digest windows
-// and maintenance operations, which adapters/driven/postgres implements as plain
-// SQL, and the persist and read paths, preferences, catalog, channels and
-// counters whose implementations land with their own tasks. The Go declarations
-// are normative; specs/001-notification-core/contracts/notification-ports.md
-// explains them.
+// and maintenance operations, the persist and read paths, the inbox, preferences
+// and suppressions, which adapters/driven/postgres implements as plain SQL, and
+// the catalog, channels and counters whose implementations land with their own
+// tasks. The Go declarations are normative;
+// specs/001-notification-core/contracts/notification-ports.md explains them.
 //
 // An interface has no behaviour to test. It is the seam the contract suites are
 // written against, and each implementation asserts it at compile time:
@@ -136,7 +136,10 @@ type Store interface {
 	// sending it.
 	Load(ctx context.Context, c domain.Claim) (n *domain.Notification, digest []domain.Notification, canceled bool, err error)
 
-	// Status reads one notification's deliveries by channel and address.
+	// Status reads one notification's deliveries by channel and address: those
+	// still pending, those finished, and, for a digested channel, the window's.
+	// Found is false when the key is unknown to this identity or has passed out of
+	// the idempotency window.
 	Status(ctx context.Context, id domain.Identity, idemKey string) (domain.NotificationStatus, error)
 
 	// CreateBroadcast records a broadcast, idempotently on its key (NR-020).
@@ -152,21 +155,37 @@ type Store interface {
 	CommitBroadcastPage(ctx context.Context, job domain.BroadcastJob, page []domain.PageItem, nextCursor string, done bool) error
 
 	// RecordProviderStatus records a provider's delivery callback against the
-	// delivery it concerns, found by provider message id (NR-032).
+	// delivery it concerns, found by channel and provider message id (NR-032). A
+	// message id is the provider's, so two channels may use the same one: it never
+	// matches across channels. It returns domain.ErrUnknownDelivery, having written
+	// nothing, when no delivery matches.
 	RecordProviderStatus(ctx context.Context, ch domain.ChannelKind, providerMessageID, status string) error
 }
 
 // InboxStore is the recipient read and write path. Every call runs under the
-// identity's scope.
+// identity's scope, and sees only what the inbox shows: a notification that is
+// inbox-visible, not canceled, and whose send time has passed (D26, D29). One
+// that is none of those is, to every method here, as if it did not exist.
 type InboxStore interface {
+	// List returns a page of the identity's notifications, newest first. A zero or
+	// negative q.Limit takes a default, and a large one is capped. q.Cursor is a
+	// NextCursor from an earlier page; one the store did not issue is
+	// domain.ErrInvalidCursor. Title and Body are the stored fallback copy: the
+	// Inbox use-case renders from the template (D27).
 	List(ctx context.Context, id domain.Identity, q domain.ListQuery) (domain.Page, error)
 	// Unread counts unread, visible, unarchived, uncanceled notifications, and
-	// stops at limit (D15).
+	// stops at limit (D15): Count never exceeds it, and Capped says there were more.
 	Unread(ctx context.Context, id domain.Identity, limit int) (domain.UnreadCount, error)
 	// Get returns one of the identity's notifications, or nil when it is not
 	// theirs: a caller cannot tell "absent" from "someone else's".
 	Get(ctx context.Context, id domain.Identity, notificationID string) (*domain.Notification, error)
+	// MarkSeen marks every notification created at or before the instant seen. It
+	// leaves read and archived alone (D26).
 	MarkSeen(ctx context.Context, id domain.Identity, before time.Time) error
+	// MarkRead, MarkAllRead and Archive each change one state and leave the other
+	// two alone, and are idempotent: a state already set keeps the time it was set.
+	// MarkRead and Archive return domain.ErrNotFound, having changed nothing, when
+	// any id is not the identity's.
 	MarkRead(ctx context.Context, id domain.Identity, ids []string) error
 	MarkAllRead(ctx context.Context, id domain.Identity) error
 	Archive(ctx context.Context, id domain.Identity, ids []string, archived bool) error
