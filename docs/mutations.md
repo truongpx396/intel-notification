@@ -526,6 +526,9 @@ same mutations against the code's new homes and add the PostgreSQL store's.
 | 2026-10-12 | T023a | …every key is its own entry | `Remember` stores every key as `"k"` | Killed by `TestPreCheckKeepsEachWriteWithItsInstant`, `TestPreCheckEntryLapsesAtItsTTL` | `write 0 = {Key:k …}, want {Key:k1 …}` |
 | 2026-10-12 | T023a | Each write keeps the instant it happened, not its expiry | `At: now` → `At: now.Add(ttl)` | Killed by `TestPreCheckKeepsEachWriteWithItsInstant` | `write 0 = {… At:2031-03-01 13:00:00 +0000 UTC}, want {… At:2031-03-01 12:00:00 +0000 UTC}` |
 | 2026-10-12 | T023a | A refused write is not a write | the write log is appended before the ttl check | Killed by `TestPreCheckReadsAndRefusedWritesAreNotWrites` | `Writes = [{Key:k1 NotificationID: TTL:0s At:0001-01-01 …}], want none after a read and a refused write` |
+| 2026-10-12 | T021 | A key nothing configures defers, the only policy that discards nothing ([D5](../specs/001-notification-core/design-decisions.md#d5)) | `Policy` falls back to `QuotaDropNonEssential` | Killed by `TestQuotaCounterPolicyDefaultsToDefer`, `TestQuotaCounterPolicyIsPerKeyAndSurvivesLose` | `Policy of an unconfigured key = "drop_non_essential", <nil>, want "defer"` |
+| 2026-10-12 | T021 | A policy belongs to one (realm, tenant, channel) | `Policy` returns any stored policy, whatever the key | Killed by `TestQuotaCounterPolicyIsPerKeyAndSurvivesLose` | `Policy(another tenant) = "drop_non_essential", want "defer"` |
+| 2026-10-12 | T021 | Losing the counters does not forget configuration | `Lose` also clears the policies | Killed by `TestQuotaCounterPolicyIsPerKeyAndSurvivesLose` | `Policy after Lose = "defer": losing the counters forgot configuration` |
 
 ## Before this ledger
 
