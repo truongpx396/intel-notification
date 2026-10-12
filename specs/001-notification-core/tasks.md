@@ -14,7 +14,15 @@ This list is test-driven. The order is the build order, and within a stage the t
 - **Red before green.** A task that changes behaviour starts with a failing test. Tasks are tagged
   *red* (write the failing test), *green* (make it pass), *red → green* (both, for a task small enough
   to carry its own test) or *setup* (the seam or kit the tests stand on). A **Red first** line names the
-  test to write before the code, not one to add afterwards.
+  test to write before the code, not one to add afterwards. A *green* task carries no **Red first** of
+  its own: whatever its contract suite does not reach is a *red* task of its own, listed before it with
+  an `a` suffix (T030a, T034a), so every test has a place in the build order. A *red* task carries no
+  **Mutate** line; its *green* partner does.
+- **A red never waits on a missing seam.** Whatever a suite needs in order to compile and start (a
+  generated client, an `Env` field, a fake) is a *setup* task listed before it: T012, T013, T013a, T023a,
+  T045. What the code under test will provide is stood in for by the port returning
+  `errors.New("not implemented")`, the device T020 uses for the `Store`, so the first run fails on the
+  suite's assertions and not on a missing package.
 - **Two loops.** The outer loop is the stage's acceptance test: a contract suite, or for the transports
   the Playwright specs already in `e2e/`. It is written before any code in the stage and fails for the
   right reason. The inner loop is one behaviour at a time: a failing test, the least code that passes it,
@@ -29,6 +37,10 @@ This list is test-driven. The order is the build order, and within a stage the t
   service is Playwright. Do not assert through a higher layer what a lower one can.
 - **No sleeps.** Time comes from a fake clock; anything concurrent is waited on with a deadline, so a
   regression fails instead of hanging.
+- **A statistical criterion is asserted deterministically.** A p95 or a rate (NS-007) is measured in a
+  unit that does not move with the machine, such as dispatcher passes or the fake clock, at the lowest
+  layer that can hold it. Its wall-clock value belongs to the load test (T055), which is a gate, not a
+  unit test.
 - **Data and interfaces get no test of their own.** A struct with no behaviour, or an interface, is
   exercised by the suites and by a compile-time assertion (`var _ ports.X = (*Y)(nil)`) beside each
   implementation. Behaviour, validation included, gets a table-driven test.
@@ -42,9 +54,10 @@ This list is test-driven. The order is the build order, and within a stage the t
 3. Every guarantee the task adds was mutation-checked: broken on purpose, the test seen going red,
    the break reverted. The task's **Mutate** line suggests where to start; each mutation tried gets a row
    in the [mutation ledger](../../docs/mutations.md), in the same PR, and a mutation that survived is
-   recorded as such and fixed.
+   recorded as such and fixed. A task that adds no guarantee of its own says **Mutate: none** and why.
 4. The refactor pass is done, with the tests green.
-5. The requirement the task satisfies has its proving test in [Traceability](#traceability).
+5. Every requirement the task cites names this task's test in [Requirements](#requirements), and every
+   success criterion it serves has its row in [Traceability](#traceability).
 
 **IDs are stable; the list order is the build order.** Other files refer to tasks by number (T026, T032,
 T038, T040a, T044, T049), so a test task keeps its number and moves ahead of the tasks it drives. New
@@ -164,13 +177,17 @@ rule above.
       commit leaves work `Claim` can drive; `NotifyTx` rolled back by the host leaves nothing, and
       committed leaves claimable work; the same recipient id in two tenants and in two realms stays
       separate even to the table owner; `Status` reports every delivery by channel and address;
-      `Load` omits canceled digest members (NR-002, NR-003, NR-027, NR-032, NS-001, NS-002, NS-003).
+      `Load` omits canceled digest members; `RecordProviderStatus` records a callback's status on the
+      delivery named by its channel and provider message id and on no other (NR-002, NR-003, NR-027,
+      NR-032, NS-001, NS-002, NS-003).
       *The retention case that was here moved to T039, because it needs `RetirePartitions` (T038)*
 - [ ] **T015** *green* `postgres/store.go`: `PersistAndEnqueue` — scope, guard first, inbox row, queue
-      rows, digest appends, drop records, one transaction; `tx` for `NotifyTx`; `Load` and `Status`
-      (NR-002, NR-003, NR-027, NR-032). Make T020 pass one case at a time, in the order listed there.
+      rows, digest appends, drop records, one transaction; `tx` for `NotifyTx`; `Load`, `Status` and
+      `RecordProviderStatus` (NR-002, NR-003, NR-027, NR-032). Make T020 pass one case at a time, in the
+      order listed there.
       **Mutate:** write the inbox row before the guard; run the enqueue outside the transaction; commit
-      or roll back the caller's `tx`; drop the scope from `Load`
+      or roll back the caller's `tx`; drop the scope from `Load`; match a provider message id without
+      its channel
 - [ ] **T017** [P] *red → green* `postgres/inbox.go`: list, bounded unread, seen / read / archive — all
       scoped (NR-024, NR-033).
       **Red first:** an integration table — `list` returns only the caller's rows when two tenants share
@@ -196,10 +213,22 @@ rule above.
 
 ## Stage 4 — Notifier
 
-- [ ] **T024** *red* **Contract test** `NotifierContract` (integration, on the T013a `Env`). Write it
-      before the notifier, against the ports with nothing behind them. Cases from the contract: a replay
-      is one row and one enqueue per channel; the same user in two tenants gets both; a failed
-      transaction leaves no pre-check entry; `NotifyTx` rolled back leaves nothing and committed leaves
+- [ ] **T023a** *setup* `internal/notifytest`: an in-memory `PreCheck` and the `Env.PreCheck` field the
+      `Notifier` is built with. It stands where Redis will, so `NotifierContract` can be written, and fail
+      on its assertions, before any Redis adapter exists (T013a puts Redis in `Env` with T023, after
+      T024). It follows the port: `Seen` only reads, `Remember` writes, an entry lapses after its `ttl` on
+      the fake clock, and it keeps each `Remember` with the instant it happened, so a test can see
+      whether the write came before or after the commit. T023 later runs its table against this fake and
+      against Redis, so the two cannot drift (the T013a rule).
+      **Red first:** the kit has logic, so it has a table test: `Remember` then `Seen` returns the id; an
+      entry is present one nanosecond before its `ttl` and gone at it; `Seen` creates nothing; a key is
+      stored exactly as given.
+      **Mutate:** ignore the `ttl`; let `Seen` create the entry
+- [ ] **T024** *red* **Contract test** `NotifierContract` (integration, on the T013a `Env` and T023a's
+      `PreCheck`). Write it before the notifier, against the ports with nothing behind them. Cases from
+      the contract: a replay is one row and one enqueue per channel; the same user in two tenants gets
+      both; a failed transaction leaves no pre-check entry (run again on Redis once T023 lands);
+      `NotifyTx` rolled back leaves nothing and committed leaves
       claimable work; a disabled channel is not enqueued while the row still exists; no inbox-backed
       channel enabled means the row exists but is not inbox-visible; a locked tenant preference overrides
       the recipient; `critical` inside quiet hours is due now and marked overridden; the realm cannot be
@@ -213,10 +242,12 @@ rule above.
       one row per rule, input to `DeliveryPlan`. Rows include: a disabled channel is absent; every
       channel disabled gives an empty plan; inbox visibility follows `InboxBacked`; quiet hours defer
       `info` and `warning`; quiet hours that wrap midnight and one that spans a DST change; `critical` in
-      quiet hours is immediate and flagged; a digest only for a non-critical, non-essential topic with a
-      cadence set; an exhausted quota defers, and drops only under `drop_non_essential` for a
-      non-essential, non-critical topic; the fallback order is kept.
-      **Mutate:** defer `critical`; digest an essential topic; drop an essential notification
+      quiet hours is immediate and flagged; `DeliverySchedule.Validate`, which T009 left for here, rejects
+      a malformed quiet-hours time and an unknown time zone, one changed field per row; a digest only for
+      a non-critical, non-essential topic with a cadence set; an exhausted quota defers, and drops only
+      under `drop_non_essential` for a non-essential, non-critical topic; the fallback order is kept.
+      **Mutate:** defer `critical`; digest an essential topic; drop an essential notification; accept a
+      time zone the database does not know
 - [ ] **T023** *red → green* `redis/precheck.go`: read before, write after commit, never for `NotifyTx`;
       a test that a failed transaction leaves no entry ([D18](design-decisions.md#d18)).
       **Red first:** against Redis under Testcontainers — a commit failure leaves no entry; `NotifyTx`
@@ -225,10 +256,22 @@ rule above.
       (NR-004).
       **Mutate:** write before commit; write for `NotifyTx`; return the Redis error
 - [ ] **T022** *green* `app/notifier.go`: `Notify`, `NotifyTx`, `Cancel`, `Status`; realm from config,
-      never the request (NR-009, NR-027, NR-030, NR-032). Make T024 pass one case at a time, with T021 and
-      T023 in place; add `var _ ports.Notifier = (*Notifier)(nil)`.
+      never the request (NR-009, NR-027, NR-030, NR-032). Make T024 pass one case at a time, with T021,
+      T023a and T023 in place; add `var _ ports.Notifier = (*Notifier)(nil)`.
       **Mutate:** take the realm from the request; return `Applied == true` on a replay; treat a pre-check
-      hit as authoritative and skip the guard
+      hit as authoritative and skip the guard; write the pre-check before the commit
+- [ ] **T017a** *red → green* `app/inbox.go`: the driving `Inbox` over `InboxStore` and
+      `TemplateRenderer`, rendering each item at read time in the viewer's locale and falling back to the
+      stored title and body (NR-019, [D27](design-decisions.md#d27)). [plan.md](plan.md#architecture)
+      lists this file and no task built it; the REST surface (T044) and the in-process run (T043) both
+      stand on it.
+      **Red first:** an integration table on the T013a `Env` (the real `InboxStore`, the `Templates`
+      fake): an item is rendered from its topic's in-app template in the requested locale; a locale with
+      no template falls back along the chain T048 fixes; a topic with no template shows the stored title
+      and body; a template edited after the notification was stored changes what the next read shows (the
+      failure D27 names).
+      **Mutate:** render at send time and store the result; ignore the requested locale; fall back to an
+      empty string
 
 ## Stage 5 — Channels
 
@@ -269,18 +312,25 @@ rule above.
 ## Stage 6 — Dispatcher
 
 - [ ] **T033** *red* **Contract test** `DispatcherContract`: every crash point, poison terminates
-      including worker crashes, fan-out retries per address, expiry, fallback, fencing (NS-003, NS-006).
-      Write each named case from the contract, driving each crash with the T013a hook at the step where
-      it happens (after claim before send, after send before record, and the rest of the nine), before any
-      dispatcher code exists. Also: a fenced outcome records nothing and increments `notify.lease.lost`
+      including worker crashes, fan-out retries per address, expiry, fallback, fencing (NS-003, NS-006,
+      NR-007). Write each named case from the contract, driving each crash with the T013a hook at the
+      step where it happens (after claim before send, after send before record, and the rest of the
+      nine), against a `Dispatcher` that returns `errors.New("not implemented")`, before any dispatcher
+      code exists. Also: a fenced outcome records nothing and increments `notify.lease.lost`; a delivery
+      that reaches the attempt ceiling, and one refused permanently, is parked as a dead letter with its
+      reason and last error and raises `notify.dlq.dead.count`, while a `suppressed` or `no_address`
+      ending raises nothing (NR-007)
+- [ ] **T030a** *red* `app/dispatcher.go`'s loop, for what T033 does not reach, as unit tests on the
+      fake clock with no sleeps ([D22](design-decisions.md#d22)): polling backs off to `PollInterval`
+      when idle and resets on work; an in-process `Notify` wakes an idle dispatcher at once;
+      `LISTEN/NOTIFY` is off by default. Written against a `Dispatcher` with no loop, so each fails on
+      its assertion
 - [ ] **T030** *green* `app/dispatcher.go`: the nine steps in the contract, adaptive polling, in-memory
-      wakeup, optional `LISTEN/NOTIFY` ([D22](design-decisions.md#d22)). Make T033 pass one case at a
-      time, from the plain delivery outwards.
-      **Red first** for what T033 does not reach, as unit tests on the fake clock with no sleeps: polling
-      backs off to `PollInterval` when idle and resets on work; an in-process `Notify` wakes an idle
-      dispatcher at once; `LISTEN/NOTIFY` is off by default.
+      wakeup, optional `LISTEN/NOTIFY` ([D22](design-decisions.md#d22)). Make T033 and then T030a pass
+      one case at a time, from the plain delivery outwards.
       **Mutate:** count the attempt at finish instead of claim; skip the lease token on a write; retry
-      without the `RetryAfter` floor
+      without the `RetryAfter` floor; skip the alarm on a permanent refusal; raise it for a `suppressed`
+      ending; never reset the poll interval on work; enable `LISTEN/NOTIFY` by default
 - [ ] **T031** *red → green* Suppression check before every delivery; channel-reported suppressions
       recorded with expiry (NR-006, [D13](design-decisions.md#d13)).
       **Red first:** a live suppression means the channel is never called, on every channel kind, and the
@@ -296,31 +346,46 @@ rule above.
       **Red first:** register the channel in the `Env` of `NotifierContract` and `DispatcherContract` with
       one line, and run both suites unchanged; they fail until the channel exists and pass without a change
       to `app/`, `adapters/driven/postgres/` or preferences. The evidence is the PR's `git diff --stat`:
-      new files plus one registration line (NR-016, NS-008)
+      new files plus one registration line (NR-016, NS-008).
+      **Mutate:** import `channel/webhook` from `app/`; `make arch-lint` must go red. Branching on the
+      `webhook` kind string inside `app/` compiles and passes every suite, which is why the diff stat is
+      the evidence and not only the suites
 
 ## Stage 7 — Digest, quotas, fairness
 
 - [ ] **T035** *red* Burst test: N notifications yield `ceil(N / DigestMax)` deliveries and N rows
       (NS-005). A table over N = `DigestMax` − 1, `DigestMax`, `DigestMax` + 1 and 2 × `DigestMax` + 1,
       plus a `critical` burst and an essential burst that must never be digested (NR-014)
+- [ ] **T034a** *red* The digest flush job, for what T035 does not reach (NR-014): two flushers of one
+      window produce one delivery; a window overdue after a crash is flushed by the next run; a digest
+      whose members are all canceled ends `canceled` and not delivered. Integration, on the T013a `Env`,
+      written before `app/digest.go` exists
 - [ ] **T034** *green* `app/digest.go`: append through `Digests.AppendDigest`, leased flush job, render
-      members skipping canceled ones (NR-014). Make T035 pass.
-      **Red first** for the rest: two flushers of one window produce one delivery; a window overdue after a
-      crash is flushed by the next run; a digest whose members are all canceled ends `canceled` and not
-      delivered.
-      **Mutate:** flush without the lease; render a canceled member
-- [ ] **T037** *red* Noisy-neighbour test measuring NS-007, written before the quota code. One tenant
-      exhausts its budget while another sends at a steady rate; the quiet tenant's p95 from due to claimed
-      must stay within 10% of its value with no tenant exhausted. It fails against a build that only
-      defers row by row, which is its red
+      members skipping canceled ones (NR-014). Make T035 and then T034a pass.
+      **Mutate:** flush without the lease; render a canceled member; skip the overdue window after a
+      crash
+- [ ] **T037** *red* Noisy-neighbour test for NS-007, written before the quota code. Integration on the
+      T013a `Env`, with no sleeps and no wall-clock reads, so it cannot flake. One tenant is exhausted
+      (`Env.Quotas`) and holds a due backlog many claim batches deep on every shard; a quiet tenant sends
+      at a steady rate. The dispatcher is driven one pass at a time, and the quiet tenant's delay is
+      counted in passes from due to claimed, a unit that does not move with the machine. The test runs
+      the scenario twice, once with the neighbour exhausted and once with no tenant exhausted, and
+      asserts NS-007's inequality: the first p95 is within 10% of the second. T033's exhausted-tenant
+      case proves the mechanism with two rows; this proves the inequality at a backlog that spans many
+      batches.
+      **Red:** run it against the dispatcher as T030 leaves it, before T036 gives it backlog deferral.
+      The quiet tenant waits behind the neighbour's rows, the ratio is far above 1.10, and both p95s go
+      in the commit message as the failure line. The row-by-row deferral that D24 rejects is not a
+      hypothetical build to red against; it is T036's first mutation, and it must send this test red too.
+      The wall-clock p95 under real load is the fairness row of T055
 - [ ] **T036** *red → green* `app/quota.go` + `redis/quota.go`: peek at enqueue, take at dispatch,
       backlog deferral, `drop_non_essential` never for essential or critical (NR-023,
       [D24](design-decisions.md#d24)). Make T037 pass.
       **Red first:** a peek consumes nothing; a take consumes once, and a deferral returns the attempt;
       the realm default applies until a tenant overrides it; losing Redis resets the budget without an
       error; a table for `drop_non_essential` over {info, warning, critical} × {essential, not}.
-      **Mutate:** peek consumes; defer row by row instead of moving the backlog; drop an essential
-      notification
+      **Mutate:** peek consumes; defer row by row instead of moving the backlog (T037 must go red); drop
+      an essential notification
 
 ## Stage 8 — Maintenance
 
@@ -369,15 +434,24 @@ rule above.
 
 ## Stage 10 — Transports
 
+- [ ] **T045** [P] *setup* `api/notifyv1`: the proto from the contract. It is listed first because the
+      gRPC run of T047 and T046 are both written against its generated code. Generated code is data
+      with no test of its own; a lint and breaking-change check on the proto runs in CI
 - [ ] **T047a** *red* Enable the Playwright suite: remove `test.describe.fixme` from the `e2e/` specs as
       the routes they drive land, implement `/healthz` and `/readyz`, and switch on the `e2e` CI job
       ([docs/testing.md](../../docs/testing.md)). This is the standing outer loop and stays open until
       T049 lands. Take one spec at a time: remove its `fixme`, see it fail because the route or the
       service is missing, then land the route
 - [ ] **T047** *red* **Contract tests** `NotifierContract` through gRPC, and `StreamIsolationContract`
-      against the relay (NS-001). The gRPC run is the same suite as T024 with a different `Env`
+      against the relay (NS-001). The gRPC run is the same suite as T024 with a different `Env`, built on
+      T045's generated code; until T046 lands its `Notifier` is a stub returning
+      `errors.New("not implemented")`, so the run fails on each assertion and not on a missing package.
+      The kit's `Relay`, an SSE client for a base URL, is built here as part of the red's setup; until
+      T044 lands nothing serves the route, so `StreamIsolationContract` fails on its first assertion
 - [ ] **T043** *green* `driving/inprocess`: returns the engine's ports (NR-025). `NotifierContract`
-      runs through it unchanged
+      runs through it unchanged.
+      **Mutate:** none. It adds no guarantee of its own; the T024 suite passing through it is the proof,
+      and a mutation here would be one of T022's
 - [ ] **T044** *red → green* `driving/httpapi`: the REST surface and the SSE relay — subscription from
       the session identity, per-nudge scoped re-read, bounded count first on connect
       ([rest-api.md](contracts/rest-api.md)).
@@ -389,17 +463,18 @@ rule above.
       parsed; the stream subscribes from the session's identity and not from a query parameter; a forged
       nudge shows nothing; the bounded count is sent first on connect.
       **Mutate:** read the recipient from a header; parse the webhook body before verifying it
-- [ ] **T045** [P] *setup* `api/notifyv1`: the proto from the contract. Generated code is data with no
-      test of its own; a lint and breaking-change check on the proto runs in CI
-- [ ] **T046** [P] *green* `driving/grpcserver`, `driving/grpcclient` (satisfies `ports.Notifier`;
+- [ ] **T046** [P] *red → green* `driving/grpcserver`, `driving/grpcclient` (satisfies `ports.Notifier`;
       `NotifyTx` returns `ErrTxUnsupported`). Make the T047 gRPC run pass.
-      **Red first:** a unit test that `NotifyTx` returns `ErrTxUnsupported` and never opens a transaction
+      **Red first:** a unit test that `NotifyTx` returns `ErrTxUnsupported` and never opens a transaction.
+      **Mutate:** open a transaction in `NotifyTx`; return `nil` instead of `ErrTxUnsupported`
 
 ## Stage 11 — Service mode
 
 - [ ] **T051** *red* NS-011 demonstration with a non-Go producer. Write the scenario first, using only
       the service's API and the generated client: register a topic and a template, store a recipient's
-      addresses, send one notification, and see it delivered on two channels. It fails until T048–T050 land
+      addresses, send one notification, and see it delivered on two channels. It fails until T048–T050 land.
+      Before then, show it can fail: run it against a service started with one channel only and against
+      one where the template registration is skipped; each must fail the scenario at the step it removes
 - [ ] **T048** *red → green* `postgres/topics.go`, `postgres/templates.go` (Go templates, restricted
       function map, locale fallback), `postgres/addresses.go` — the data-backed ports
       ([D31](design-decisions.md#d31)).
@@ -443,10 +518,13 @@ rule above.
       configuration remain.*
       **Red first:** encode every row's target as a threshold before the first run, so a row that misses
       fails the run. Unlike `make bench`, this is a gate: it decides whether a release may be called
-      production-ready
+      production-ready.
+      **Mutate:** make one path slower than its row (drop the claim index; add a fixed delay to the accept
+      path); the run must fail on that row and name it
 - [ ] **T056** [P] *red → green* Fill `docs/integration-guide.md` code samples against the built API.
       **Red first:** each sample is an `Example` test, or is extracted and built in CI, so a sample that
-      stops compiling fails the build
+      stops compiling fails the build.
+      **Mutate:** rename an exported symbol a sample calls; the build must fail on that sample
 - [ ] **T057** Tag `v0.1.0` once Stages 1–6 are green; the README status block moves from "designed" to
       "core implemented". A production-ready release additionally requires T055. Before tagging, every
       NS-001 to NS-003 row in the traceability table below names a suite that is green in CI
@@ -466,12 +544,58 @@ that lists no red task has no test scheduled.
 | NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
 | NS-005 digest burst | burst test | T035 |
 | NS-006 poison terminates | `DispatcherContract` (worker panic, attempt ceiling); dead-letter inspect and replay | T033, T032 |
-| NS-007 tenant fairness | noisy-neighbour test | T037 |
+| NS-007 tenant fairness | noisy-neighbour test in dispatcher passes; the load test's fairness row in wall time | T037, T055 |
 | NS-008 a channel is one file and one line | third-channel demonstration | T033a |
 | NS-009 builds with no host | no-host CI job | T054 (done) |
 | NS-010 capacity | load-test thresholds | T055 |
 | NS-011 non-Go producer | producer scenario against the service | T051 |
 | NS-012 erasure | catalog-wide scan after `Erase` | T040 |
+
+## Requirements
+
+The same rule one level down, and the table that definition of done 5 checks a task against. A
+requirement that lists no red task has no test scheduled. *Structural* means the property is held by
+construction or by a gate and no task adds a behaviour test for it.
+
+| Requirement | Proven by | Written (red) in |
+|---|---|---|
+| NR-001 durable record | schema tests; the record exists with every channel disabled | T005 (done), T021, T024 |
+| NR-002 idempotency key and window | `StoreContract` and `NotifierContract` replay cases; `Config.Validate` window floor; `IdemKey` bounds | T009 (done), T014 (done), T020, T024 |
+| NR-003 one transaction | `StoreContract` failure after each statement; `NotifyTx` rollback | T020, T024 |
+| NR-004 claim, lease, fence; pre-check after commit | the queue's integration suite; `DispatcherContract` crash points; pre-check tests | T016 (done), T023, T024, T033 |
+| NR-005 channel idempotency at its declared level | frozen delivery-key vector; `ChannelContract`; per-channel tests | T008 (done), T025, T026, T027, T029 |
+| NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019, T031, T033 |
+| NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032, T033 |
+| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020, T024, T047, T047a |
+| NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case; realm bindings | T009 (done), T024, T049 |
+| NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 |
+| NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018, T021, T024 |
+| NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017, T021, T024 |
+| NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018, T021, T024 |
+| NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021, T034a, T035 |
+| NR-015 unsubscribe | email golden files; REST unsubscribe handler rows; the `unsubscribe` spec | T026, T044, T047a |
+| NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a, T053 (done) |
+| NR-017 a topic is a registration | topics integration table, no migration | T048 |
+| NR-018 re-anchoring identity is a host binding | structural: `Identity` is opaque strings with frozen vectors; `domain` imports nothing | T007 (done), T053 (done) |
+| NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a, T026, T048 |
+| NR-020 resumable paged broadcast | crash between pages and inside a page; deterministic member keys | T042 |
+| NR-021 stable shard, changeable count | shard vectors; `RehomeShards` integration test | T010 (done), T016 (done) |
+| NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding; `n_tup_del` unmoved | T006 (done), T038, T039 |
+| NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; quota table; noisy-neighbour test | T016 (done), T036, T037 |
+| NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017, T025, T028 |
+| NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
+| NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |
+| NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020, T024 |
+| NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033, T048 |
+| NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021, T024, T033 |
+| NR-030 cancel | `NotifierContract` cancel cases; the queue's `Cancel` | T016 (done), T024 |
+| NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021, T033 |
+| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020, T024, T047a |
+| NR-033 seen, read, archived | inbox table, independent flags | T017 |
+| NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext | T019, T040 |
+| NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack | T020, T052 |
+| NR-036 capacity envelope stated | stated in [plan.md § Capacity model](plan.md#capacity-model); the load-test thresholds | T055 |
+| NR-037 preflight warnings | preflight table | T040a |
 
 ---
 
