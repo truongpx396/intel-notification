@@ -339,6 +339,25 @@ rule above.
       guard's window. `internal/redistest` starts one Redis per test binary with a logical database per test,
       beside `pgtest`; `notifytest.WithRedis()` starts it from `Main` and builds the `Env`'s Notifier on it,
       so `NotifierContract` runs on both pre-checks.*
+- [ ] **T022a** *red* `app/notifier_test.go`, and the Redis cases of `app/notifier_integration_test.go`:
+      what `NotifierContract` does not reach. `NotifierContract` runs through the real store, which cannot
+      say what was *not* called or in what order, so these use recording stand-ins for the ports in the
+      test file (not the fake `Store` the kit refuses: they assert call order and arguments and claim
+      nothing about leases or row-level security). Cases: `NewNotifier` names every missing port and
+      refuses a configuration that does not validate; a notification, cancel or status request that cannot
+      be right touches no port, and `NotifyTx` refuses a nil transaction; an unknown topic persists and
+      remembers nothing; the pre-check is read, then the store runs, then the entry is written, under the
+      frozen `notify:applied` key, for `PreCheckTTL`; a hit answers the replay without planning or
+      persisting, for `NotifyTx` too; a pre-check that errors, on read or on write, is a miss and never
+      fails `Notify`; nothing is remembered for a replay, a failed commit or a `NotifyTx`, and a first
+      apply by `Notify` is (the control); the store gets the identity built from the engine's realm and
+      the request's tenant and recipient, the resolved priority, the plan, and the caller's own
+      transaction for `NotifyTx`; `Cancel` and `Status` ask for the engine's realm; and, on Redis:
+      `NotifierContract` again, the entry under the frozen key with the configured TTL, a replay still found
+      by the guard after Redis is flushed, and a replay the pre-check knows opening no transaction (NR-002,
+      NR-004, NR-009, NR-027, NR-030, NR-032, [D18](design-decisions.md#d18),
+      [D28](design-decisions.md#d28)). Written against a `Notifier` that returns `errors.New("not
+      implemented")`
 - [ ] **T022** *green* `app/notifier.go`: `Notify`, `NotifyTx`, `Cancel`, `Status`; realm from config,
       never the request (NR-009, NR-027, NR-030, NR-032). Make T024 pass one case at a time, with T021,
       T023a and T023 in place; add `var _ ports.Notifier = (*Notifier)(nil)`.
