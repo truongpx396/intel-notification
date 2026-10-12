@@ -31,6 +31,7 @@ import (
 type Store struct {
 	pool  *pgxpool.Pool
 	clock ports.Clock
+	ids   ports.IDSource
 }
 
 var (
@@ -51,11 +52,20 @@ func WithClock(c ports.Clock) Option {
 	return func(s *Store) { s.clock = c }
 }
 
+// WithIDSource sets where the persist path takes a notification's id from. The
+// default is a UUIDv7 stamped from the store's clock, so ids sort by creation time.
+func WithIDSource(ids ports.IDSource) Option {
+	return func(s *Store) { s.ids = ids }
+}
+
 // New returns a Store over pool.
 func New(pool *pgxpool.Pool, opts ...Option) *Store {
 	s := &Store{pool: pool, clock: systemClock{}}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.ids == nil {
+		s.ids = uuidSource{clock: s.clock}
 	}
 	return s
 }
@@ -91,6 +101,19 @@ func setScope(ctx context.Context, tx pgx.Tx, id domain.Identity) error {
 	_, err := tx.Exec(ctx, setScopeSQL, string(id.Realm), id.Tenant.Kind, id.Tenant.ID,
 		id.Recipient.Kind, id.Recipient.ID)
 	return err
+}
+
+// readScoped runs fn in one read-only transaction, under id's scope, at
+// REPEATABLE READ: every statement in it sees the same snapshot, so a delivery
+// that finishes meanwhile is read as pending or as finished, never as both.
+func readScoped(ctx context.Context, pool *pgxpool.Pool, id domain.Identity, fn func(pgx.Tx) error) error {
+	return pgx.BeginTxFunc(ctx, pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly},
+		func(tx pgx.Tx) error {
+			if err := setScope(ctx, tx, id); err != nil {
+				return err
+			}
+			return fn(tx)
+		})
 }
 
 // identityArgs is the (realm, tenant, recipient) argument list most statements

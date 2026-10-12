@@ -50,12 +50,16 @@ func prepare(ctx context.Context, owner *pgxpool.Pool, now time.Time) error {
 }
 
 // Env is one test's world: a private PostgreSQL database with the real queue,
-// digest and maintenance ports over it, a fake clock, a fault injector, a probe,
-// a channel registry, and the in-memory read-side fakes. Queue and Store are
-// never faked (see the package comment).
+// digest, maintenance and store ports over it, a fake clock, a fault injector, a
+// probe, a channel registry, and the in-memory read-side fakes. Queue and Store
+// are never faked (see the package comment).
 //
-// Redis arrives with T023, and the Notifier, Dispatcher and Store with the tasks
-// that build them; each lands here as one more field.
+// The store dates what it persists from the fake clock, so a test controls which
+// partition a row lands in. The queue's due times stay the database's now(): a
+// claim is decided inside one statement, which the fake clock cannot reach.
+//
+// Redis arrives with T023, and the Notifier and Dispatcher with the tasks that
+// build them; each lands here as one more field.
 type Env struct {
 	DB *pgtest.DB
 
@@ -73,6 +77,7 @@ type Env struct {
 	Queue       ports.Queue
 	Digests     ports.Digests
 	Maintenance ports.Maintenance
+	Store       ports.Store
 }
 
 // NewEnv returns an Env over a database cloned for tb alone, which is dropped when
@@ -80,10 +85,11 @@ type Env struct {
 func NewEnv(tb testing.TB) *Env {
 	tb.Helper()
 	db := pgtest.New(tb)
-	store := postgres.New(db.Owner)
+	clock := NewClock(Epoch)
+	store := postgres.New(db.Owner, postgres.WithClock(clock))
 	return &Env{
 		DB:          db,
-		Clock:       NewClock(Epoch),
+		Clock:       clock,
 		Faults:      NewInjector(),
 		Probe:       NewProbe(),
 		Channels:    NewRegistry(),
@@ -95,6 +101,7 @@ func NewEnv(tb testing.TB) *Env {
 		Queue:       store,
 		Digests:     store,
 		Maintenance: store,
+		Store:       store,
 	}
 }
 

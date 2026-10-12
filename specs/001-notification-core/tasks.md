@@ -168,8 +168,8 @@ rule above.
       `BindAddresses`, `DeferTenantChannel`, `Cancel`, the digest windows, and the maintenance
       operations — each fenced where it takes a claim, with an integration suite against PostgreSQL 16
       and a mutation check behind every guarantee (NR-004, [D19](design-decisions.md#d19),
-      [D37](design-decisions.md#d37)). *Still to do: `Load`, with T015.*
-- [ ] **T020** *red* **Contract test** `StoreContract` (integration, against PostgreSQL as the table
+      [D37](design-decisions.md#d37)). *`Load` came with T015.*
+- [x] **T020** *red* **Contract test** `StoreContract` (integration, against PostgreSQL as the table
       owner). Write it first against a `Store` that returns an error, and watch each case fail on its
       assertion. Cases: a replay reports `Applied == false` and writes nothing else; the guard is written
       first and a conflict writes no inbox, queue or digest row; a failure injected after each statement
@@ -181,13 +181,34 @@ rule above.
       delivery named by its channel and provider message id and on no other (NR-002, NR-003, NR-027,
       NR-032, NS-001, NS-002, NS-003).
       *The retention case that was here moved to T039, because it needs `RetirePartitions` (T038)*
-- [ ] **T015** *green* `postgres/store.go`: `PersistAndEnqueue` — scope, guard first, inbox row, queue
+      *Built: `store_integration_test.go`, ten tests. Written against the `Store` as stubs returning
+      `errors.New("not implemented")`; 10 tests and 47 subtests failed on their first assertion, none on a
+      fixture. A failure "after each statement" is a database trigger that refuses inserts into one of the
+      five tables, so it needs no seam in the store and fires the same in the store's own transaction and a
+      caller's. "The guard is written first" is shown by refusing every table but the guard and replaying: a
+      store that wrote the inbox row first fails instead of reporting a replay. Refusals carry a control write
+      first, so a store that accepts nothing cannot pass them. The three broadcast methods have no case;
+      they are T042's.*
+- [x] **T015** *green* `postgres/persist.go`, `load.go`, `status.go`: `PersistAndEnqueue` — scope, guard first, inbox row, queue
       rows, digest appends, drop records, one transaction; `tx` for `NotifyTx`; `Load`, `Status` and
       `RecordProviderStatus` (NR-002, NR-003, NR-027, NR-032). Make T020 pass one case at a time, in the
       order listed there.
       **Mutate:** write the inbox row before the guard; run the enqueue outside the transaction; commit
       or roll back the caller's `tx`; drop the scope from `Load`; match a provider message id without
       its channel
+      *Built, with 62 rows in the [ledger](../../docs/mutations.md). Four survived and the tests were
+      strengthened until they died; three more are equivalent and left, each said why. Where the contract
+      was silent the choice is in the code's doc comment: the store takes the notification's id and
+      `created_at` from a `Clock` and an `IDSource` it is built with (`postgres.WithClock`,
+      `WithIDSource`; UUIDv7 by default) and leaves a queue row's due time to the database's `now()`, which
+      is what a claim compares against; it refuses an unresolved priority, because it cannot know the
+      topic's default and storing `info` for a critical topic would let quiet hours defer it, so T022 must
+      resolve it first; a replay names the first notification and its visibility; `Load` reports a gone
+      row (an erased recipient) as canceled, not as an error a retry would dead-letter; `Status` reads one
+      snapshot and includes a digested channel's window; and `RecordProviderStatus` returns
+      `domain.ErrUnknownDelivery` for a callback that names no delivery, so the webhook handler (T044) can
+      ask the provider to try again when a callback beats the delivery's own record. `notifytest.Env` gains
+      `Store`, dated from the Env's clock.*
 - [ ] **T017** [P] *red → green* `postgres/inbox.go`: list, bounded unread, seen / read / archive — all
       scoped (NR-024, NR-033).
       **Red first:** an integration table — `list` returns only the caller's rows when two tenants share

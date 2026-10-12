@@ -153,16 +153,27 @@ func (e *env) claimAll(shard domain.Shard) []domain.Claim {
 	return claims
 }
 
-// claimFor claims everything due in shard and returns the claim on channel ch.
+// claimsByChannel claims everything due in one shard, once, and returns the claims
+// by channel. A claim leases its row, so a second call finds nothing: a test that
+// wants several of a shard's deliveries takes them all from one call.
+func (e *env) claimsByChannel(shard domain.Shard) map[domain.ChannelKind]domain.Claim {
+	e.t.Helper()
+	out := map[domain.ChannelKind]domain.Claim{}
+	for _, c := range e.claimAll(shard) {
+		out[c.Entry.Channel] = c
+	}
+	return out
+}
+
+// claimFor claims the one due delivery in shard, which must be on channel ch.
 func (e *env) claimFor(shard domain.Shard, ch domain.ChannelKind) domain.Claim {
 	e.t.Helper()
-	for _, c := range e.claimAll(shard) {
-		if c.Entry.Channel == ch {
-			return c
-		}
+	claims := e.claimsByChannel(shard)
+	c, ok := claims[ch]
+	if !ok || len(claims) != 1 {
+		e.t.Fatalf("claimed deliveries on %v in shard %d, want only one, on %s", claims, shard, ch)
 	}
-	e.t.Fatalf("no due delivery on %s in shard %d", ch, shard)
-	return domain.Claim{}
+	return c
 }
 
 // ----------------------------------------------------------- what is written --
@@ -406,43 +417,44 @@ func TestPersistAndEnqueueRejects(t *testing.T) {
 		name   string
 		mutate func(*domain.Identity, *domain.Notification, *domain.DeliveryPlan)
 		is     error
+		text   string // what the store's own refusal says, as opposed to the schema's constraint error
 		why    string
 	}{
 		{"an identity whose tenant is not the notification's", func(i *domain.Identity, _ *domain.Notification, _ *domain.DeliveryPlan) {
 			i.Tenant.ID = "w2"
-		}, nil, "the identity is authoritative, and a mismatch would file the row under the wrong tenant (NR-009)"},
+		}, nil, "not the notification's", "the identity is authoritative, and a mismatch would file the row under the wrong tenant (NR-009)"},
 		{"an identity whose recipient is not the notification's", func(i *domain.Identity, _ *domain.Notification, _ *domain.DeliveryPlan) {
 			i.Recipient.ID = "u2"
-		}, nil, ""},
+		}, nil, "not the notification's", ""},
 		{"an identity with no realm", func(i *domain.Identity, _ *domain.Notification, _ *domain.DeliveryPlan) {
 			i.Realm = ""
-		}, domain.ErrEmptyIdentity, "an empty component would equal an unset scope (D17)"},
+		}, domain.ErrEmptyIdentity, "", "an empty component would equal an unset scope (D17)"},
 		{"no idempotency key", func(_ *domain.Identity, n *domain.Notification, _ *domain.DeliveryPlan) {
 			n.IdemKey = ""
-		}, domain.ErrMissingIdem, ""},
+		}, domain.ErrMissingIdem, "", ""},
 		{"a priority the notifier did not resolve", func(_ *domain.Identity, n *domain.Notification, _ *domain.DeliveryPlan) {
 			n.Priority = ""
-		}, nil, "the store cannot know the topic's default, and storing info for a critical topic would quietly defer it"},
+		}, nil, "not resolved", "the store cannot know the topic's default, and storing info for a critical topic would quietly defer it"},
 		{"a channel planned twice", func(_ *domain.Identity, _ *domain.Notification, p *domain.DeliveryPlan) {
 			p.Deliveries = append(p.Deliveries, immediate("email"))
-		}, nil, "one pending delivery per notification and channel"},
+		}, nil, "planned twice", "one pending delivery per notification and channel"},
 		{"a deferred delivery with no time", func(_ *domain.Identity, _ *domain.Notification, p *domain.DeliveryPlan) {
 			p.Deliveries = append(p.Deliveries, domain.PlannedDelivery{Channel: "slack", Mode: domain.PlanDeferred})
-		}, nil, "it would be due at once, which is the opposite of deferred"},
+		}, nil, "deferred with no time", "it would be due at once, which is the opposite of deferred"},
 		{"a delivery with no mode", func(_ *domain.Identity, _ *domain.Notification, p *domain.DeliveryPlan) {
 			p.Deliveries = append(p.Deliveries, domain.PlannedDelivery{Channel: "slack"})
-		}, nil, ""},
+		}, nil, "plan mode", ""},
 		{"a digest with no window", func(_ *domain.Identity, _ *domain.Notification, p *domain.DeliveryPlan) {
 			p.Deliveries = append(p.Deliveries, domain.PlannedDelivery{Channel: "slack", Mode: domain.PlanDigest})
 			p.DigestWindow = 0
-		}, nil, ""},
+		}, nil, "is digested", ""},
 		{"a digest with no member limit", func(_ *domain.Identity, _ *domain.Notification, p *domain.DeliveryPlan) {
 			p.Deliveries = append(p.Deliveries, domain.PlannedDelivery{Channel: "slack", Mode: domain.PlanDigest})
 			p.DigestMax = 0
-		}, nil, ""},
+		}, nil, "is digested", ""},
 		{"a negative shard", func(_ *domain.Identity, _ *domain.Notification, p *domain.DeliveryPlan) {
 			p.Shard = -1
-		}, nil, ""},
+		}, nil, "is negative", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -462,6 +474,9 @@ func TestPersistAndEnqueueRejects(t *testing.T) {
 			}
 			if tc.is != nil && !errors.Is(err, tc.is) {
 				t.Errorf("error %v does not wrap %v", err, tc.is)
+			}
+			if !strings.Contains(err.Error(), tc.text) {
+				t.Errorf("error %q does not say %q: it was refused by a constraint after the write began, not by the store before it", err, tc.text)
 			}
 			if after := e.rowCounts(); !reflect.DeepEqual(before, after) {
 				t.Errorf("a refused call changed the tables: %v -> %v", before, after)
@@ -810,9 +825,10 @@ func TestLoad(t *testing.T) {
 	t.Run("a canceled notification is reported as canceled, with nothing to send (D29)", func(t *testing.T) {
 		t.Parallel()
 		e := newEnv(t)
-		e.persist(id, notif(id, "k"), planOf(6, immediate("email"), immediate("sms")))
+		e.persist(id, notif(id, "k"), planOf(6, immediate("email"),
+			domain.PlannedDelivery{Channel: "sms", Mode: domain.PlanDeferred, NotBefore: farFuture()}))
 		held := e.claimFor(6, "email") // a worker is mid-send when the cancel arrives
-		if r, err := e.s.Cancel(t.Context(), id, "k"); err != nil || r.InFlight != 1 {
+		if r, err := e.s.Cancel(t.Context(), id, "k"); err != nil || r.InFlight != 1 || r.Canceled != 1 {
 			t.Fatalf("cancel: %+v %v", r, err)
 		}
 		n, digest, canceled, err := e.s.Load(t.Context(), held)
@@ -935,14 +951,14 @@ func TestStatus(t *testing.T) {
 		))
 		// email binds one address and is delivered; push fans out to three devices;
 		// sms is still deferred; webhook was dropped when the notification was accepted.
-		email := e.claimFor(11, "email")
+		claims := e.claimsByChannel(11)
+		email, push := claims["email"], claims["push"]
 		if _, ok, err := e.s.BindAddresses(t.Context(), email, []domain.Address{{Channel: "email", Value: "a@example.com"}}, []string{"addr-email"}); err != nil || !ok {
 			t.Fatalf("bind email: %v %v", ok, err)
 		}
 		if ok, err := e.s.Finish(t.Context(), email, mustFinish(t, domain.OutcomeDelivered, "prov-email", "")); err != nil || !ok {
 			t.Fatalf("finish email: %v %v", ok, err)
 		}
-		push := e.claimFor(11, "push")
 		devices := []domain.Address{{Channel: "push", Value: "a"}, {Channel: "push", Value: "b"}, {Channel: "push", Value: "c"}}
 		if _, ok, err := e.s.BindAddresses(t.Context(), push, devices, []string{"dev-a", "dev-b", "dev-c"}); err != nil || !ok {
 			t.Fatalf("fan out push: %v %v", ok, err)
@@ -1012,6 +1028,69 @@ func TestStatus(t *testing.T) {
 		st, err := e.s.Status(t.Context(), id, "k")
 		if err != nil || !st.Found || !st.Canceled || len(st.Deliveries) != 1 || st.Deliveries[0].State != "canceled" {
 			t.Fatalf("status = %+v (%v)", st, err)
+		}
+	})
+
+	// Status is several reads. Between the read of the queue and the read of the
+	// history a delivery can finish, and moving from one to the other would list it
+	// twice, once pending and once delivered. The reads share one snapshot instead.
+	// The test holds the history table, so Status stops at its last read, finishes
+	// the delivery by hand inside the holding transaction, and lets Status go on.
+	t.Run("a delivery that finishes while Status is reading is listed once, as the snapshot saw it", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t)
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		e.persist(id, notif(id, "k"), planOf(11, immediate("email")))
+		c := e.claimFor(11, "email")
+
+		hold, err := e.db.Admin.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = hold.Rollback(context.Background()) }()
+		if _, err := hold.Exec(ctx, `LOCK TABLE notification_deliveries IN ACCESS EXCLUSIVE MODE`); err != nil {
+			t.Fatal(err)
+		}
+
+		type result struct {
+			st  domain.NotificationStatus
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			st, err := e.s.Status(ctx, id, "k")
+			done <- result{st, err}
+		}()
+
+		// Wait, bounded by the deadline, for a backend to be stuck behind the lock.
+		for blocked := 0; blocked == 0; {
+			if err := e.db.Admin.QueryRow(ctx, `
+SELECT count(*) FROM pg_stat_activity
+ WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&blocked); err != nil {
+				t.Fatalf("waiting for Status to reach the history read: %v", err)
+			}
+		}
+
+		if _, err := hold.Exec(ctx, `
+WITH gone AS (DELETE FROM notification_outbox WHERE id = $1::uuid RETURNING *)
+INSERT INTO notification_deliveries (`+historyColumns+`, outcome)
+SELECT `+historyColumns+`, 'delivered' FROM gone`, c.Entry.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := hold.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+
+		r := <-done
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if len(r.st.Deliveries) != 1 || r.st.Deliveries[0].State != "pending" {
+			t.Fatalf("deliveries = %+v: want the one delivery, listed once, as the snapshot saw it (pending)", r.st.Deliveries)
+		}
+		if again, err := e.s.Status(ctx, id, "k"); err != nil || len(again.Deliveries) != 1 || again.Deliveries[0].State != "delivered" {
+			t.Fatalf("a later Status = %+v (%v), want the delivery delivered", again.Deliveries, err)
 		}
 	})
 
@@ -1134,6 +1213,30 @@ func TestRecordProviderStatus(t *testing.T) {
 		for key := range f.finished {
 			if got, _ := f.statusOf(key); got != "" {
 				t.Errorf("%s has status %q after callbacks for deliveries that do not exist", key, got)
+			}
+		}
+	})
+
+	t.Run("a callback missing its channel, message id or status is refused, not read as an unknown delivery", func(t *testing.T) {
+		t.Parallel()
+		f := newCallbackFixture(t)
+		for _, c := range []struct {
+			name             string
+			ch               domain.ChannelKind
+			providerID, stat string
+		}{
+			{"no channel", "", "p1", "bounced"},
+			{"no message id", "email", "", "bounced"},
+			{"no status", "email", "p1", ""},
+		} {
+			err := f.e.s.RecordProviderStatus(t.Context(), c.ch, c.providerID, c.stat)
+			if err == nil || errors.Is(err, domain.ErrUnknownDelivery) {
+				t.Errorf("%s: err = %v, want a refusal that is not ErrUnknownDelivery", c.name, err)
+			}
+		}
+		for key := range f.finished {
+			if got, _ := f.statusOf(key); got != "" {
+				t.Errorf("%s has status %q after refused callbacks", key, got)
 			}
 		}
 	})
