@@ -3,11 +3,19 @@
 package postgres
 
 import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/truongpx396/intel-notification/domain"
 )
@@ -63,6 +71,39 @@ func (e *env) unread(id domain.Identity, limit int) domain.UnreadCount {
 		e.t.Fatalf("Unread(%d): %v", limit, err)
 	}
 	return c
+}
+
+// lastQuery is a pgx query tracer that remembers the statements a pool ran and the
+// arguments they ran with.
+type lastQuery struct {
+	mu   sync.Mutex
+	runs []tracedQuery
+}
+
+type tracedQuery struct {
+	sql  string
+	args []any
+}
+
+func (l *lastQuery) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.runs = append(l.runs, tracedQuery{data.SQL, append([]any(nil), data.Args...)})
+	return ctx
+}
+
+func (l *lastQuery) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// matching returns the last statement that contains substr, with its arguments.
+func (l *lastQuery) matching(substr string) (string, []any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := len(l.runs) - 1; i >= 0; i-- {
+		if strings.Contains(l.runs[i].sql, substr) {
+			return l.runs[i].sql, l.runs[i].args
+		}
+	}
+	return "", nil
 }
 
 func reversed(ids ...string) []string {
@@ -321,6 +362,68 @@ func TestInboxUnreadIsBounded(t *testing.T) {
 		}
 	})
 
+	// D15: the badge is cheap because it stops reading. The count is the same whether
+	// the query stops at cap+1 rows or reads every unread one, so the answer cannot
+	// show it; the plan can. The test captures the statement Unread executes, with
+	// the arguments it passes, and explains that: the Limit node of the executed plan
+	// reads cap+1 rows from an inbox that holds many more.
+	t.Run("it reads at most limit+1 rows, however many are unread", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t)
+		for i := range 5 * cap {
+			e.accept(id, fmt.Sprintf("k%d", i))
+		}
+		cfg := e.db.Owner.Config()
+		tracer := &lastQuery{}
+		cfg.ConnConfig.Tracer = tracer
+		traced, err := pgxpool.NewWithConfig(t.Context(), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer traced.Close()
+
+		if got, err := NewInbox(traced, WithClock(e.clock)).Unread(t.Context(), id, cap); err != nil || got.Count != cap {
+			t.Fatalf("Unread = %+v, %v", got, err)
+		}
+		sql, args := tracer.matching("FROM notifications")
+		if sql == "" {
+			t.Fatal("Unread ran no statement against the inbox")
+		}
+
+		var plan []byte
+		err = pgx.BeginFunc(t.Context(), e.db.Owner, func(tx pgx.Tx) error {
+			if err := setScope(t.Context(), tx, id); err != nil {
+				return err
+			}
+			return tx.QueryRow(t.Context(), "EXPLAIN (ANALYZE, FORMAT JSON) "+sql, args...).Scan(&plan)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var explained []struct {
+			Plan map[string]any `json:"Plan"`
+		}
+		if err := json.Unmarshal(plan, &explained); err != nil || len(explained) != 1 {
+			t.Fatalf("EXPLAIN output %s: %v", plan, err)
+		}
+		rowsRead := -1.0
+		var walk func(node map[string]any)
+		walk = func(node map[string]any) {
+			if node["Node Type"] == "Limit" {
+				rowsRead = node["Actual Rows"].(float64)
+			}
+			if children, ok := node["Plans"].([]any); ok {
+				for _, c := range children {
+					walk(c.(map[string]any))
+				}
+			}
+		}
+		walk(explained[0].Plan)
+		if rowsRead != cap+1 {
+			t.Errorf("the Limit node read %v rows from %d unread, want %d: the count must stop at the cap", rowsRead, 5*cap, cap+1)
+		}
+	})
+
 	t.Run("a limit below one is refused", func(t *testing.T) {
 		t.Parallel()
 		e := newEnv(t)
@@ -435,12 +538,13 @@ func TestInboxList(t *testing.T) {
 		other := func(n *domain.Notification, _ *domain.DeliveryPlan) { n.Topic = "invite_received" }
 		unreadOne := e.accept(id, "unread")
 		readOne := e.accept(id, "read")
-		archivedOne := e.accept(id, "archived")
+		archivedRead := e.accept(id, "archived-read")
+		archivedUnread := e.accept(id, "archived-unread")
 		inviteOne := e.accept(id, "invite", other)
-		if err := e.inbox.MarkRead(t.Context(), id, []string{readOne}); err != nil {
+		if err := e.inbox.MarkRead(t.Context(), id, []string{readOne, archivedRead}); err != nil {
 			t.Fatal(err)
 		}
-		if err := e.inbox.Archive(t.Context(), id, []string{archivedOne}, true); err != nil {
+		if err := e.inbox.Archive(t.Context(), id, []string{archivedRead, archivedUnread}, true); err != nil {
 			t.Fatal(err)
 		}
 		for _, tc := range []struct {
@@ -449,9 +553,9 @@ func TestInboxList(t *testing.T) {
 			want []string
 		}{
 			{"the default list is everything not archived", domain.ListQuery{}, []string{inviteOne, readOne, unreadOne}},
-			{"unread", domain.ListQuery{State: domain.InboxUnread}, []string{inviteOne, unreadOne}},
-			{"read", domain.ListQuery{State: domain.InboxRead}, []string{readOne}},
-			{"archived", domain.ListQuery{State: domain.InboxArchived}, []string{archivedOne}},
+			{"unread leaves out what was archived unread", domain.ListQuery{State: domain.InboxUnread}, []string{inviteOne, unreadOne}},
+			{"read leaves out what was archived read", domain.ListQuery{State: domain.InboxRead}, []string{readOne}},
+			{"archived is everything archived, read or not", domain.ListQuery{State: domain.InboxArchived}, []string{archivedUnread, archivedRead}},
 			{"a topic", domain.ListQuery{Topic: "invite_received"}, []string{inviteOne}},
 			{"a topic and a state", domain.ListQuery{Topic: "ingestion_complete", State: domain.InboxUnread}, []string{unreadOne}},
 			{"a topic nothing has", domain.ListQuery{Topic: "no_such_topic"}, nil},
@@ -460,8 +564,8 @@ func TestInboxList(t *testing.T) {
 				t.Errorf("%s: List = %v, want %v", tc.name, got, tc.want)
 			}
 		}
-		if _, err := e.inbox.List(t.Context(), id, domain.ListQuery{State: "bogus"}); err == nil {
-			t.Error("an unknown state was accepted")
+		if _, err := e.inbox.List(t.Context(), id, domain.ListQuery{State: "bogus"}); err == nil || !strings.Contains(err.Error(), "unknown state") {
+			t.Errorf("an unknown state: err = %v, want the store's own refusal", err)
 		}
 	})
 
@@ -541,7 +645,11 @@ SELECT gen_random_uuid(), 'aisat', 'workspace', 'w1', 'user', 'u1', 't', 'k' || 
 		t.Parallel()
 		e := newEnv(t)
 		e.accept(id, "k")
-		for _, cursor := range []string{"garbage", "!!!", "MTIzNDU2Nzg5", "Zm9vOmJhcg"} {
+		// "garbage" and "!!!" are not base64 of a cursor; "MTIz…" and "Zm9v…" are base64 of
+		// "123456789" and "foo:bar"; the last decodes to a good time and an id that is
+		// not a UUID, which would otherwise reach the database as a type error.
+		badID := base64.RawURLEncoding.EncodeToString([]byte("1789430400000000:not-a-uuid"))
+		for _, cursor := range []string{"garbage", "!!!", "MTIzNDU2Nzg5", "Zm9vOmJhcg", badID} {
 			if _, err := e.inbox.List(t.Context(), id, domain.ListQuery{Cursor: cursor}); !errors.Is(err, domain.ErrInvalidCursor) {
 				t.Errorf("cursor %q: err = %v, want ErrInvalidCursor", cursor, err)
 			}

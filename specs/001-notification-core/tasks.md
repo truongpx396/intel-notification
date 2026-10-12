@@ -209,7 +209,7 @@ rule above.
       `domain.ErrUnknownDelivery` for a callback that names no delivery, so the webhook handler (T044) can
       ask the provider to try again when a callback beats the delivery's own record. `notifytest.Env` gains
       `Store`, dated from the Env's clock.*
-- [ ] **T017** [P] *red → green* `postgres/inbox.go`: list, bounded unread, seen / read / archive — all
+- [x] **T017** [P] *red → green* `postgres/inbox.go`: list, bounded unread, seen / read / archive — all
       scoped (NR-024, NR-033).
       **Red first:** an integration table — `list` returns only the caller's rows when two tenants share
       a recipient id; seen, read and archive are independent, each transition leaving the other two flags
@@ -217,6 +217,15 @@ rule above.
       `UnreadCap + k` unread the count stops at the cap and reports `Capped`; a row with no inbox-backed
       channel enabled is neither listed nor counted (NR-012).
       **Mutate:** drop the scope from `list`; count without the cap; let `read` clear `seen`
+      *Built as `postgres.Inbox`, a `ports.InboxStore`, with 39 rows in the [ledger](../../docs/mutations.md);
+      two survivors are equivalent and left, three were repaired. The contract left several things open, and the
+      choices are in `ports.InboxStore` and the tests: what the inbox shows (inbox-visible, uncanceled, send
+      time passed) is, to every method including `Get` and the marks, all there is, so a hidden row reads as
+      absent; `MarkRead` and `Archive` are all-or-nothing and answer `domain.ErrNotFound` for a foreign,
+      unknown or malformed id with one text, which names no id; `MarkAllRead` leaves what is archived; the
+      list's cursor is a keyset on `(created_at, id)`, refused as `domain.ErrInvalidCursor` when malformed; a
+      missing limit is `DefaultPageSize` and a large one `MaxPageSize`. The badge's "reads at most cap+1 rows"
+      is asserted on the executed plan, captured from the statement `Unread` runs, not on its answer.*
 - [ ] **T018** [P] *red → green* `postgres/prefs.go`: recipient → tenant (locked) → topic resolution with
       source reporting (NR-011, [D30](design-decisions.md#d30)).
       **Red first:** a resolution matrix over {recipient set or unset} × {tenant set, unset or locked} ×
