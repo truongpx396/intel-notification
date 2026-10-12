@@ -125,6 +125,12 @@ func readScoped(ctx context.Context, pool *pgxpool.Pool, id domain.Identity, fn 
 		})
 }
 
+// identityPredicate matches one recipient's rows, taking the identity as $1-$5, the
+// order identityArgs gives it. Statements on a recipient-scoped table state it as
+// well as relying on the policy: the policy is the guarantee, and the predicate lets
+// the planner use the recipient index.
+const identityPredicate = `realm = $1 AND tenant_kind = $2 AND tenant_id = $3 AND recipient_kind = $4 AND recipient_id = $5`
+
 // identityArgs is the (realm, tenant, recipient) argument list most statements
 // start with.
 func identityArgs(id domain.Identity) []any {

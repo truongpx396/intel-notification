@@ -178,12 +178,14 @@ func PreferenceStoreContract(t *testing.T, newStore PreferenceStoreFactory) {
 		}
 
 		prefSetRecipient(t, p, prefAlice, "push", true) // a channel only a row for "invite" names
+		prefSetTenant(t, p, prefAlice, "slack", true, true)
+		prefSetTenant(t, p, prefAlice, "email", false, true) // a lock on invite's email, not on another topic's
 		other, err := p.Resolve(t.Context(), prefAlice, "a_different_topic", prefInviteDef)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, r := range other {
-			if r.Channel == "push" {
+			if r.Channel == "push" || r.Channel == "slack" {
 				t.Fatalf("a row for one topic added a channel to another: %+v", r)
 			}
 			if r.Channel == "email" && (!r.Enabled || r.Source != domain.SourceTopicDefault) {
@@ -261,6 +263,8 @@ func PreferenceStoreContract(t *testing.T, newStore PreferenceStoreFactory) {
 
 		otherKind := prefAlice
 		otherKind.Recipient.Kind = "device"
+		otherTenantKind := prefAlice
+		otherTenantKind.Tenant.Kind = "organization" // the same tenant id, under another kind
 		cases := []struct {
 			name string
 			id   domain.Identity
@@ -269,6 +273,7 @@ func PreferenceStoreContract(t *testing.T, newStore PreferenceStoreFactory) {
 			{"the same recipient id in another tenant", prefWho("aisat", "w2", "alice")},
 			{"the same recipient id in another realm", prefWho("other", "w1", "alice")},
 			{"the same recipient id under another kind", otherKind},
+			{"the same tenant id under another kind", otherTenantKind},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {

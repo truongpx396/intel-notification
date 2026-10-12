@@ -46,10 +46,7 @@ const (
 // inboxShown is what the inbox shows (D26, D29): a row with an inbox-backed channel
 // enabled, not canceled, whose send time has passed. Anything else is, to every
 // method, absent.
-const (
-	inboxIdentity = `realm = $1 AND tenant_kind = $2 AND tenant_id = $3 AND recipient_kind = $4 AND recipient_id = $5`
-	inboxShown    = `inbox_visible AND canceled_at IS NULL AND visible_from <= $6`
-)
+const inboxShown = `inbox_visible AND canceled_at IS NULL AND visible_from <= $6`
 
 // listStates is each state filter of a list. An unknown state is refused, so these
 // fragments are the only SQL a caller's value can choose between.
@@ -72,7 +69,7 @@ func listSQL(state string, withCursor bool) string {
 	return `
 SELECT id::text, created_at, topic, priority, title, body, data, payload, seen_at, read_at, archived_at
   FROM notifications
- WHERE ` + inboxIdentity + ` AND ` + inboxShown + ` AND ` + state + `
+ WHERE ` + identityPredicate + ` AND ` + inboxShown + ` AND ` + state + `
    AND ($7::text = '' OR topic = $7)` + after + `
  ORDER BY created_at DESC, id DESC
  LIMIT $8`
@@ -190,7 +187,7 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 const unreadSQL = `
 SELECT count(*) FROM (
     SELECT 1 FROM notifications
-     WHERE ` + inboxIdentity + ` AND ` + inboxShown + ` AND read_at IS NULL AND archived_at IS NULL
+     WHERE ` + identityPredicate + ` AND ` + inboxShown + ` AND read_at IS NULL AND archived_at IS NULL
      LIMIT $7) AS unread`
 
 // Unread implements ports.InboxStore.
@@ -212,7 +209,7 @@ func (i *Inbox) Unread(ctx context.Context, id domain.Identity, limit int) (doma
 const getSQL = `
 SELECT` + notificationColumns + `
   FROM notifications
- WHERE ` + inboxIdentity + ` AND ` + inboxShown + ` AND id = $7::uuid`
+ WHERE ` + identityPredicate + ` AND ` + inboxShown + ` AND id = $7::uuid`
 
 // Get implements ports.InboxStore. An id that is not a UUID is not any
 // notification's, so it is answered without asking the database.
@@ -241,13 +238,13 @@ func (i *Inbox) Get(ctx context.Context, id domain.Identity, notificationID stri
 // not the item read, and a second clear keeps the first time.
 const markSeenSQL = `
 UPDATE notifications SET seen_at = $6
- WHERE ` + inboxIdentity + ` AND ` + inboxShown + ` AND seen_at IS NULL AND created_at <= $7`
+ WHERE ` + identityPredicate + ` AND ` + inboxShown + ` AND seen_at IS NULL AND created_at <= $7`
 
 // markAllReadSQL reads what the bell shows: what is archived was put away, and is
 // left as it is.
 const markAllReadSQL = `
 UPDATE notifications SET read_at = $6
- WHERE ` + inboxIdentity + ` AND ` + inboxShown + ` AND read_at IS NULL AND archived_at IS NULL`
+ WHERE ` + identityPredicate + ` AND ` + inboxShown + ` AND read_at IS NULL AND archived_at IS NULL`
 
 // markIDsSQL changes one state on the named notifications ($7 is their ids) and
 // reports how many of them the inbox shows. set is the assignment, and unlessAlready
@@ -259,7 +256,7 @@ func markIDsSQL(set, unlessAlready string) string {
 WITH target AS (
     SELECT id, created_at, ` + unlessAlready + ` AS already
       FROM notifications
-     WHERE ` + inboxIdentity + ` AND ` + inboxShown + ` AND id = ANY($7::uuid[])
+     WHERE ` + identityPredicate + ` AND ` + inboxShown + ` AND id = ANY($7::uuid[])
 ), changed AS (
     UPDATE notifications n SET ` + set + `
       FROM target t

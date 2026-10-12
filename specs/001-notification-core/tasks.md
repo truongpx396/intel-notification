@@ -226,13 +226,23 @@ rule above.
       list's cursor is a keyset on `(created_at, id)`, refused as `domain.ErrInvalidCursor` when malformed; a
       missing limit is `DefaultPageSize` and a large one `MaxPageSize`. The badge's "reads at most cap+1 rows"
       is asserted on the executed plan, captured from the statement `Unread` runs, not on its answer.*
-- [ ] **T018** [P] *red → green* `postgres/prefs.go`: recipient → tenant (locked) → topic resolution with
+- [x] **T018** [P] *red → green* `postgres/prefs.go`: recipient → tenant (locked) → topic resolution with
       source reporting (NR-011, [D30](design-decisions.md#d30)).
       **Red first:** a resolution matrix over {recipient set or unset} × {tenant set, unset or locked} ×
       {topic default}, asserting both the winner and the reported source; a locked tenant default beats
       the recipient's opposite choice; a pair is resolved independently per channel; the quiet-hours and
       cadence schedule round-trips; one recipient's preferences never appear for another.
       **Mutate:** swap the precedence; ignore `locked`; report the wrong source
+      *Built as `postgres.Preferences`, with 66 rows in the [ledger](../../docs/mutations.md); three survivors
+      are equivalent and left, three were gaps in the shared table (a tenant row for another topic, a
+      tenant of another kind, and a refusal the fake and the store would both have failed to make) and
+      the table was strengthened until they died. D30's precedence is written once, in
+      `domain.ResolvePreferences`, which the fake and the store both call, with `Preference.Validate` and
+      `TenantPreference.Validate` beside it. The fake's own table became `notifytest.PreferenceStoreContract`,
+      which the fake runs as a unit test and the store runs against PostgreSQL, so the two cannot drift
+      (the T013a rule). The store adds what only a database holds: a choice stored under the recipient's
+      scope and no other, sixteen writers on one pair leaving one row, three hundred pairs in one call, and a
+      schedule that keeps its clock times, seconds and all.*
 - [ ] **T019** [P] *red → green* `postgres/suppressions.go`. The job lease is already
       `Maintenance.TryLeaseJob` with `TestTryLeaseJob`, so no separate `leases.go` is planned; add one only
       if the leased flush job (T034) finds a gap (NR-006, NS-012).

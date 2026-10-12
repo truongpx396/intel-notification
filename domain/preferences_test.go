@@ -106,6 +106,15 @@ func TestResolvePreferences(t *testing.T) {
 				resolved("push", false, SourceRecipient, false),
 				resolved("slack", true, SourceTenant, false)},
 			"extras follow the topic's own channels, sorted"},
+		{"many extras come back sorted, however a map yields them", TopicDef{DefaultChannels: []ChannelKind{"in_app"}},
+			map[ChannelKind]bool{"h": true, "g": true, "f": true, "e": true, "d": true, "c": true, "b": true, "a": true}, nil,
+			[]ResolvedPreference{
+				resolved("in_app", true, SourceTopicDefault, false),
+				resolved("a", true, SourceRecipient, false), resolved("b", true, SourceRecipient, false),
+				resolved("c", true, SourceRecipient, false), resolved("d", true, SourceRecipient, false),
+				resolved("e", true, SourceRecipient, false), resolved("f", true, SourceRecipient, false),
+				resolved("g", true, SourceRecipient, false), resolved("h", true, SourceRecipient, false)},
+			"a map has no order, so an unsorted result differs from run to run; eight make a chance pass one in forty thousand"},
 		{"a channel named by both levels is listed once", inviteDef,
 			map[ChannelKind]bool{"push": true}, map[ChannelKind]TenantChoice{"push": {Enabled: false}},
 			[]ResolvedPreference{
