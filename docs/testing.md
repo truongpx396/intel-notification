@@ -81,7 +81,8 @@ A vector produced by running the code only proves the code agrees with itself.
 Integration tests carry `//go:build integration`, so `make test` needs no Docker. `internal/pgtest`
 starts **one** PostgreSQL 16 container per test binary and builds a template database once: every
 migration, the non-superuser owner role, and any state the package prepares (partitions for the current
-month). Then:
+month). `internal/redistest` does the same for Redis 7, with a logical database per test instead of a
+clone. Then:
 
 ```go
 func TestSomething(t *testing.T) {
@@ -134,7 +135,14 @@ per idempotency key, a channel registry, in-memory fakes for the read-side ports
   due times stay the database's `now()`, which a claim compares against. A suite starts with
   `func TestMain(m *testing.M) { os.Exit(notifytest.Main(m)) }` and then `e := notifytest.NewEnv(t)`.
   `Env` imports `adapters/driven/postgres`, so a suite that lives in that package and uses it must be an
-  external test package (`package postgres_test`): an internal one would be an import cycle.
+  external test package (`package postgres_test`): an internal one would be an import cycle. Its
+  `Notifier` is the real `app.Notifier` over the Env's own pieces, with an in-memory pre-check; a suite that
+  also wants Redis passes `notifytest.WithRedis()` to `Main` once and to `NewEnv` for the case, which builds
+  the Notifier on the Redis pre-check over a Redis database of that test's own.
+- **Contract tables.** `PreferenceStoreContract` and `PreCheckContract` are run by an in-memory fake and by
+  the adapter it stands in for. `NotifierContract` is run by the in-process Notifier, in memory and on
+  Redis, and is written so the transports reuse it: the cases that join a caller's transaction hold for
+  the in-process Notifier only.
 
 Waiting for something concurrent is done with `testing/synctest`, not a sleep: `synctest.Wait` returns
 once every goroutine is blocked, so "the worker is still held" is an assertion, not a guess.
@@ -247,6 +255,6 @@ GoLand's gopls mode), add the tag:
 
 ## Versions
 
-Go 1.26 (`go.mod`, toolchain `go1.26.8`), PostgreSQL 16 (`postgres:16-alpine`), Testcontainers-go
-v0.44, pgx v5.11, golangci-lint v2.14, go-arch-lint v1.19, Playwright 1.63 on Node 24, TypeScript 7.
+Go 1.26 (`go.mod`, toolchain `go1.26.8`), PostgreSQL 16 (`postgres:16-alpine`), Redis 7 (`redis:7-alpine`),
+Testcontainers-go v0.44, pgx v5.11, go-redis v9.23, golangci-lint v2.14, go-arch-lint v1.19, Playwright 1.63 on Node 24, TypeScript 7.
 Bump them together, and run `make ci` and `make e2e-list` after.

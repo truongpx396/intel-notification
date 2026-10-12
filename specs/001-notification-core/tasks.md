@@ -282,7 +282,7 @@ rule above.
       the `ttl` needs a clock the test can move, so it is the fake's own table, not the shared one. `Writes`
       lists each stored `Remember` with its instant on the fake clock; a read and a refused write are not
       in it.*
-- [ ] **T024** *red* **Contract test** `NotifierContract` (integration, on the T013a `Env` and T023a's
+- [x] **T024** *red* **Contract test** `NotifierContract` (integration, on the T013a `Env` and T023a's
       `PreCheck`). Write it before the notifier, against the ports with nothing behind them. Cases from
       the contract: a replay is one row and one enqueue per channel; the same user in two tenants gets
       both; a failed transaction leaves no pre-check entry (run again on Redis once T023 lands);
@@ -293,7 +293,16 @@ rule above.
       set by a producer. Added here: `DeliverAfter` defers the queue row and `DeliverBefore` is carried to
       it (NR-029); `Cancel` stops pending deliveries and reports an in-flight one without recording it as
       canceled (NR-030); `Status` answers per channel and address (NR-032) (NS-001, NS-002)
-- [ ] **T021** *red → green* `app/planner.go`: topic lookup, preference resolution, inbox visibility from
+      *Built as `notifytest.NotifierContract`, in the kit so the transport suites reuse it: 17 cases, each
+      refusal after a control write, written against a `Notifier` that returned `errors.New("not
+      implemented")` and seen to fail on its first assertion in every case. The failure "after commit" is
+      `FaultStore.FailNextCommit` through the port's own seam, and the quiet-hours, schedule and
+      preference cases drive the Env's fakes. `notifytest.Env` gained `Config`, `Notifier`, `PreCheck` (and
+      `Memory`, the same object as its own type), and its `Store` is now a `FaultStore`. It runs in memory
+      and on Redis (`notifytest.WithRedis()`), which T022a asserts the same way. The cases that join a
+      caller's transaction hold for the in-process Notifier only: a remote one returns
+      `domain.ErrTxUnsupported`, and the transport suite says which it leaves out.*
+- [x] **T021** *red → green* `app/planner.go`: topic lookup, preference resolution, inbox visibility from
       `InboxBacked`, quiet hours (critical overrides), digest eligibility (never critical or essential),
       quota peek, fallback chain, `DeliverAfter` (NR-011–NR-014, NR-029, NR-031).
       **Red first:** a table-driven unit test with no infrastructure, a fixed clock and the T013a fakes,
@@ -321,7 +330,7 @@ rule above.
       cadence and all, rather than lose the notification; and the inbox shows a scheduled notification
       from its send time whatever quiet hours do to the deliveries. The zone database is embedded
       (`time/tzdata`) so two hosts end quiet hours at the same instant.*
-- [ ] **T023** *red → green* `redis/precheck.go`: read before, write after commit, never for `NotifyTx`;
+- [x] **T023** *red → green* `redis/precheck.go`: read before, write after commit, never for `NotifyTx`;
       a test that a failed transaction leaves no entry ([D18](design-decisions.md#d18)).
       **Red first:** against Redis under Testcontainers — a commit failure leaves no entry; `NotifyTx`
       writes none; the key is the `notify_idem` key, checked against the frozen vector; the TTL never
@@ -339,7 +348,7 @@ rule above.
       guard's window. `internal/redistest` starts one Redis per test binary with a logical database per test,
       beside `pgtest`; `notifytest.WithRedis()` starts it from `Main` and builds the `Env`'s Notifier on it,
       so `NotifierContract` runs on both pre-checks.*
-- [ ] **T022a** *red* `app/notifier_test.go`, and the Redis cases of `app/notifier_integration_test.go`:
+- [x] **T022a** *red* `app/notifier_test.go`, and the Redis cases of `app/notifier_integration_test.go`:
       what `NotifierContract` does not reach. `NotifierContract` runs through the real store, which cannot
       say what was *not* called or in what order, so these use recording stand-ins for the ports in the
       test file (not the fake `Store` the kit refuses: they assert call order and arguments and claim
@@ -358,7 +367,7 @@ rule above.
       NR-004, NR-009, NR-027, NR-030, NR-032, [D18](design-decisions.md#d18),
       [D28](design-decisions.md#d28)). Written against a `Notifier` that returns `errors.New("not
       implemented")`
-- [ ] **T022** *green* `app/notifier.go`: `Notify`, `NotifyTx`, `Cancel`, `Status`; realm from config,
+- [x] **T022** *green* `app/notifier.go`: `Notify`, `NotifyTx`, `Cancel`, `Status`; realm from config,
       never the request (NR-009, NR-027, NR-030, NR-032). Make T024 pass one case at a time, with T021,
       T023a and T023 in place; add `var _ ports.Notifier = (*Notifier)(nil)`.
       **Mutate:** take the realm from the request; return `Applied == true` on a replay; treat a pre-check
@@ -379,7 +388,7 @@ rule above.
       not say how old the guard row is, and an entry that outlived it would answer "replay" past the
       window), a failed commit or a `NotifyTx`. `NewNotifier` validates the whole configuration, as the
       contract's `New` does, and names every port it lacks.*
-- [ ] **T017a** *red → green* `app/inbox.go`: the driving `Inbox` over `InboxStore` and
+- [x] **T017a** *red → green* `app/inbox.go`: the driving `Inbox` over `InboxStore` and
       `TemplateRenderer`, rendering each item at read time in the viewer's locale and falling back to the
       stored title and body (NR-019, [D27](design-decisions.md#d27)). [plan.md](plan.md#architecture)
       lists this file and no task built it; the REST surface (T044) and the in-process run (T043) both
@@ -391,6 +400,19 @@ rule above.
       failure D27 names).
       **Mutate:** render at send time and store the result; ignore the requested locale; fall back to an
       empty string
+      *Built as `app.Inbox`, with 22 rows in the [ledger](../../docs/mutations.md), none surviving. It renders
+      the store's page: each item from its topic's template (the topic's `TemplateRef`, else its name) for
+      the registry's inbox-backed channel, found by the capability and not by a kind, in the asked locale or
+      the configured default, with the viewer's realm and tenant and the notification's own data. The
+      renderer owns the locale ladder (tag, language, default); "no template" keeps the stored title and
+      body, and any other renderer error is returned, because a template store that is down is for an
+      operator and a stored copy shown in its place would hide it. A page looks each topic up once, and
+      with no inbox-backed channel registered the renderer is not asked. `Unread` is bounded at
+      `UnreadCap`; the marks are the store's, passed through with its errors. The preference, schedule and
+      unsubscribe methods of `ports.Inbox` are T044's and T026's: they return an error that says so rather
+      than nil, since a nil would tell a recipient their choice was saved, and `SetSchedule` must call
+      `DeliverySchedule.Validate` when it is built. `notifytest.Env` gains `Inbox`, the real
+      `postgres.Inbox` on the Env's clock.*
 
 ## Stage 5 — Channels
 
@@ -657,8 +679,8 @@ that lists no red task has no test scheduled.
 
 | Criterion | Proven by | Written (red) in |
 |---|---|---|
-| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024, T047, T047a |
-| NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024, T029 |
+| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024 (done), T047, T047a |
+| NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024 (done), T029 |
 | NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020 (done), T033 |
 | NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
 | NS-005 digest burst | burst test | T035 |
@@ -678,25 +700,25 @@ construction or by a gate and no task adds a behaviour test for it.
 
 | Requirement | Proven by | Written (red) in |
 |---|---|---|
-| NR-001 durable record | schema tests; the record exists with every channel disabled | T005 (done), T021, T024 |
-| NR-002 idempotency key and window | `StoreContract` and `NotifierContract` replay cases; `Config.Validate` window floor; `IdemKey` bounds | T009 (done), T014 (done), T020 (done), T024 |
-| NR-003 one transaction | `StoreContract` failure after each statement; `NotifyTx` rollback | T020 (done), T024 |
-| NR-004 claim, lease, fence; pre-check after commit | the queue's integration suite; `DispatcherContract` crash points; pre-check tests | T016 (done), T023, T024, T033 |
+| NR-001 durable record | schema tests; the record exists with every channel disabled | T005 (done), T021 (done), T024 (done) |
+| NR-002 idempotency key and window | `StoreContract` and `NotifierContract` replay cases; `Config.Validate` window floor; `IdemKey` bounds | T009 (done), T014 (done), T020 (done), T022a (done), T024 (done) |
+| NR-003 one transaction | `StoreContract` failure after each statement; `NotifyTx` rollback | T020 (done), T024 (done) |
+| NR-004 claim, lease, fence; pre-check after commit | the queue's integration suite; `DispatcherContract` crash points; pre-check tests | T016 (done), T023 (done), T022a (done), T024 (done), T033 |
 | NR-005 channel idempotency at its declared level | frozen delivery-key vector; `ChannelContract`; per-channel tests | T008 (done), T025, T026, T027, T029 |
 | NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031, T033 |
 | NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032, T033 |
-| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020 (done), T024, T047, T047a |
-| NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case; realm bindings | T009 (done), T024, T049 |
+| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T047, T047a |
+| NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case; realm bindings | T009 (done), T022a (done), T024 (done), T049 |
 | NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 (done) |
-| NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021, T024 |
-| NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021, T024 |
-| NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021, T024 |
-| NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021, T034a, T035 |
+| NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021 (done), T024 (done) |
+| NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021 (done), T024 (done) |
+| NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021 (done), T024 (done) |
+| NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021 (done), T034a, T035 |
 | NR-015 unsubscribe | email golden files; REST unsubscribe handler rows; the `unsubscribe` spec | T026, T044, T047a |
 | NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a, T053 (done) |
 | NR-017 a topic is a registration | topics integration table, no migration | T048 |
 | NR-018 re-anchoring identity is a host binding | structural: `Identity` is opaque strings with frozen vectors; `domain` imports nothing | T007 (done), T053 (done) |
-| NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a, T026, T048 |
+| NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a (done), T026, T048 |
 | NR-020 resumable paged broadcast | crash between pages and inside a page; deterministic member keys | T042 |
 | NR-021 stable shard, changeable count | shard vectors; `RehomeShards` integration test | T010 (done), T016 (done) |
 | NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding; `n_tup_del` unmoved | T006 (done), T038, T039 |
@@ -704,12 +726,12 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017 (done), T025, T028 |
 | NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
 | NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |
-| NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020 (done), T024 |
+| NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020 (done), T022a (done), T024 (done) |
 | NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033, T048 |
-| NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021, T024, T033 |
-| NR-030 cancel | `NotifierContract` cancel cases; the queue's `Cancel` | T016 (done), T024 |
-| NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021, T033 |
-| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020 (done), T024, T047a |
+| NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021 (done), T024 (done), T033 |
+| NR-030 cancel | `NotifierContract` cancel cases; the queue's `Cancel` | T016 (done), T022a (done), T024 (done) |
+| NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021 (done), T033 |
+| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020 (done), T022a (done), T024 (done), T047a |
 | NR-033 seen, read, archived | inbox table, independent flags | T017 (done) |
 | NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext | T019 (done), T040 |
 | NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack | T020 (done), T052 |

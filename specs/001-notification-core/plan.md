@@ -107,7 +107,7 @@ later stage.
 | **1. Schema** | migrations, `make verify-schema` | The schema tests pass against PostgreSQL 16, as the table owner |
 | **2. Domain + ports** | types, canonical encoding, derived keys, backoff, config validation | Frozen test vectors shared with the SQL; `Config.Validate` table tests |
 | **3. Store adapter** | the queue's transitions, persist-and-enqueue, inbox reads, preferences, suppressions (done) | The queue's integration suite; `StoreContract`, including the crash after commit; the inbox, preference and suppression suites |
-| **4. Notifier** | planner, `Notify`, `NotifyTx`, pre-check, `Cancel`, `Status` | `NotifierContract` |
+| **4. Notifier** | planner, `Notify`, `NotifyTx`, pre-check, `Cancel`, `Status`, the inbox use-case (done) | `NotifierContract`, in memory and on Redis |
 | **5. Channels** | in-app + email reference implementations, failover composite | `ChannelContract` against both; provider sandbox for email |
 | **6. Dispatcher** | the nine-step algorithm | `DispatcherContract` |
 | **7. Digest, quotas, fairness** | windows, budgets, backlog deferral | Burst yields `ceil(N / DigestMax)`; NS-007 measured |

@@ -1,8 +1,8 @@
 # Quickstart
 
-> **Implementation started.** The domain rules and the PostgreSQL queue adapter exist and are tested;
-> the notifier, dispatcher, channels and transports do not, so most snippets below describe the
-> intended interface. What runs today is below.
+> **Implementation started.** The domain rules, the PostgreSQL adapter, the planner, the notifier with its
+> Redis pre-check and the recipient inbox exist and are tested; the dispatcher, channels and transports do
+> not, so most snippets below describe the intended interface. What runs today is below.
 
 ## What works today
 
