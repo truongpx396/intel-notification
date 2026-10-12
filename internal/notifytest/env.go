@@ -11,9 +11,11 @@ import (
 
 	notify "github.com/truongpx396/intel-notification"
 	"github.com/truongpx396/intel-notification/adapters/driven/postgres"
+	"github.com/truongpx396/intel-notification/adapters/driven/redis"
 	"github.com/truongpx396/intel-notification/app"
 	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/internal/pgtest"
+	"github.com/truongpx396/intel-notification/internal/redistest"
 	"github.com/truongpx396/intel-notification/ports"
 )
 
@@ -24,18 +26,46 @@ var Epoch = time.Date(2031, 3, 1, 12, 0, 0, 0, time.UTC)
 // Realm is the realm Env's fixtures use.
 const Realm domain.Realm = "aisat"
 
+// Option changes what Main starts and what NewEnv builds.
+type Option func(*options)
+
+type options struct{ redis bool }
+
+func newOptions(opts []Option) options {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
+}
+
+// WithRedis puts Redis in the world. Passed to Main it starts the shared Redis
+// beside the shared PostgreSQL; passed to NewEnv it builds the Env's Notifier on
+// the Redis pre-check, over a Redis database of the test's own, instead of the
+// in-memory one. A suite that runs a contract on both passes it to Main once and
+// to NewEnv for the Redis run.
+func WithRedis() Option { return func(o *options) { o.redis = true } }
+
 // Main starts the shared PostgreSQL and runs the tests. Every suite that uses Env
 // calls it from TestMain:
 //
 //	func TestMain(m *testing.M) { os.Exit(notifytest.Main(m)) }
 //
+// A suite that also runs on Redis calls notifytest.Main(m, notifytest.WithRedis()).
+//
 // The template every test's database is cloned from has partitions for the
 // current month and the next, for rows the database dates itself, and for the
 // months around Epoch, for rows a test dates from its fake clock.
-func Main(m *testing.M) int {
-	return pgtest.Main(m, func(ctx context.Context, owner *pgxpool.Pool) error {
-		return prepare(ctx, owner, time.Now())
-	})
+func Main(m *testing.M, opts ...Option) int {
+	run := func() int {
+		return pgtest.Main(m, func(ctx context.Context, owner *pgxpool.Pool) error {
+			return prepare(ctx, owner, time.Now())
+		})
+	}
+	if newOptions(opts).redis {
+		return redistest.Run(run)
+	}
+	return run()
 }
 
 // prepare provisions, as the owner, the month containing each of now and Epoch and
@@ -61,8 +91,8 @@ func prepare(ctx context.Context, owner *pgxpool.Pool, now time.Time) error {
 // claim is decided inside one statement, which the fake clock cannot reach.
 //
 // The Notifier is the real one, over the Env's own pieces: the real Store, the
-// fakes, the fake clock and a pre-check. Redis arrives with T023 and the
-// Dispatcher with the task that builds it; each lands here as one more field.
+// fakes, the fake clock and a pre-check, in memory or, under WithRedis, in Redis.
+// The Dispatcher arrives with the task that builds it, as one more field.
 type Env struct {
 	DB *pgtest.DB
 
@@ -89,11 +119,14 @@ type Env struct {
 	// commit (FailNextCommit) and a Notify still goes through the port's own seam.
 	Store *FaultStore
 
-	// PreCheck is the pre-check the Notifier is built with: the in-memory one here.
-	// Memory is that same pre-check as its own type, for a test that wants the
-	// instant each entry was written; it is nil when PreCheck is not the fake.
+	// PreCheck is the pre-check the Notifier is built with: the in-memory one, or
+	// under WithRedis the Redis adapter over Redis. Memory is the in-memory one as
+	// its own type, for a test that wants the instant each entry was written; it is
+	// nil under WithRedis.
 	PreCheck ports.PreCheck
 	Memory   *PreCheck
+	// Redis is the test's own Redis database; nil unless the Env was built WithRedis.
+	Redis *redistest.DB
 
 	// Notifier is the use-case under test.
 	Notifier ports.Notifier
@@ -101,8 +134,9 @@ type Env struct {
 
 // NewEnv returns an Env over a database cloned for tb alone, which is dropped when
 // tb ends. The code under test is handed DB.Owner, never DB.Admin.
-func NewEnv(tb testing.TB) *Env {
+func NewEnv(tb testing.TB, opts ...Option) *Env {
 	tb.Helper()
+	o := newOptions(opts)
 	db := pgtest.New(tb)
 	clock := NewClock(Epoch)
 	store := postgres.New(db.Owner, postgres.WithClock(clock))
@@ -131,6 +165,10 @@ func NewEnv(tb testing.TB) *Env {
 		Memory: NewPreCheck(clock),
 	}
 	e.PreCheck = e.Memory
+	if o.redis {
+		e.Redis, e.Memory = redistest.New(tb), nil
+		e.PreCheck = redis.NewPreCheck(e.Redis.Client, redis.WithMaxTTL(e.Config.WithDefaults().IdempotencyWindow))
+	}
 	notifier, err := app.NewNotifier(e.Config, app.Deps{
 		Channels:      e.Channels,
 		Topics:        e.Topics,

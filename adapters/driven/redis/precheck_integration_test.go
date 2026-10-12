@@ -69,7 +69,7 @@ func TestPreCheckTTLNeverExceedsTheWindow(t *testing.T) {
 		{"a ttl under the window is kept", 30 * time.Minute, 30 * time.Minute, 29 * time.Minute},
 		{"a ttl equal to the window is kept", window, window, window - time.Minute},
 		{"a ttl above the window is clamped to it", 48 * time.Hour, window, window - time.Minute},
-		{"a ttl of milliseconds is kept", 1500 * time.Millisecond, 1500 * time.Millisecond, 0},
+		{"a ttl of milliseconds is kept to the millisecond", 1500 * time.Millisecond, 1500 * time.Millisecond, time.Second},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -148,5 +148,24 @@ func TestPreCheckRefusesATTLThatWouldNeverLapse(t *testing.T) {
 	}
 	if keys, _ := rdb.Keys(t.Context(), "*").Result(); len(keys) != 1 || keys[0] != "control" {
 		t.Fatalf("keys in Redis = %q, want only the control: a refused write stored something", keys)
+	}
+}
+
+// A key nobody remembered is the ordinary answer, not a fault: the error handler
+// hears of Redis trouble only, or an operator would learn to ignore it.
+func TestPreCheckAMissIsNotAFault(t *testing.T) {
+	t.Parallel()
+	heard := 0
+	p, _ := newPreCheck(t, redis.WithErrorHandler(func(string, error) { heard++ }))
+	if err := p.Remember(t.Context(), "k", "n-1", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"k", "never-remembered"} {
+		if _, _, err := p.Seen(t.Context(), key); err != nil {
+			t.Fatalf("Seen(%q): %v", key, err)
+		}
+	}
+	if heard != 0 {
+		t.Fatalf("the error handler heard %d faults from a hit and a miss on a healthy Redis", heard)
 	}
 }

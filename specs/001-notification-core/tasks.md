@@ -328,6 +328,17 @@ rule above.
       exceeds `IdempotencyWindow`; a Redis outage is a miss and never an error that blocks `Notify`
       (NR-004).
       **Mutate:** write before commit; write for `NotifyTx`; return the Redis error
+      *Built as `redis.PreCheck` over go-redis, with 16 rows in the [ledger](../../docs/mutations.md), one
+      survivor repaired (a ttl truncated to whole seconds, which a row that asked only for a PTTL above zero
+      let through). The first two mutations name the Notifier's side of the pre-check, "write before commit"
+      and "write for `NotifyTx`", and are T022's rows; the adapter's are the Redis error, the clamp to the
+      idempotency window, an entry with no expiry, and the key as given. A Redis fault is a miss: `Seen`
+      answers "not seen" and `Remember` answers nil, each telling `WithErrorHandler`, so an operator can see
+      what Notify never will; a `ttl` that is not positive is the one error returned, because Redis would
+      read it as an entry that never lapses. `WithMaxTTL(IdempotencyWindow)` clamps every entry to the
+      guard's window. `internal/redistest` starts one Redis per test binary with a logical database per test,
+      beside `pgtest`; `notifytest.WithRedis()` starts it from `Main` and builds the `Env`'s Notifier on it,
+      so `NotifierContract` runs on both pre-checks.*
 - [ ] **T022** *green* `app/notifier.go`: `Notify`, `NotifyTx`, `Cancel`, `Status`; realm from config,
       never the request (NR-009, NR-027, NR-030, NR-032). Make T024 pass one case at a time, with T021,
       T023a and T023 in place; add `var _ ports.Notifier = (*Notifier)(nil)`.
