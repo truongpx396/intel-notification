@@ -773,6 +773,21 @@ A state-changing `GET` unsubscribes recipients who never clicked anything. Gmail
 8058 one-click unsubscribe for bulk senders, and a link that stops working after a few days violates
 CAN-SPAM's 30-day requirement.
 
+*Built.* The token is `v1.<key id>.<base64url payload>.<base64url HMAC-SHA256>`. The MAC is over
+`"notify.unsubscribe.v1\n" + key id + "\n" + payload`, so the id is under the signature and a MAC the same
+key makes for another purpose cannot pass; it is compared in constant time and checked before the payload
+is parsed. The payload is the five identity components, the topic, the channel and the second the token
+lapses, as compact JSON. A signer signs with one key and verifies with every key it holds, so a key rotates
+by adding the new one and making it current, and retires when the mail signed with the old one has outlived
+its life. A life under 60 days, or a key under 32 bytes, is refused when the signer is made. An invalid or
+altered token and an expired one are different errors, and the REST surface answers both with a 410. The
+link base must be HTTPS, because RFC 8058 wants one HTTPS URI and a mail scanner follows what it is given;
+plain HTTP is an explicit opt-in for development.
+
+Verified: `TestUnsubscribeTokenMatchesTheFrozenVector`, `TestUnsubscribeTokenRefusesAnyAlteredField`,
+`TestUnsubscribeTokenKeys`, `TestUnsubscribeTokenExpiry`, `TestUnsubscribeTokenRefusesWhatIsNotAToken`,
+`TestSignedLinksRefuseABaseThatCannotWork`.
+
 ## D35 — Personal data is erasable, and suppressions survive erasure · *review*
 
 **Decision.** `Maintenance.Erase` removes a recipient's rows from every table that holds them —

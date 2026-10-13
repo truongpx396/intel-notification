@@ -67,7 +67,8 @@ and the use-cases a producer and a recipient meet first: the planner, `Notifier`
 (Stage 5): the Redis stream (sharded pub/sub on hash-tagged keys), `channel/inapp`, `channel/email` with
 SMTP and Resend mailers, `channel/failover`, and the `ChannelContract` every one is held to. Resend's
 24-hour idempotency is taken from its documentation until `make test-provider` has been run against its
-sandbox; the unsubscribe-token signer and the bounce webhook are the transports'. Not built: the
+sandbox. The unsubscribe token and its signed links are built (T026a); the bounce webhook is the
+transports'. Not built: the
 dispatcher, the transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics,
 templates and addresses, and the Redis quota counters). Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
