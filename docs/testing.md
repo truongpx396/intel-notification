@@ -82,7 +82,8 @@ Integration tests carry `//go:build integration`, so `make test` needs no Docker
 starts **one** PostgreSQL 16 container per test binary and builds a template database once: every
 migration, the non-superuser owner role, and any state the package prepares (partitions for the current
 month). `internal/redistest` does the same for Redis 7, with a logical database per test instead of a
-clone. Then:
+clone. That isolates keys and **not pub/sub channels**, which every database on the server shares: a test of
+the stream publishes as an identity of its own (a realm derived from `DB.Index`). Then:
 
 ```go
 func TestSomething(t *testing.T) {
@@ -121,6 +122,12 @@ per idempotency key, a channel registry, in-memory fakes for the read-side ports
 - **`FaultStore.FailNextCommit`.** Wraps a `ports.Store` and, through the port's own transaction seam,
   rolls back the next commit after the store's writes are done: the failure that matters for D18,
   injected with nothing added to the adapter.
+- **`ChannelContract`.** The table every `ports.Channel` runs (`ChannelDedupContract` is its part that
+  injects no failure). The suite is data, so its own test runs it against 21 deliberately broken channels
+  and requires each to fail the case meant for it. Under `-tags provider` (`make test-provider`, which needs
+  `NOTIFY_PROVIDER_RESEND_API_KEY` and spends sending quota) the email channel's dedup claim is held to the
+  provider's sandbox, the only way to show a provider dedupes.
+- **`Stream`.** An in-memory `ports.StreamPublisher` that refuses what the Redis stream refuses.
 - **`Probe` and `Channel`.** The probe counts sends and calls per key and injects a failure into a
   coming send; the channel honours the `Dedup` level it declares, so a re-drive collapses only where a
   real channel at that level would.
