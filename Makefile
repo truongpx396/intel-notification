@@ -76,7 +76,7 @@ lint-sql: ## Migration hygiene: transactional, commented, sequentially named
 # are only worth having if order-dependence and data races fail the build.
 GOTEST := go test -race -shuffle=on -count=1
 
-.PHONY: build test test-integration lint arch-lint
+.PHONY: build test test-integration test-provider lint arch-lint
 build: ## Build every package
 	go build ./...
 
@@ -85,6 +85,11 @@ test: ## Unit tests: no Docker, no network
 
 test-integration: ## Integration tests against PostgreSQL via Testcontainers (needs Docker)
 	$(GOTEST) -tags integration ./...
+
+# Not in `make ci`: it spends a real provider's sending quota and needs credentials
+# (NOTIFY_PROVIDER_RESEND_API_KEY). It is the only way to show a provider dedupes.
+test-provider: ## Channel suites against the email provider's sandbox (needs NOTIFY_PROVIDER_RESEND_API_KEY)
+	go test -race -count=1 -tags provider -run 'Sandbox' ./adapters/driven/channel/email
 
 lint: ## golangci-lint: depguard boundaries, parallel-test rules, formatting
 	@command -v golangci-lint >/dev/null || { echo "golangci-lint not installed: https://golangci-lint.run/docs/welcome/install/"; exit 1; }

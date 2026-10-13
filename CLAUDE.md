@@ -55,8 +55,11 @@ has the rules):
 - `adapters/driven/postgres/`: the delivery queue, digests and maintenance jobs, the store's persist and
   read paths, the inbox, preferences and suppressions. Broadcast (T041) and the catalog adapters (T048)
   are not built yet.
-- `adapters/driven/redis/`: the pre-check. A fast path that only ever misses; the stream and the quota
-  counters are not built yet.
+- `adapters/driven/redis/`: the pre-check, a fast path that only ever misses, and the live stream
+  (sharded pub/sub on hash-tagged keys). The quota counters are not built yet.
+- `adapters/driven/channel/`: `inapp` (a nudge naming a notification), `email` (SMTP and Resend mailers)
+  and `failover` (ordered providers, the weakest `Dedup` of its members). Each depends on `domain` and
+  `ports` only, and each is held to `notifytest.ChannelContract`.
 - `migrations/`: the schema, embedded as `migrations.FS` so hosts, the service binary and the integration
   tests apply the same files. `config.go` is the one configuration surface.
 - `internal/notifytest/` is the kit every suite is written against (fake clock, fault injection, probe,

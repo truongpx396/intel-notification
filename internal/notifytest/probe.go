@@ -102,6 +102,16 @@ func (p *Probe) call(key string) (Failure, bool) {
 	return f, true
 }
 
+// Attempt is what a fake provider calls when a channel asks it to send key: it
+// counts the call and returns the next armed failure, if any. A provider that
+// meets a failure answers it as a real one would, and sends nothing. Only a fake
+// outside this package needs it; the kit's own [Channel] and [Stream] use call.
+func (p *Probe) Attempt(key string) (Failure, bool) { return p.call(key) }
+
+// Record is what a fake provider calls when it accepts a send of key. A provider
+// that honours an idempotency key passes dedupes, and counts the key once.
+func (p *Probe) Record(key string, dedupes bool) { p.send(key, dedupes) }
+
 // send records that a send with key reached the provider. A provider that dedupes
 // counts it only the first time.
 func (p *Probe) send(key string, dedupes bool) {

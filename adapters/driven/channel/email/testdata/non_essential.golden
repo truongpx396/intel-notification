@@ -1,0 +1,9 @@
+To: ada@example.com
+Subject: Upload finished
+Idempotency-Key: 9602e45b0e75892a423e8c52157ced818019629335020fca1d8590a91864fc46
+List-Unsubscribe: <https://notify.example.test/notifications/unsubscribe?token=aisat.w1.u1.ingestion_complete.email&v=1>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+<p>Your upload finished.</p>
+<hr>
+<p style="color:#666;font-size:12px">You are receiving this email because of your notification settings. <a href="https://notify.example.test/notifications/unsubscribe?token=aisat.w1.u1.ingestion_complete.email&amp;v=1">Unsubscribe</a> from this kind of notification.</p>

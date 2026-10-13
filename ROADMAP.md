@@ -63,9 +63,13 @@ types and rules, every port in the contract, the configuration and its validatio
 (`internal/notifytest`), and the PostgreSQL adapter for the delivery queue, digests, maintenance jobs,
 the store's persist and read paths, the inbox, preferences and suppressions, with the CI boundary gates;
 and the use-cases a producer and a recipient meet first: the planner, `Notifier` (`Notify`, `NotifyTx`,
-`Cancel`, `Status`) with its Redis pre-check, and the inbox that renders at read time.
-Not built: the dispatcher, channels and transports, `Notifier.Broadcast`, and the adapters behind them
-(broadcast, topics, templates and addresses, and the Redis stream and quota counters). Task-level status is in
+`Cancel`, `Status`) with its Redis pre-check, and the inbox that renders at read time; and the channels
+(Stage 5): the Redis stream (sharded pub/sub on hash-tagged keys), `channel/inapp`, `channel/email` with
+SMTP and Resend mailers, `channel/failover`, and the `ChannelContract` every one is held to. Resend's
+24-hour idempotency is taken from its documentation until `make test-provider` has been run against its
+sandbox; the unsubscribe-token signer and the bounce webhook are the transports'. Not built: the
+dispatcher, the transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics,
+templates and addresses, and the Redis quota counters). Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
 → [specs/001-notification-core](specs/001-notification-core/)
 

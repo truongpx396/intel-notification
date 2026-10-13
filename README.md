@@ -13,8 +13,10 @@ as a self-contained service that any language can call.
 > adapter** for the delivery queue, the persist and read paths, the inbox, preferences and
 > suppressions, proven against a real PostgreSQL 16 by an integration suite, and the **notifier**:
 > the planner, `Notify`, `NotifyTx`, `Cancel` and `Status`, the Redis pre-check, and the recipient's
-> inbox rendered at read time. The dispatcher, channels and transports are not built yet, so most
-> snippets below still describe the intended interface.
+> inbox rendered at read time. Also built: the reference **channels** (in-app over a Redis shard-channel
+> stream, email over SMTP or Resend, and a provider-failover composite), each held to one channel
+> contract. The dispatcher and the transports are not built yet, so a channel cannot be driven end to
+> end and most snippets below still describe the intended interface.
 > [ROADMAP.md](ROADMAP.md) says what exists, what is designed and what is deliberately absent;
 > [tasks.md](specs/001-notification-core/tasks.md) is the build order.
 >

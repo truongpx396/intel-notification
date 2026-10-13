@@ -416,24 +416,65 @@ rule above.
 
 ## Stage 5 — Channels
 
-- [ ] **T029** *red* **Contract test** `ChannelContract`: the five cases in the contract, plus each
+- [x] **T029** *red* **Contract test** `ChannelContract`: the five cases in the contract, plus each
       channel reporting its declared `Dedup` level (NR-005, [D32](design-decisions.md#d32)). Run it first
       against two deliberately broken channels — one that declares `DedupProvider` and sends twice, one
       that returns an error for a transient failure — and confirm it fails for each; only then is it a
       test. It then runs against both reference channels, and against the email provider's sandbox under
       `-tags provider`
-- [ ] **T028** *red → green* `redis/stream.go`: sharded pub/sub on hash-tagged keys.
+      *Built as `notifytest.ChannelContract`, with `ChannelDedupContract`, the part that injects no failure
+      and so the part a provider's sandbox can answer. The suite is data (`channelCases`) written against a
+      small `contractT`, so `TestChannelContractFailsABrokenChannel` runs it in process against 21 channels,
+      each broken in one way (the two the task names among them), and requires the exact set of cases that
+      should fail to fail: the evidence that it can fail is a standing test and not a one-off run. It
+      departs from the sketch in the contract in two ways. `newChannel` returns a `ChannelUnderTest`, the
+      channel and its probe plus, when it needs them, the key the provider side counts a send under (the
+      in-app effect is keyed by the notification, not the delivery), how to arm a failure on every member of
+      a composite, and how many provider calls one failed delivery may make. And it is stricter and wider:
+      a channel with `NeedsAddress` false must never report `Suppressed`, since the engine would suppress the
+      empty address hash for the whole realm ([D13](design-decisions.md#d13)); a `Rejected` must carry a
+      `Detail`; a fault the provider did not classify is `Retry` or an error and never a verdict; a window is
+      declared only with `DedupProvider`; and a channel does not retry inside
+      ([D10](design-decisions.md#d10)). 16 mutations of the suite itself are in the
+      [ledger](../../docs/mutations.md); five survived their first run, because the fixtures did not isolate
+      an assertion another one also caught, and now die. `make test-provider` runs the dedup cases against
+      Resend's sandbox: it compiles and fails loudly with no key, and has not been run against the real
+      provider.*
+- [x] **T028** *red → green* `redis/stream.go`: sharded pub/sub on hash-tagged keys.
       **Red first:** against Redis under Testcontainers — an identity's keys share one cluster slot (CRC16
       of the hash tag); the same recipient id in two tenants gets two keys, checked against the frozen
       stream-key vector; a subscriber on one identity receives nothing published to another.
       **Mutate:** build the key without the tenant; drop the hash tag
-- [ ] **T025** [P] *red → green* `channel/inapp`: nudge-only publish on the identity stream key;
+      *Built as `redis.Stream`. `Publish` is `SPUBLISH` on `domain.StreamKey` and the payload is the id and
+      nothing else. `Subscribe(ctx, identity)` returns a `Subscription` once the server has confirmed it, and
+      `Close` returns when the server has dropped it. The relay (T044) will want a port for the subscribing
+      side; the contract has none, so none was invented. A fault no retry fixes, an ACL that refuses the
+      command, a server without it, an identity or id with nothing to nudge, wraps the new
+      `domain.ErrPermanent`, which the in-app channel reads as `Rejected`; every other fault is the transient
+      kind, and only a Redis *server's* own error text is read for it. The suites found something about the
+      kit: **Redis pub/sub is global to the server, not to a logical database**, so `redistest`'s private
+      database isolates a test's keys and not its channels. The suites publish as identities of their own (a
+      realm derived from the database), one sequential test owns the three frozen literal keys (computed with
+      Python's hashlib and a CRC16 written from the cluster specification), and `redistest`'s documentation
+      says so. 16 mutations in the ledger; two survived their first run (a refused subscription and the order
+      of `Close`) and now die.*
+- [x] **T025** [P] *red → green* `channel/inapp`: nudge-only publish on the identity stream key;
       `InboxBacked` ([D16](design-decisions.md#d16)).
       **Red first:** `ChannelContract`, plus: the published payload is an id and nothing else, no content
       and no count (NR-024); it is published on the identity's stream key and no other; `InboxBacked` is
       true.
       **Mutate:** put the title or the count in the payload
-- [ ] **T026** [P] *red → green* `channel/email`: template content, RFC 8058 headers and footer for
+      *Built as `inapp.Channel`, over `ports.StreamPublisher`: the nudge is the notification id, published to
+      the delivery's own identity. A stream refusal that wraps `domain.ErrPermanent` is `Rejected`, any other
+      fault `Retry`. **One decision the contract does not make:** `domain.Notification` has no id, so a digest
+      delivery's members carry none, and the sketch's `Publish(ctx, id, d.NotificationID)` would send `""`,
+      which the stream refuses as permanent: every digested in-app delivery would be dead-lettered. The
+      channel succeeds without a nudge for a digest (their inbox rows are visible already). Whether an in-app
+      digest should nudge at all is the planner's open question, which digests an inbox-backed channel "like
+      any other". `notifytest.Stream` is the fake, with its own table test and 7 mutations. The channel is also
+      run over the real Redis stream, for the bytes on the wire and the tenant boundary
+      (`inapp_integration_test.go`). 17 mutations in the ledger, none surviving.*
+- [x] **T026** [P] *red → green* `channel/email`: template content, RFC 8058 headers and footer for
       non-essential topics, provider idempotency key, truthful `Dedup` per provider (NR-005, NR-015,
       [D34](design-decisions.md#d34)).
       **Red first:** `ChannelContract`, plus golden-file tests of the rendered message: a non-essential
@@ -443,12 +484,39 @@ rule above.
       `unsubscribe` and `webhooks` Playwright specs.
       **Mutate:** omit the header on a non-essential topic; add the footer to an essential one; declare
       `DedupProvider` for a provider that does not dedupe
-- [ ] **T027** [P] *red → green* `channel/failover`: ordered providers, weakest `Dedup` of its members
+      *Built as `email.Channel` over a `Mailer` and an `UnsubscribeLinks`, with two mailers: `email.SMTP`
+      (Mailpit in the e2e stack, any relay: `DedupNone`; STARTTLS when offered with the certificate checked
+      and never a fall back to clear text; header injection refused; failures classified by RFC 3463 status
+      wherever in the conversation they arrive) and `email.Resend` (`DedupProvider` for 24 hours, from
+      Resend's own documentation; its error reference mapped to outcomes). The channel's `Dedup` is its
+      mailer's and no stronger. A topic the registry does not know is treated as non-essential, so doubt falls
+      on the side of the unsubscribe link; a registry or link fault waits as `Retry` rather than sending
+      without the headers. Provider-wide faults (a revoked key, an unverified domain, a refused sender) are
+      reported as transient, not as a refusal of the message, so a failover chain can route around them. The
+      footer is plain English with `WithFooter` to replace it. **Not built here, and needed before the
+      `unsubscribe` and `webhooks` specs can run:** the signer behind `UnsubscribeLinks` (the token, its key
+      id and 60-day life are D34's, and T044 verifies them), and the webhook that turns a Resend bounce
+      into a suppression, since `POST /emails` cannot report one. No `text/plain` alternative part is sent.
+      73 mutations in the ledger: 55 died at once, 11 did not build and were rewritten, and nine survivors,
+      over two passes, each exposed a missing test, now written; one real bug was found on the way (the connection deadline was
+      taken from the injectable clock). `-tags provider` is as described under T029.*
+- [x] **T027** [P] *red → green* `channel/failover`: ordered providers, weakest `Dedup` of its members
       ([D29](design-decisions.md#d29)).
       **Red first:** a table over every pairing of member `Dedup` levels showing the composite declares
       the weakest; on `Retry` from one provider the next is tried inside the same attempt; the first
       provider's `Delivered` stops the chain; `ChannelContract` over the composite.
       **Mutate:** report the strongest level; try the next provider after `Delivered`
+      *Built as `failover.Channel`. Each attempt starts at the first provider. A delivery, a `Suppressed` or a
+      `Rejected` ends the chain; a `Retry` or an error tries the next. When none can send the result is
+      `Retry`, floored at the earliest `RetryAfter` any provider offered (none if any offered none), with
+      what each said in `Detail`. It declares the weakest `Dedup`, and the shortest window only for
+      `DedupProvider`. **A limit that is the design's, not a bug:** a delivery that the first provider failed
+      and the second sent can, if its record is lost to a crash, be re-driven from the first, which has not
+      seen the key; the composite keeps no record of which provider sent, so no level above the weakest is
+      honest, and none stronger than the members' is claimed. **A reading the spec leaves open:** only a
+      transient result tries the next provider, so a provider that reports its own account trouble as
+      `Rejected` would stop the chain; the mailers here report that as transient. 28 mutations in the
+      ledger; three survived their first run and now die.*
 
 ## Stage 6 — Dispatcher
 
@@ -679,8 +747,8 @@ that lists no red task has no test scheduled.
 
 | Criterion | Proven by | Written (red) in |
 |---|---|---|
-| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024 (done), T047, T047a |
-| NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024 (done), T029 |
+| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024 (done), T028 (done), T047, T047a |
+| NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024 (done), T029 (done) |
 | NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020 (done), T033 |
 | NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
 | NS-005 digest burst | burst test | T035 |
@@ -704,26 +772,26 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-002 idempotency key and window | `StoreContract` and `NotifierContract` replay cases; `Config.Validate` window floor; `IdemKey` bounds | T009 (done), T014 (done), T020 (done), T022a (done), T024 (done) |
 | NR-003 one transaction | `StoreContract` failure after each statement; `NotifyTx` rollback | T020 (done), T024 (done) |
 | NR-004 claim, lease, fence; pre-check after commit | the queue's integration suite; `DispatcherContract` crash points; pre-check tests | T016 (done), T023 (done), T022a (done), T024 (done), T033 |
-| NR-005 channel idempotency at its declared level | frozen delivery-key vector; `ChannelContract`; per-channel tests | T008 (done), T025, T026, T027, T029 |
+| NR-005 channel idempotency at its declared level | frozen delivery-key vector; `ChannelContract`; per-channel tests | T008 (done), T025 (done), T026 (done), T027 (done), T029 (done) |
 | NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031, T033 |
 | NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032, T033 |
-| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T047, T047a |
+| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T028 (done), T047, T047a |
 | NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case; realm bindings | T009 (done), T022a (done), T024 (done), T049 |
 | NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 (done) |
 | NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021 (done), T024 (done) |
 | NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021 (done), T024 (done) |
 | NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021 (done), T024 (done) |
 | NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021 (done), T034a, T035 |
-| NR-015 unsubscribe | email golden files; REST unsubscribe handler rows; the `unsubscribe` spec | T026, T044, T047a |
+| NR-015 unsubscribe | email golden files; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T044, T047a |
 | NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a, T053 (done) |
 | NR-017 a topic is a registration | topics integration table, no migration | T048 |
 | NR-018 re-anchoring identity is a host binding | structural: `Identity` is opaque strings with frozen vectors; `domain` imports nothing | T007 (done), T053 (done) |
-| NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a (done), T026, T048 |
+| NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a (done), T026 (done), T048 |
 | NR-020 resumable paged broadcast | crash between pages and inside a page; deterministic member keys | T042 |
 | NR-021 stable shard, changeable count | shard vectors; `RehomeShards` integration test | T010 (done), T016 (done) |
 | NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding; `n_tup_del` unmoved | T006 (done), T038, T039 |
 | NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; quota table; noisy-neighbour test | T016 (done), T036, T037 |
-| NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017 (done), T025, T028 |
+| NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017 (done), T025 (done), T028 (done) |
 | NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
 | NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |
 | NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020 (done), T022a (done), T024 (done) |
