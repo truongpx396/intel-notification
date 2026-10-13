@@ -469,9 +469,9 @@ rule above.
       fault `Retry`. **One decision the contract does not make:** `domain.Notification` has no id, so a digest
       delivery's members carry none, and the sketch's `Publish(ctx, id, d.NotificationID)` would send `""`,
       which the stream refuses as permanent: every digested in-app delivery would be dead-lettered. The
-      channel succeeds without a nudge for a digest (their inbox rows are visible already). Whether an in-app
-      digest should nudge at all is the planner's open question, which digests an inbox-backed channel "like
-      any other". `notifytest.Stream` is the fake, with its own table test and 7 mutations. The channel is also
+      channel succeeds without a nudge for a digest (their inbox rows are visible already). *That was the
+      planner's open question, and [D39](design-decisions.md#d39) closed it: an inbox-backed channel is
+      never digested, so that branch is now defensive.* `notifytest.Stream` is the fake, with its own table test and 7 mutations. The channel is also
       run over the real Redis stream, for the bytes on the wire and the tenant boundary
       (`inapp_integration_test.go`). 17 mutations in the ledger, none surviving.*
 - [x] **T026** [P] *red → green* `channel/email`: template content, RFC 8058 headers and footer for

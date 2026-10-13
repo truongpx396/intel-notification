@@ -3,7 +3,7 @@
 Each entry states the decision, the alternative, and **what goes wrong without it**. A decision with
 no failure mode attached is a preference, and preferences do not belong in a specification.
 
-Three kinds of entry carry a tag:
+Four kinds of entry carry a tag:
 
 - **inherited-gap** resolves something the originating design left open, contradictory, or
   unimplementable: D1, D2, D3, D4, D5, D6, D7, D9, D10, D11.
@@ -15,6 +15,9 @@ Three kinds of entry carry a tag:
   outbox exists to fix). Read those first.
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
+- **built** comes from implementing a stage and finding the specification silent where the code had to
+  choose: D39–D41. Each names the test that holds the choice, so a later reader can tell what was
+  decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
 [`scripts/verify-schema.sql`](../../scripts/verify-schema.sql), `make verify-schema`), an integration
@@ -884,6 +887,86 @@ run with the timeouts: its transaction sat idle in transaction, which is what
 Measured: `make soak`, two runs, recorded in
 [operations.md](../../docs/operations.md#protecting-the-queue-from-its-own-database). Not yet verified:
 the timeouts containing it, and the threshold.
+
+## D39 — An inbox-backed channel is never digested · *built*
+
+**Decision.** The planner folds a channel into a digest window only when the channel does not declare
+`InboxBacked`. An inbox-backed channel is planned as an ordinary delivery whatever the recipient's cadence,
+and a plan names a window only when some channel uses it. "Digestible channel" in NR-014 and NS-005 means a
+channel without that capability, read from the registry and never from the channel's name (NR-016).
+
+**Alternative.** Three, none adopted:
+
+- **Digest every channel, and nudge the newest member at the flush.** Keeps NS-005 literal, but a digest
+  delivery names no notification: `Store.Load` reads the members' ids and discards them, and
+  `domain.Notification` has none, so the ids would have to be carried through the `Store` port and a type
+  the contract fixes.
+- **Digest every channel, and let the in-app channel flush without a nudge.** What the planner did first,
+  because the contract was silent.
+- **A cadence per channel.** The right shape if recipients ask for it, but a change to the preference model
+  (D3, D30), not a way out of this one.
+
+**What goes wrong without it.** `DeliverySchedule.Digest` belongs to the recipient, not to a channel. A
+recipient who asks for an hourly email digest also has every in-app delivery folded into a window, so the
+live nudge is held back for the same hour, though nothing about a nudge on a row the inbox already holds
+interrupts anyone. At the flush the in-app channel is handed a digest, which names no notification, so there
+is nothing to point a nudge at: the live path is silent for as long as the cadence is set, and the bell
+corrects itself only on the next reconnect. The digest exists to cut interruptions; the inbox is the one
+channel that is not one.
+
+*Cost.* A burst of N notifications to one recipient is N nudges on the live stream, where a digest would have
+made one. A nudge is one `SPUBLISH` and at-most-once ([D15](#d15), [D16](#d16)), and every inbox row is
+persisted either way, so what this leaves open is the relay coalescing a burst of nudges for a connected
+client, which is the relay's (T044).
+
+Verified: `TestPlan` — an inbox-backed channel is not digested while another is; which channel is
+inbox-backed is its capability (a `feed` channel is not digested, a channel named `in_app` that is not
+inbox-backed is); a cadence with only an inbox-backed channel enabled opens no window.
+
+## D40 — A port names a fault no retry fixes, and the channel reads it · *built*
+
+**Decision.** A driven port that can tell a fault no retry will fix from one that may pass wraps
+`domain.ErrPermanent`; any other error from it is transient. A channel reads it: a permanent fault is
+`Rejected`, so the delivery is dead-lettered at once with its reason, and any other is `Retry`. The Redis
+stream wraps it for an ACL that refuses the command, a server without it (sharded pub/sub arrived in Redis
+7.0), and a nudge with no notification id or an identity with an empty component. It reads only a Redis
+*server's* own error text, never a transport error's. `ChannelContract` requires every channel to report a
+permanent refusal as `Rejected` with a `Detail`.
+
+**Alternative.** Every error from a port is `Retry`, as the contract's sketch of the in-app channel has it, or
+a channel matches error text.
+
+**What goes wrong without it.** A Redis that will never accept the command, because an ACL forbids it or the
+version lacks it, is retried to the attempt ceiling with full-jitter backoff up to an hour
+([D10](#d10)): hours before an operator learns why, and a dead letter that says `max_attempts` where the
+cause is a configuration. And the contract's own case, "a permanent refusal is `Rejected`", cannot be asked
+of a channel whose provider has no way to say so. Matching error text in each channel puts a Redis
+dependency in every channel that publishes.
+
+Verified: `TestClassifyPublishFaults`, `TestPublishClassifiesWhatARetryCannotFix` (an ACL refusal against a
+real Redis), `TestInAppReadsTheStreamsFault`, and the in-app suite's run of `ChannelContract`.
+
+## D41 — `Rejected` is a verdict on the message; a provider's own trouble is `Retry` · *built*
+
+**Decision.** `Rejected` means the message itself will be refused: malformed, too large, content refused.
+Anything that is the provider's own, a revoked or suspended key, an unverified sending domain, a refused
+sender or credentials, an exhausted plan, is `Retry`, and after `MaxAttempts` it is dead-lettered as
+`max_attempts` with the last error. `Suppressed` is a verdict on the address. The failover channel
+([D29](#d29)) ends its chain on a delivery, a `Suppressed` or a `Rejected`, and tries the next provider on a
+`Retry` or an error. The SMTP and Resend mailers classify this way: 401, 403 and 404 from Resend, and an
+SMTP refusal at `AUTH` or `MAIL`, are transient.
+
+**Alternative.** Provider trouble as `Rejected`, which is how the status code reads: a 403 is permanent for
+that request. Or a failover chain that also advances on `Rejected`.
+
+**What goes wrong without it.** With provider trouble reported as `Rejected`, a revoked API key on the
+primary provider dead-letters every email permanently, one at a time, while a healthy standby sits idle: a
+failover chain can only route around what is reported as transient. With a chain that also advanced on
+`Rejected`, a malformed message is sent to every provider in turn, and a more lenient one delivering what the
+first refused hides the defect in the message.
+
+Verified: `TestSMTPClassifiesTheRelaysAnswers`, `TestResendClassifiesTheAnswers`,
+`TestCompositeWalksTheChain`.
 
 ---
 

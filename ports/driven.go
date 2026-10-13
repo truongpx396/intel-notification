@@ -287,6 +287,15 @@ type Channel interface {
 	// error; a returned error means an infrastructure fault and is treated as
 	// Retry.
 	//
+	// Rejected is a verdict on the message: any provider would refuse it. A
+	// provider's own trouble, a revoked key, an unverified domain, a refused
+	// sender, is Retry, so a failover channel can route around it and an operator
+	// sees the last error when the ceiling is reached (D41). A channel with no
+	// address (Capabilities().NeedsAddress false) never reports Suppressed: there is
+	// no address to be dead, and the engine would suppress the empty address hash
+	// for the realm (D13). A Rejected carries a Detail, which is the dead letter's
+	// last error.
+	//
 	// It does not check suppressions (the dispatcher does, for every channel: D13)
 	// and does not retry internally (the dispatcher owns backoff: retrying inside
 	// a channel defeats the jitter that prevents a thundering herd: D10).

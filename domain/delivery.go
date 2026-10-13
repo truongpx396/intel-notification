@@ -29,7 +29,7 @@ const (
 	Delivered  Outcome = iota + 1
 	Retry              // transient: the dispatcher backs off (D10)
 	Suppressed         // this address is dead: terminal; the engine records the suppression (D13)
-	Rejected           // permanent refusal unrelated to the address: terminal, dead-lettered (D12)
+	Rejected           // permanent refusal of the message, unrelated to the address: terminal, dead-lettered (D12, D41)
 )
 
 // DeliveryResult is a channel's report. A returned Go error means an
