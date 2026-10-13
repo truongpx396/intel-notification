@@ -582,7 +582,14 @@ type Maintenance interface {
 	// differs from the parent's, or any other permissive policy exists. The maintenance job (T038)
 	// raises the alarms from it.
 	CheckPartitions(ctx context.Context, at time.Time) (PartitionHealth, error)
-	// Still to come: RetirePartitions (T038), ReplayDeadLetter (T032).
+	// ReplayDeadLetter re-drives one dead letter, once (T032, D43): in ONE statement it records
+	// replayed_at and enqueues a fresh delivery from the queue row the dead letter kept, so a second
+	// call, and a concurrent one, enqueue nothing and return false. The fresh delivery starts over
+	// (attempts, lease) and is the same delivery: it keeps its bound address and its deadline, and
+	// drops its fallback chain. ErrUnknownDeadLetter for none in the realm; ErrNotReplayable for one
+	// the bus parked.
+	ReplayDeadLetter(ctx context.Context, realm Realm, deadLetterID string) (replayed bool, err error)
+	// Still to come: RetirePartitions (T038).
 }
 
 // Store is the persist and read path: implemented by adapters/driven/postgres (T015),
@@ -741,6 +748,32 @@ type Subscription interface {
 
 type Clock interface{ Now() time.Time }
 type IDSource interface{ New() string } // UUIDv7
+
+// Metrics counts what an operator alarms on (docs/operations.md): domain.MetricLeaseLost
+// ("notify.lease.lost", label channel) and domain.MetricDeadLetter ("notify.dlq.dead.count", labels
+// channel and reason). Labels are a small closed set, never a tenant or a recipient. nil ⇒ nothing is
+// counted.
+type Metrics interface {
+	Inc(name string, labels map[string]string)
+}
+
+// StepHook is called as the dispatcher reaches each of its nine steps, before the step's work. A test
+// holds a worker at a step, or kills it there, with it (notifytest.Injector). nil in production.
+type StepHook interface {
+	Reach(ctx context.Context, step DispatchStep)
+}
+
+// Waker is told that work is due: the Notifier calls it after a Notify commits in a process that also
+// runs a dispatcher (D22), never for NotifyTx and never for a replay. It never blocks, and a missed
+// wake costs one poll, never a delivery. The Dispatcher implements it.
+type Waker interface{ Wake() }
+
+// WakeSource is the optional LISTEN end of D22: Listen returns a channel signalled after work was
+// committed elsewhere, coalesced, and closed when ctx ends or the connection is lost. It is a latency
+// optimisation: the dispatcher polls on if it fails. Used only with Config.ListenNotify.
+type WakeSource interface {
+	Listen(ctx context.Context) (<-chan struct{}, error)
+}
 ```
 
 ---
@@ -749,14 +782,19 @@ type IDSource interface{ New() string } // UUIDv7
 
 The algorithm every `Dispatcher` implements. Each numbered step names the outcome it can record.
 
-1. **Claim** a batch from a shard (`Queue.Claim`). Attempts are counted here (D19).
-2. **Expired?** `DeliverBefore` passed → `expired`.
+1. **Claim** a batch from a shard (`Queue.Claim`). Attempts are counted here (D19). Each claim of the
+   batch is then handled on its own, concurrently, so `ClaimLease` need only exceed one send. A claim whose
+   attempt count passes `MaxAttempts` is finished `max_attempts` at once, unsent: a delivery that kills its
+   worker on every attempt never reaches step 8 (D42).
+2. **Expired?** `DeliverBefore` passed, or reached → `expired`.
 3. **Load** the notification or the digest's members under the claim's scope (D17). Canceled →
    `canceled`. A digest whose members are all canceled → `canceled`.
 4. **Address.** If `NeedsAddress` and unbound: `AddressBook.Resolve`, drop addresses with a live
    suppression. None at all → `no_address`; none left after suppression → `suppressed`. One → bind in
    place and continue. Several → fan out; the claim is spent and each address is claimed on its own
-   (D25). If not `NeedsAddress`, the address is the identity (in-app).
+   (D25). An address already bound is checked against the suppressions again at every claim, since a
+   bounce can land while a delivery waits for its retry. If not `NeedsAddress`, the address is the identity
+   (in-app) and there is nothing to suppress.
 5. **Quota.** `QuotaCounter.Take`. Exhausted → under `drop_non_essential` for a non-essential,
    non-critical topic, `dropped_quota`; otherwise defer this row to the reset and move the tenant's
    due backlog on this channel with it (D24). Deferral returns the attempt.
@@ -769,7 +807,11 @@ The algorithm every `Dispatcher` implements. Each numbered step names the outcom
    then finish `suppressed`. `Rejected` → finish `rejected`. Every finish is
    `Queue.Finish(domain.NewFinish(outcome, …))`: the domain's `DispositionOf` decides whether it is a
    dead letter and whether the fallback chain continues, and the store writes all of it in one
-   statement (D37).
+   statement (D37). Every write that records an outcome is made on a context that outlives the worker's,
+   so a send in flight at shutdown is still recorded. A fault in a port the engine does not own (the
+   address book, the suppression store, the renderer, `Load`), a panic in a channel, and a channel not
+   registered on this worker are each `Retry`, never a verdict; a quota counter that cannot answer fails
+   open (D42).
 9. **Fenced?** Any write returning `ok=false` means the lease was lost: count
    `notify.lease.lost`, record nothing, move on. The row's current holder owns it.
 
@@ -933,7 +975,7 @@ the inbox, the preferences and the suppressions already have their integration s
 [`adapters/driven/postgres`](../../../adapters/driven/postgres/) — every transition, real concurrency
 for the claim, and a mutation check behind each guarantee ([D37](../design-decisions.md#d37)). The
 preference table is `notifytest.PreferenceStoreContract`, which the in-memory fake runs as well. The
-suites below are the ones still to be written, with their shape fixed now.
+suites below are the ones with their shape fixed here; those marked *Built* are written.
 
 ```go
 package notify_test
@@ -1024,6 +1066,14 @@ func NotifierContract(t *testing.T, env func(t *testing.T) Env) {
 }
 
 // DispatcherContract drives the dispatcher through every crash point.   //go:build integration
+// Built: notifytest.DispatcherContract, 70 cases on the Env's real queue and store, run by
+// app/notifier_integration_test.go and again, with a third channel registered, by the webhook
+// package. A crash at each of the nine steps, on a channel with an address and one without, is a
+// table; the cases above are the ones the sketch names, and it adds the ceiling for a delivery that
+// kills its worker, retry and backoff with the provider's floor, the dead-letter alarm for a
+// rejection and the ceiling and none for a suppressed or unaddressed ending, suppression on five
+// channel kinds, expiry, cancel in flight, quota deferral and drop, digests, rendering and a batch
+// sent concurrently.
 func DispatcherContract(t *testing.T, env func(t *testing.T) Env) {
 	t.Run("crash after claim, before send: re-driven after the lease lapses", ...)
 	t.Run("crash after send, before record: re-driven with the SAME Delivery.IdemKey", ...)
@@ -1381,6 +1431,10 @@ type Deps struct {
 	QuotaPolicies ports.QuotaPolicies // nil ⇒ an exhausted budget always defers
 	Stream       ports.StreamPublisher
 	PreCheck     ports.PreCheck // optional
+	Metrics      ports.Metrics    // nil ⇒ nothing is counted
+	Steps        ports.StepHook   // nil ⇒ the dispatcher's steps are not observed (a test's seam)
+	Waker        ports.Waker      // nil ⇒ the Notifier wakes no dispatcher; polling finds the work
+	Listener     ports.WakeSource // nil ⇒ polling alone; needed with Config.ListenNotify
 	Clock        ports.Clock    // default: system clock
 	IDs          ports.IDSource // default: UUIDv7
 }

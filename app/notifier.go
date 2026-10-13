@@ -24,6 +24,7 @@ type Notifier struct {
 	store   ports.Store
 	queue   ports.Queue
 	pre     ports.PreCheck // nil: every Notify takes the durable path
+	waker   ports.Waker    // nil: no dispatcher in this process to wake
 }
 
 var _ ports.Notifier = (*Notifier)(nil)
@@ -49,7 +50,7 @@ func NewNotifier(cfg notify.Config, d Deps) (*Notifier, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Notifier{cfg: cfg.WithDefaults(), planner: planner, store: d.Store, queue: d.Queue, pre: d.PreCheck}, nil
+	return &Notifier{cfg: cfg.WithDefaults(), planner: planner, store: d.Store, queue: d.Queue, pre: d.PreCheck, waker: d.Waker}, nil
 }
 
 // Notify implements ports.Notifier. It persists and enqueues one notification in
@@ -83,6 +84,7 @@ func (n *Notifier) NotifyTx(ctx context.Context, tx ports.Tx, nt domain.Notifica
 // A first apply by Notify is remembered once the store has committed. A replay is
 // not: the receipt does not say how old the guard row is, and an entry that
 // outlived it would answer "replay" past the window. A fault in writing is ignored.
+// The same commit wakes the dispatcher of this process, if it has one.
 func (n *Notifier) notify(ctx context.Context, tx ports.Tx, nt domain.Notification) (domain.Receipt, error) {
 	if err := nt.Validate(); err != nil {
 		return domain.Receipt{}, fmt.Errorf("notify: %w", err)
@@ -105,8 +107,16 @@ func (n *Notifier) notify(ctx context.Context, tx ports.Tx, nt domain.Notificati
 		return domain.Receipt{}, fmt.Errorf("notify: %w", err)
 	}
 
-	if n.pre != nil && tx == nil && receipt.Applied {
-		_ = n.pre.Remember(ctx, key, receipt.NotificationID, n.cfg.PreCheckTTL)
+	if tx == nil && receipt.Applied {
+		if n.pre != nil {
+			_ = n.pre.Remember(ctx, key, receipt.NotificationID, n.cfg.PreCheckTTL)
+		}
+		// A dispatcher in this process looks at once instead of at its next poll
+		// (D22). Only for a commit made here: a NotifyTx commits when the host says,
+		// and a dispatcher woken before that would find nothing and go back to sleep.
+		if n.waker != nil {
+			n.waker.Wake()
+		}
 	}
 	return receipt, nil
 }

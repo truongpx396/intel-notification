@@ -26,6 +26,12 @@ var Epoch = time.Date(2031, 3, 1, 12, 0, 0, 0, time.UTC)
 // Realm is the realm Env's fixtures use.
 const Realm domain.Realm = "aisat"
 
+// Jitter is the value the Env's dispatcher draws for every backoff, so a case can
+// compute the retry time it expects with [domain.Backoff] and read it back from the
+// queue row. A fixed draw is one point in the full-jitter window (D10); the spread
+// itself is domain.Backoff's own test.
+const Jitter = 0.5
+
 // Option changes what Main starts and what NewEnv builds.
 type Option func(*options)
 
@@ -90,9 +96,10 @@ func prepare(ctx context.Context, owner *pgxpool.Pool, now time.Time) error {
 // partition a row lands in. The queue's due times stay the database's now(): a
 // claim is decided inside one statement, which the fake clock cannot reach.
 //
-// The Notifier is the real one, over the Env's own pieces: the real Store, the
-// fakes, the fake clock and a pre-check, in memory or, under WithRedis, in Redis.
-// The Dispatcher arrives with the task that builds it, as one more field.
+// The Notifier and the Dispatcher are the real ones, over the Env's own pieces: the
+// real Store and Queue, the fakes, the fake clock, and for the Notifier a pre-check,
+// in memory or, under WithRedis, in Redis. The Dispatcher draws a fixed [Jitter],
+// reports to Metrics, and reaches its steps through Faults.
 type Env struct {
 	DB *pgtest.DB
 
@@ -117,6 +124,12 @@ type Env struct {
 	Maintenance ports.Maintenance
 	// Inbox is the real recipient read and write path, on the Env's clock.
 	Inbox ports.InboxStore
+	// Suppressions is the real suppression store, on the Env's clock: a suppression
+	// ends at an instant the fake clock decides.
+	Suppressions ports.SuppressionStore
+	// Metrics counts what the Dispatcher reports (domain.MetricLeaseLost and
+	// domain.MetricDeadLetter).
+	Metrics *Metrics
 	// Store is the real one behind a FaultStore, so a test can fail the next
 	// commit (FailNextCommit) and a Notify still goes through the port's own seam.
 	Store *FaultStore
@@ -132,6 +145,9 @@ type Env struct {
 
 	// Notifier is the use-case under test.
 	Notifier ports.Notifier
+	// Dispatcher drains the Env's queue. A case drives it one batch at a time with
+	// Drain, or runs it with Run.
+	Dispatcher *app.Dispatcher
 }
 
 // NewEnv returns an Env over a database cloned for tb alone, which is dropped when
@@ -143,21 +159,23 @@ func NewEnv(tb testing.TB, opts ...Option) *Env {
 	clock := NewClock(Epoch)
 	store := postgres.New(db.Owner, postgres.WithClock(clock))
 	e := &Env{
-		DB:          db,
-		Config:      notify.Config{Realm: Realm, StoreDSN: "notifytest", RedisURL: "notifytest"},
-		Clock:       clock,
-		Faults:      NewInjector(),
-		Probe:       NewProbe(),
-		Channels:    NewRegistry(),
-		Topics:      NewTopics(),
-		Prefs:       NewPreferences(),
-		Quotas:      NewQuotaCounter(),
-		Addresses:   NewAddressBook(),
-		Templates:   NewTemplates("en"),
-		Queue:       store,
-		Digests:     store,
-		Maintenance: store,
-		Inbox:       postgres.NewInbox(db.Owner, postgres.WithClock(clock)),
+		DB:           db,
+		Config:       notify.Config{Realm: Realm, StoreDSN: "notifytest", RedisURL: "notifytest"},
+		Clock:        clock,
+		Faults:       NewInjector(),
+		Probe:        NewProbe(),
+		Channels:     NewRegistry(),
+		Topics:       NewTopics(),
+		Prefs:        NewPreferences(),
+		Quotas:       NewQuotaCounter(),
+		Addresses:    NewAddressBook(),
+		Templates:    NewTemplates("en"),
+		Queue:        store,
+		Digests:      store,
+		Maintenance:  store,
+		Inbox:        postgres.NewInbox(db.Owner, postgres.WithClock(clock)),
+		Suppressions: postgres.NewSuppressions(db.Owner, postgres.WithClock(clock)),
+		Metrics:      NewMetrics(),
 		Store: NewFaultStore(store, func(ctx context.Context) (Transaction, error) {
 			tx, err := db.Owner.Begin(ctx)
 			if err != nil {
@@ -187,7 +205,31 @@ func NewEnv(tb testing.TB, opts ...Option) *Env {
 		tb.Fatalf("notifytest: build the Notifier: %v", err)
 	}
 	e.Notifier = notifier
+	dispatcher, err := app.NewDispatcher(e.Config, e.DispatcherDeps(), app.WithRand(func() float64 { return Jitter }))
+	if err != nil {
+		tb.Fatalf("notifytest: build the Dispatcher: %v", err)
+	}
+	e.Dispatcher = dispatcher
 	return e
+}
+
+// DispatcherDeps is what the Env's Dispatcher is built from, so a case can build
+// another over the same pieces with one port wrapped to fail.
+func (e *Env) DispatcherDeps() app.Deps {
+	return app.Deps{
+		Channels:      e.Channels,
+		Topics:        e.Topics,
+		Renderer:      e.Templates,
+		Addresses:     e.Addresses,
+		Store:         e.Store,
+		Queue:         e.Queue,
+		Suppressions:  e.Suppressions,
+		Quotas:        e.Quotas,
+		QuotaPolicies: e.Quotas,
+		Metrics:       e.Metrics,
+		Steps:         e.Faults,
+		Clock:         e.Clock,
+	}
 }
 
 // AddChannel registers a fake channel of the given kind, reporting to the Env's

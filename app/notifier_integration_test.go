@@ -142,3 +142,13 @@ func TestNotifierReplayFromThePreCheckOpensNoTransaction(t *testing.T) {
 		t.Fatalf("the store ran %d transactions for one notification and three replays the pre-check knew, want 1", got)
 	}
 }
+
+// DispatcherContract (T033) against the in-process Dispatcher, over the Env's real
+// queue and store.
+func TestDispatcherContract(t *testing.T) {
+	t.Parallel()
+	notifytest.DispatcherContract(t, func(t *testing.T) *notifytest.Env {
+		t.Helper()
+		return notifytest.NewEnv(t)
+	})
+}

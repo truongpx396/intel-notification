@@ -26,6 +26,10 @@ type ChannelUnderTest struct {
 	// ProviderCalls is how many provider calls one failed delivery may make: 1 for
 	// a channel, one per member for a composite. Zero means 1.
 	ProviderCalls int
+	// Address is the address value the n-th delivery is made to, for a channel whose
+	// addresses are not mailboxes (a webhook's is a URL). Nil means a<n>@example.com.
+	// It must give a different value for each n.
+	Address func(n int) string
 }
 
 // ChannelFactory returns a fresh channel for t alone.
@@ -78,10 +82,17 @@ func contractDelivery(u ChannelUnderTest, n int) domain.Delivery {
 		NotificationID: fmt.Sprintf("n%d", n),
 		Topic:          "ingestion_complete",
 		Channel:        kind,
-		Address:        domain.Address{Channel: kind, Value: fmt.Sprintf("a%d@example.com", n)},
+		Address:        domain.Address{Channel: kind, Value: u.addressFor(n)},
 		Content:        domain.RenderedContent{Subject: "Done", Body: "Your upload finished."},
 		Attempt:        1,
 	}
+}
+
+func (u ChannelUnderTest) addressFor(n int) string {
+	if u.Address != nil {
+		return u.Address(n)
+	}
+	return fmt.Sprintf("a%d@example.com", n)
 }
 
 func (u ChannelUnderTest) key(d domain.Delivery) string {

@@ -108,6 +108,11 @@ func (p *recPreCheck) Remember(_ context.Context, key, id string, ttl time.Durat
 	return p.rememberErr
 }
 
+// recWaker records Wake into the same ordered log as the ports.
+type recWaker struct{ ev *events }
+
+func (w recWaker) Wake() { w.ev.add("wake") }
+
 // noteFx is one case's Notifier and its stand-ins.
 type noteFx struct {
 	t      *testing.T
@@ -119,6 +124,7 @@ type noteFx struct {
 	queue  *recQueue
 	pre    *recPreCheck
 	noPre  bool
+	waker  ports.Waker // nil: the Notifier wakes no dispatcher
 }
 
 func newNoteFx(t *testing.T) *noteFx {
@@ -153,6 +159,7 @@ func (f *noteFx) build() *app.Notifier {
 	if !f.noPre {
 		d.PreCheck = f.pre
 	}
+	d.Waker = f.waker
 	n, err := app.NewNotifier(f.cfg, d)
 	if err != nil {
 		f.t.Fatalf("NewNotifier: %v", err)
@@ -550,5 +557,66 @@ func TestBroadcastIsNotBuiltYet(t *testing.T) {
 	f := newNoteFx(t)
 	if _, err := f.build().Broadcast(t.Context(), domain.BroadcastRequest{}); err == nil {
 		t.Fatal("Broadcast succeeded before it was built")
+	}
+}
+
+// ------------------------------------------------------------------ waking --
+
+// A Notify that commits in a process that runs a dispatcher wakes it, once, after the
+// commit and after the pre-check is written, so a producer's notification does not
+// wait for the next poll (D22). It is woken for nothing else: not for a replay or a
+// failed commit, which left no work; not for a pre-check hit, which did nothing; and
+// not for NotifyTx, whose commit is the host's and may not have happened yet, so a
+// dispatcher woken then would look, find nothing and go back to sleep (D28). The first
+// row is the control, so a Notifier that never wakes cannot pass the rest.
+func TestNotifyWakesTheDispatcherOnlyAfterAFirstApply(t *testing.T) {
+	t.Parallel()
+	notify := func(t *testing.T, f *noteFx, n *app.Notifier) {
+		t.Helper()
+		_, _ = n.Notify(t.Context(), f.note("k1"))
+	}
+	cases := []struct {
+		name  string
+		setup func(f *noteFx)
+		do    func(t *testing.T, f *noteFx, n *app.Notifier)
+		want  []string
+	}{
+		{"a first apply by Notify", func(*noteFx) {}, notify, []string{"seen", "persist", "remember", "wake"}},
+		{"a first apply with no pre-check", func(f *noteFx) { f.noPre = true }, notify, []string{"persist", "wake"}},
+		{"a replay the store reports", func(f *noteFx) { f.store.receipt.Applied = false }, notify, []string{"seen", "persist"}},
+		{"a store that fails", func(f *noteFx) { f.store.err = errors.New("commit failed") }, notify, []string{"seen", "persist"}},
+		{"a pre-check hit", func(f *noteFx) { f.pre.hitID = "n-first" }, notify, []string{"seen"}},
+		{"NotifyTx inside the host's transaction", func(*noteFx) {},
+			func(t *testing.T, f *noteFx, n *app.Notifier) {
+				t.Helper()
+				if r, err := n.NotifyTx(t.Context(), struct{}{}, f.note("k1")); err != nil || !r.Applied {
+					t.Errorf("control: NotifyTx = %+v, %v", r, err)
+				}
+			}, []string{"seen", "persist"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newNoteFx(t)
+			f.waker = recWaker{ev: f.ev}
+			tc.setup(f)
+			tc.do(t, f, f.build())
+			if got := f.ev.all(); !slices.Equal(got, tc.want) {
+				t.Fatalf("events %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Without a dispatcher to wake the Notifier works as it did: the waker is optional.
+func TestNotifyWithNoWakerIsUnchanged(t *testing.T) {
+	t.Parallel()
+	f := newNoteFx(t)
+	r, err := f.build().Notify(t.Context(), f.note("k1"))
+	if err != nil || !r.Applied {
+		t.Fatalf("Notify = %+v, %v", r, err)
+	}
+	if got := f.ev.all(); !slices.Equal(got, []string{"seen", "persist", "remember"}) {
+		t.Fatalf("events %v, want the pre-check path alone", got)
 	}
 }

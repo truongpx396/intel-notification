@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -401,5 +403,38 @@ func TestChannelContractPassesAConformingChannel(t *testing.T) {
 			}
 			ChannelContract(t, newChannel)
 		})
+	}
+}
+
+// A channel whose addresses are not mailboxes says what they are, and every case
+// makes its deliveries to those: a webhook's address is a URL, and a contract that
+// sent it a@example.com would fail a channel that is right.
+func TestChannelContractUsesTheChannelsOwnAddresses(t *testing.T) {
+	t.Parallel()
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	got := failures(t, func(*testing.T) ChannelUnderTest {
+		probe := NewProbe() // each case gets a channel of its own
+		inner := NewChannel("x", domain.ChannelCapabilities{NeedsAddress: true, Dedup: domain.DedupNone}, probe)
+		record := fnChannel{caps: inner.Capabilities(), deliver: func(ctx context.Context, d domain.Delivery) (domain.DeliveryResult, error) {
+			mu.Lock()
+			seen = append(seen, d.Address.Value)
+			mu.Unlock()
+			return inner.Deliver(ctx, d)
+		}}
+		return ChannelUnderTest{Channel: record, Probe: probe, Address: func(n int) string { return fmt.Sprintf("https://hooks.example/%d", n) }}
+	})
+	if len(got) != 0 {
+		t.Fatalf("a conforming channel failed %v", got)
+	}
+	if len(seen) == 0 {
+		t.Fatal("the channel was never asked")
+	}
+	for _, v := range seen {
+		if !strings.HasPrefix(v, "https://hooks.example/") {
+			t.Fatalf("a delivery was made to %q, want the channel's own addresses", v)
+		}
 	}
 }

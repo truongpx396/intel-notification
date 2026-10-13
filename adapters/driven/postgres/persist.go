@@ -76,6 +76,10 @@ SELECT gen_random_uuid(), $1::uuid, $2::timestamptz, $3::text, $4::text, $5::tex
        $7::text, $8::text, d.channel, '', 'dropped_quota', 0, d.reason, $9::timestamptz
   FROM jsonb_to_recordset($10::jsonb) AS d(channel text, reason text)`
 
+// announceSQL tells every listener on the channel that work was committed. The payload
+// is empty: a wake says "look", and carries nothing to count.
+const announceSQL = `SELECT pg_notify($1, '')`
+
 type queuedDelivery struct {
 	Channel   string     `json:"channel"`
 	Fallback  []string   `json:"fallback"`
@@ -264,6 +268,13 @@ func (s *Store) persistApplied(ctx context.Context, tx pgx.Tx, id domain.Identit
 		args = append(args, string(n.Topic), string(n.Priority), int16(plan.Shard), deliverBefore, rows)
 		if _, err := tx.Exec(ctx, persistQueueSQL, args...); err != nil {
 			return domain.Receipt{}, fmt.Errorf("persist: queue rows: %w", err)
+		}
+		if s.notify {
+			// Delivered to a listener at the commit, and discarded with a rollback, so
+			// it can never announce work that is not there (D22, D28).
+			if _, err := tx.Exec(ctx, announceSQL, dispatchChannel); err != nil {
+				return domain.Receipt{}, fmt.Errorf("persist: announce the work: %w", err)
+			}
 		}
 	}
 	if len(dropped) > 0 {

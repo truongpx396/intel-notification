@@ -549,7 +549,7 @@ rule above.
 
 ## Stage 6 — Dispatcher
 
-- [ ] **T033** *red* **Contract test** `DispatcherContract`: every crash point, poison terminates
+- [x] **T033** *red* **Contract test** `DispatcherContract`: every crash point, poison terminates
       including worker crashes, fan-out retries per address, expiry, fallback, fencing (NS-003, NS-006,
       NR-007). Write each named case from the contract, driving each crash with the T013a hook at the
       step where it happens (after claim before send, after send before record, and the rest of the
@@ -558,28 +558,105 @@ rule above.
       that reaches the attempt ceiling, and one refused permanently, is parked as a dead letter with its
       reason and last error and raises `notify.dlq.dead.count`, while a `suppressed` or `no_address`
       ending raises nothing (NR-007)
-- [ ] **T030a** *red* `app/dispatcher.go`'s loop, for what T033 does not reach, as unit tests on the
+      *Built as `notifytest.DispatcherContract`, in the kit so the transport suites reuse it: 70 cases on the
+      Env's real queue and store. Written against `app.Dispatcher` returning `errors.New("not implemented")`,
+      with the seams it needs already in (`ports.Metrics`, `StepHook`, `Waker`, `WakeSource`; `Env`'s
+      `Suppressions`, `Metrics` and `Dispatcher`): the first 55 cases all failed on their first assertion
+      (`Drain: not implemented`, and for the crash table "the worker did not die at <step>"), none on a
+      fixture. The nine crash points are a table over a channel with an address and one without, because
+      in-app has nothing to do at the address step and its only write is the last. "Poison terminates including
+      worker crashes" is two cases and a decision ([D42](design-decisions.md#d42)): a delivery that kills its
+      worker on every attempt is finished unsent at the ceiling, which needs the ceiling enforced where a
+      crash is seen and not where a failure is recorded, and a channel that panics is a retry. A stale worker
+      is shown twice, with a delivery and with a refusal, because the second is the one that would raise the
+      alarm for a dead letter that was never written. The kit gained `Metrics`, `Scripted` (a channel that
+      answers from a script and remembers what it was asked), `Normalizing`, and
+      `ChannelUnderTest.Address`, each with its own table test. The contract passed on its first run
+      against the implementation, so its worth is shown by mutation and not by that: 10 rows are its own (each
+      of the nine steps unreached, and the record step reached before the send) and most of T030's and T031's
+      are killed by it. The first pass left three survivors, none of them a dispatcher bug: nothing
+      observed what the renderer was asked for a digest, and no channel in the suite had a normalizer of its
+      own (`TestADigestIsRenderedFromItsMembers`, "address equality is the channel's"). A real `Run` over 24
+      recipients in several shards, stopped in the middle of a send, is
+      `TestRunDrainsEveryShardAndRecordsWhatWasInFlightAtShutdown`.*
+- [x] **T030a** *red* `app/dispatcher.go`'s loop, for what T033 does not reach, as unit tests on the
       fake clock with no sleeps ([D22](design-decisions.md#d22)): polling backs off to `PollInterval`
       when idle and resets on work; an in-process `Notify` wakes an idle dispatcher at once;
       `LISTEN/NOTIFY` is off by default. Written against a `Dispatcher` with no loop, so each fails on
       its assertion
-- [ ] **T030** *green* `app/dispatcher.go`: the nine steps in the contract, adaptive polling, in-memory
+      *Built as `app/dispatcher_test.go` on `testing/synctest`: waits are virtual, so a test says when each
+      pass began to the millisecond and nothing sleeps. The queue behind it is a recording stand-in in the test
+      file, which claims nothing about leases. The wait is the floor (10ms) after work, none after a full batch,
+      and after an idle pass a wait that doubles to `PollInterval`; a wake or a signal from the listener ends it
+      and starts the doubling again, and a wake sent while a pass runs is kept. The in-process wakeup is
+      `Deps.Waker`, which the `Notifier` calls after a commit by `Notify`: not for `NotifyTx` (the host's
+      commit may not have happened, and a dispatcher woken then finds nothing and sleeps), not for a replay or a
+      failed commit, not for a pre-check hit (`TestNotifyWakesTheDispatcherOnlyAfterAFirstApply`).
+      Four of the tests pass against a stub by construction (`LISTEN/NOTIFY` off by default, `Wake` never
+      blocking, `Drain` refusing an impossible batch, a `Notifier` with no waker); the mutations that turn
+      `LISTEN` on, make `Wake` block, accept the batch and wake for `NotifyTx` are what show them able to fail.
+      23 rows in the [ledger](../../docs/mutations.md), none surviving.*
+- [x] **T030** *green* `app/dispatcher.go`: the nine steps in the contract, adaptive polling, in-memory
       wakeup, optional `LISTEN/NOTIFY` ([D22](design-decisions.md#d22)). Make T033 and then T030a pass
       one case at a time, from the plain delivery outwards.
       **Mutate:** count the attempt at finish instead of claim; skip the lease token on a write; retry
       without the `RetryAfter` floor; skip the alarm on a permanent refusal; raise it for a `suppressed`
       ending; never reset the poll interval on work; enable `LISTEN/NOTIFY` by default
-- [ ] **T031** *red → green* Suppression check before every delivery; channel-reported suppressions
+      *Built as `app.Dispatcher` (`Run`, `Drain`, `Wake`), `app.WithRand` and `app.WithErrorHandler`, with
+      `Deps` gaining `Metrics`, `Steps`, `Waker` and `Listener`, and `ports.Metrics`, `StepHook`, `Waker` and
+      `WakeSource`. The contract was silent on six things and the choices are [D42](design-decisions.md#d42):
+      the ceiling is enforced at claim, so a claim beyond `MaxAttempts` is finished unsent; every fault in a
+      port the engine does not own is a retry, a panic in a channel, renderer or address book included, and a
+      quota counter that cannot answer fails open; an outcome is recorded on a context that outlives the
+      worker; a channel-reported suppression is written before the delivery is finished; a bound address is
+      checked against the suppressions at every claim; and a claimed batch is handled concurrently, because its
+      lease runs from the claim and 100 sends in turn outlive `ClaimLease` although no one of them does.
+      `LISTEN/NOTIFY` is `postgres.WithNotify` on the store (a `pg_notify` in the transaction that writes the
+      queue rows, so a rollback announces nothing) and `postgres.Listener` on a connection of its own, taken out
+      of the pool and closed when it ends; it is a latency optimisation, and a dispatcher whose listener fails
+      polls on (`TestListenNotifyGetsAnIdleDispatcherClaimingAtOnce` puts the next poll 2.5 s away and sees the
+      delivery inside 1.5 s). Of T030's "Mutate" list, "count the attempt at finish instead of claim" has no
+      counterpart in the dispatcher, since the queue counts at claim and that is T016's row; its counterpart
+      here is the ceiling check removed. The others each have a row. The tests for what a port's fault becomes
+      (`TestAFaultingPortIsARetryAndNeverALostDelivery`, nine ports) and for `Run` were written after the
+      dispatcher, because they pin choices the contract does not make; they stand on their mutations. 75 rows,
+      three of which survived their first run (the gaps named under T033), none now.*
+- [x] **T031** *red → green* Suppression check before every delivery; channel-reported suppressions
       recorded with expiry (NR-006, [D13](design-decisions.md#d13)).
       **Red first:** a live suppression means the channel is never called, on every channel kind, and the
       outcome is `suppressed`; a `Suppressed` result writes the suppression with `SuppressFor` as its
       expiry and then finishes; an unresolvable address ends `no_address`, distinct from `suppressed`.
       **Mutate:** check suppressions only for email; write the suppression after the finish
-- [ ] **T032** *red → green* Dead-letter replay (`Admin.ReplayDeadLetter`), once per dead letter.
+      *Built in the dispatcher's steps 4 and 8 (`Dispatcher.address`, `Dispatcher.record`). Red was
+      witnessed by taking the feature out, not by a stub, because the dispatcher was written whole: with the
+      check turned into `return false`, cases of the contract failed on their assertions ("the slack
+      channel was asked to send to a suppressed address"), and with the write moved after the finish the case
+      "a worker that dies right after a Suppressed ending has already recorded the suppression" failed
+      ("a delivery that ended as suppressed left no suppression behind"). That case dies at the fence step,
+      which is reached after the last write, so the order of the two writes is observable without a hook between
+      them. Beyond the task's list: the check applies to a bound address again at every claim, so a bounce that
+      lands while a delivery waits for its retry is honoured; a suppression is per realm and per channel and
+      ends at its expiry; the channel defines address equality, so the key, the check and the record all use
+      its normalizer; a channel with no address that reports `Suppressed` writes nothing, since the empty
+      address hash would silence it for every recipient of the realm; and a reason that is not one of the six is
+      recorded as `invalid_address`, the least a channel reporting a dead address can have meant. 13 rows, two of
+      them survivors that were gaps in the suite (no channel had a normalizer), killed after.*
+- [x] **T032** *red → green* Dead-letter replay (`Admin.ReplayDeadLetter`), once per dead letter.
       **Red first:** a dead letter is inspectable with its reason and last error (NS-006); replaying it
       enqueues one delivery; a second replay, and two concurrent replays, enqueue nothing more.
       **Mutate:** drop the replay guard
-- [ ] **T033a** *red → green* NS-008 demonstration: add a third channel (`channel/webhook`, as laid out
+      *Built as `Maintenance.ReplayDeadLetter` (`postgres/deadletters.go`, one statement with no `ON CONFLICT`)
+      and `app.Admin`, which also holds `Erase` and `SetTenantPreference` as methods that say which task builds
+      them (T040, T044), because a nil would tell an operator that a recipient was erased. The port gained the
+      method and two sentinels, `ErrUnknownDeadLetter` (none, another realm's, or not an id: one answer, so
+      an id cannot be probed across products) and `ErrNotReplayable` (a dead letter the bus parked). The
+      choices are [D43](design-decisions.md#d43): the fresh delivery starts over but is the same delivery, with
+      its bound address and its deadline, and no fallback chain. Eight replayers on one dead letter enqueue
+      one delivery. "Inspectable" is asserted on the dead letter's row, which is what an operator's query reads
+      (`reason`, `last_error`, `channel`, `attempts`); the list endpoint that reads it is T044's. Written against
+      a `ReplayDeadLetter` that returned "not implemented": 10 of the 11 tests failed on their first assertion
+      and the eleventh is the parent of the refusals table. 20 rows.*
+- [x] **T033a** *red → green* NS-008 demonstration: add a third channel (`channel/webhook`, as laid out
       in the plan) with no diff to fan-out, persistence or preferences.
       **Red first:** register the channel in the `Env` of `NotifierContract` and `DispatcherContract` with
       one line, and run both suites unchanged; they fail until the channel exists and pass without a change
@@ -588,6 +665,28 @@ rule above.
       **Mutate:** import `channel/webhook` from `app/`; `make arch-lint` must go red. Branching on the
       `webhook` kind string inside `app/` compiles and passes every suite, which is why the diff stat is
       the evidence and not only the suites
+      *Built as `channel/webhook`: a signed HTTP POST to the address's URL, at-least-once by declaration
+      (a receiver can dedupe on the `Idempotency-Key` it is sent), RichContent, addressed by URL. The address is
+      a tenant's, so it is hostile input ([D44](design-decisions.md#d44)): https only, never a connection to a
+      private, loopback, link-local, carrier-grade-NAT or reserved address (checked at the connection, after
+      the name resolves), no redirect, no proxy, no credentials in the URL, and nothing it reports carries the
+      URL. A 410 is a dead address for good and a 404 or a redirect a day's cooldown; a 401 or 403 is the
+      customer's credential trouble and a retry ([D41](design-decisions.md#d41)); a 429 or 5xx is a retry
+      floored by `Retry-After`; another 4xx is a refusal of the message. The registration is one line,
+      `e.Channels.Register(wh)`, in `webhook_integration_test.go`, which runs `NotifierContract` and
+      `DispatcherContract` unchanged with the channel registered and a topic that fans out on it to the end.
+      **The evidence for NS-008:** the channel is the new files of `adapters/driven/channel/webhook/`, and
+      this task changed nothing in `app/`, `adapters/driven/postgres/` or preferences. The one existing file it
+      touched is the kit's `ChannelContract`, which made every delivery to `a<n>@example.com`; a channel whose
+      address is a URL needed to say what its addresses look like (`ChannelUnderTest.Address`). `make arch-lint`
+      goes red when `app/` imports the channel ("Component app shouldn't depend on ...webhook"), and a branch
+      on the `webhook` string inside `app/` survives every suite, as the task said it would: it is the one
+      mutation here a test cannot kill, and the diff stat is what holds it. **The red of "they fail until the
+      channel exists" would have been a missing package, which is a compile error and not a red;** the witnessed
+      red is `ChannelContract` and the channel's tests against a stub whose `Deliver` returned "not
+      implemented" (85 failures on assertions). The end-to-end tests were written after the channel and stand
+      on their mutations. 50 rows, three survivors, all closed: two test gaps (an IPv4-mapped address's
+      prefixes, `Scripted`'s copies) and one equivalent mutant.*
 
 ## Stage 7 — Digest, quotas, fairness
 
@@ -778,12 +877,12 @@ that lists no red task has no test scheduled.
 |---|---|---|
 | NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024 (done), T028 (done), T047, T047a |
 | NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024 (done), T029 (done) |
-| NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020 (done), T033 |
+| NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020 (done), T033 (done) |
 | NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
 | NS-005 digest burst | burst test | T035 |
-| NS-006 poison terminates | `DispatcherContract` (worker panic, attempt ceiling); dead-letter inspect and replay | T033, T032 |
+| NS-006 poison terminates | `DispatcherContract` (worker panic, attempt ceiling); dead-letter inspect and replay | T033 (done), T032 (done) |
 | NS-007 tenant fairness | noisy-neighbour test in dispatcher passes; the load test's fairness row in wall time | T037, T055 |
-| NS-008 a channel is one file and one line | third-channel demonstration | T033a |
+| NS-008 a channel is one file and one line | third-channel demonstration | T033a (done) |
 | NS-009 builds with no host | no-host CI job | T054 (done) |
 | NS-010 capacity | load-test thresholds | T055 |
 | NS-011 non-Go producer | producer scenario against the service | T051 |
@@ -800,10 +899,10 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-001 durable record | schema tests; the record exists with every channel disabled | T005 (done), T021 (done), T024 (done) |
 | NR-002 idempotency key and window | `StoreContract` and `NotifierContract` replay cases; `Config.Validate` window floor; `IdemKey` bounds | T009 (done), T014 (done), T020 (done), T022a (done), T024 (done) |
 | NR-003 one transaction | `StoreContract` failure after each statement; `NotifyTx` rollback | T020 (done), T024 (done) |
-| NR-004 claim, lease, fence; pre-check after commit | the queue's integration suite; `DispatcherContract` crash points; pre-check tests | T016 (done), T023 (done), T022a (done), T024 (done), T033 |
+| NR-004 claim, lease, fence; pre-check after commit | the queue's integration suite; `DispatcherContract` crash points; pre-check tests | T016 (done), T023 (done), T022a (done), T024 (done), T033 (done) |
 | NR-005 channel idempotency at its declared level | frozen delivery-key vector; `ChannelContract`; per-channel tests | T008 (done), T025 (done), T026 (done), T027 (done), T029 (done) |
-| NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031, T033 |
-| NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032, T033 |
+| NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031 (done), T033 (done) |
+| NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032 (done), T033 (done) |
 | NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T028 (done), T047, T047a |
 | NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case; realm bindings | T009 (done), T022a (done), T024 (done), T049 |
 | NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 (done) |
@@ -812,7 +911,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021 (done), T024 (done) |
 | NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021 (done), T034a, T035 |
 | NR-015 unsubscribe | email golden files; the token's vector and tamper table; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T026a (done), T044, T047a |
-| NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a, T053 (done) |
+| NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a (done), T053 (done) |
 | NR-017 a topic is a registration | topics integration table, no migration | T048 |
 | NR-018 re-anchoring identity is a host binding | structural: `Identity` is opaque strings with frozen vectors; `domain` imports nothing | T007 (done), T053 (done) |
 | NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a (done), T026 (done), T048 |
@@ -824,10 +923,10 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
 | NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |
 | NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020 (done), T022a (done), T024 (done) |
-| NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033, T048 |
-| NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021 (done), T024 (done), T033 |
+| NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033 (done), T048 |
+| NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021 (done), T024 (done), T033 (done) |
 | NR-030 cancel | `NotifierContract` cancel cases; the queue's `Cancel` | T016 (done), T022a (done), T024 (done) |
-| NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021 (done), T033 |
+| NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021 (done), T033 (done) |
 | NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020 (done), T022a (done), T024 (done), T047a |
 | NR-033 seen, read, archived | inbox table, independent flags | T017 (done) |
 | NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext | T019 (done), T040 |

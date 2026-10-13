@@ -13,10 +13,10 @@ settings, listed separately below.
 | `StoreDSN` | **none — required** | PostgreSQL connection string |
 | `RedisURL` | **none — required** | Pre-check, live stream, quota counters |
 | `Shards` | `16` | Claim contention hint. **Changeable online** — raising needs nothing; after lowering, run the rehome step (`Maintenance.RehomeShards`) ([D11](../specs/001-notification-core/design-decisions.md#d11)) |
-| `ClaimLease` | `5m` | How long a claim hides a delivery. Must exceed the slowest channel's send timeout, or a slow send is re-driven while in progress |
+| `ClaimLease` | `5m` | How long a claim hides a delivery. Must exceed the slowest channel's send timeout, or a slow send is re-driven while in progress. A claimed batch is handled concurrently, so it need not exceed a whole batch of sends ([D42](../specs/001-notification-core/design-decisions.md#d42)) |
 | `ClaimBatch` | `100` | Deliveries per claim |
 | `PollInterval` | `500ms` | The idle ceiling on claim latency. A full batch re-polls at once ([D22](../specs/001-notification-core/design-decisions.md#d22)) |
-| `ListenNotify` | `false` | Transactional `NOTIFY` wakeups. Lowers idle latency; serializes committing transactions behind a database-wide lock. Leave off above a few hundred notifications a second |
+| `ListenNotify` | `false` | Transactional `NOTIFY` wakeups. Lowers idle latency; serializes committing transactions behind a database-wide lock. Leave off above a few hundred notifications a second. On, the dispatcher needs a `Deps.Listener` (`postgres.NewListener`) on a direct connection to PostgreSQL, since `LISTEN` belongs to a session and a transaction-pooling proxy loses it, and the store that accepts notifications is built `postgres.WithNotify()`. It only ever lowers latency: if the listener fails the dispatcher polls on |
 | `MaxAttempts` | `5` | Claims per delivery before `max_attempts`. Counted at claim, so crashes count ([D19](../specs/001-notification-core/design-decisions.md#d19)) |
 | `BackoffBase` | `10s` | First retry interval |
 | `BackoffCeiling` | `1h` | Cap on the computed interval. Actual delay is uniform in `[0, computed]`, floored by a provider's `Retry-After` ([D10](../specs/001-notification-core/design-decisions.md#d10)) |
