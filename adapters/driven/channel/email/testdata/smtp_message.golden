@@ -1,0 +1,12 @@
+From: "Notifications" <notify@example.test>
+To: ada@example.com
+Subject: Upload finished
+Date: Mon, 12 Oct 2026 09:30:00 +0000
+Message-ID: <abc123@example.test>
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+List-Unsubscribe: <https://notify.example.test/u?t=1>
+List-Unsubscribe-Post: List-Unsubscribe=One-Click
+
+<p>Hello, Ada =3D welcome</p>

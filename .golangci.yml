@@ -5,9 +5,10 @@ version: "2"
 
 run:
   timeout: 5m
-  # Integration tests are code too; lint them.
+  # Integration tests are code too; lint them. So is the provider-sandbox suite.
   build-tags:
     - integration
+    - provider
 
 linters:
   default: none

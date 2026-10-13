@@ -1,0 +1,5 @@
+To: ada@example.com
+Subject: Your password was changed
+Idempotency-Key: 9602e45b0e75892a423e8c52157ced818019629335020fca1d8590a91864fc46
+
+<p>Your password was changed. If this was not you, contact support.</p>
