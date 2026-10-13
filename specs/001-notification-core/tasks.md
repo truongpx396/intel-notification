@@ -524,8 +524,11 @@ rule above.
       with a 410. Found by the tests: Go's base64 decoder skips CR and LF, so a token with a trailing
       newline verified; the alphabet is now checked first. The length cap is observable only by a token with
       a valid signature, so its test builds one. 27 mutations of the signer and 17 of the links are in the
-      [ledger](../../docs/mutations.md). Not testable: that the MAC comparison takes constant time. The
-      signing keys come from the host's wiring; where the service reads them from is T045's.*
+      [ledger](../../docs/mutations.md). The MAC comparison's *timing* is not measurable in a unit
+      test; its primitive is, and `TestUnsubscribeVerifyComparesTheMACInConstantTime` reads the source and
+      fails `bytes.Equal`, `bytes.Compare` and `==` on a MAC (four mutations survived every behaviour test
+      before it, and the checker is run against sources that get it right and wrong). The signing keys come
+      from the host's wiring; where the service reads them from is T045's.*
 - [x] **T027** [P] *red → green* `channel/failover`: ordered providers, weakest `Dedup` of its members
       ([D29](design-decisions.md#d29)).
       **Red first:** a table over every pairing of member `Dedup` levels showing the composite declares

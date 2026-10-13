@@ -786,7 +786,9 @@ plain HTTP is an explicit opt-in for development.
 
 Verified: `TestUnsubscribeTokenMatchesTheFrozenVector`, `TestUnsubscribeTokenRefusesAnyAlteredField`,
 `TestUnsubscribeTokenKeys`, `TestUnsubscribeTokenExpiry`, `TestUnsubscribeTokenRefusesWhatIsNotAToken`,
-`TestSignedLinksRefuseABaseThatCannotWork`.
+`TestSignedLinksRefuseABaseThatCannotWork`. That the comparison is constant-time is held by reading the
+source (`TestUnsubscribeVerifyComparesTheMACInConstantTime`): the timing cannot be measured in a unit test,
+but the primitive can be pinned.
 
 ## D35 — Personal data is erasable, and suppressions survive erasure · *review*
 

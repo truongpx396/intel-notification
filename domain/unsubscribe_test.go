@@ -6,6 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -407,4 +411,158 @@ func TestUnsubscribeVerifyRefusesAnOversizeSignedToken(t *testing.T) {
 	if _, err := newUnsubSigner(t).Verify(tok, unsubNow); !errors.Is(err, ErrInvalidUnsubscribeToken) {
 		t.Fatalf("Verify = %v, want ErrInvalidUnsubscribeToken: a signed token over the cap is still refused", err)
 	}
+}
+
+// How a MAC is compared is a security property no behaviour test can see: a comparison that exits at
+// the first differing byte returns the same answers as one that does not, and differs only in time. The
+// timing itself cannot be asserted in a unit test, where a 32-byte comparison differs by nanoseconds
+// and a measurement would be noise or blind. What can be asserted is the choice of primitive, and that
+// is what a careless edit changes. So the source is read: Verify must compare the presented signature
+// with the one it computes using hmac.Equal (or subtle.ConstantTimeCompare), and nothing in the file
+// may compare a MAC another way. The checker is itself held to sources that get it right and wrong.
+
+// macComparisonProblems reports what is wrong with how src compares a MAC in its Verify method.
+func macComparisonProblems(t *testing.T, src string) []string {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "src.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var problems []string
+	callee := func(c *ast.CallExpr) string {
+		if sel, ok := c.Fun.(*ast.SelectorExpr); ok {
+			if pkg, ok := sel.X.(*ast.Ident); ok {
+				return pkg.Name + "." + sel.Sel.Name
+			}
+		}
+		return ""
+	}
+	// touchesMAC: the expression is, or computes, a signature. The result of a constant-time compare, and
+	// a length (which is not secret), are not the signature, so a comparison of those is fine.
+	touchesMAC := func(e ast.Expr) bool {
+		found := false
+		ast.Inspect(e, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.CallExpr:
+				if id, ok := n.Fun.(*ast.Ident); ok && id.Name == "len" {
+					return false
+				}
+				if name := callee(n); name == "hmac.Equal" || name == "subtle.ConstantTimeCompare" {
+					return false
+				}
+			case *ast.Ident:
+				if n.Name == "sig" || n.Name == "mac" || n.Name == "expected" {
+					found = true
+				}
+			case *ast.SelectorExpr:
+				if n.Sel.Name == "mac" {
+					found = true
+				}
+			}
+			return !found
+		})
+		return found
+	}
+	forbidden := map[string]bool{"bytes.Equal": true, "bytes.Compare": true, "strings.Compare": true, "strings.EqualFold": true, "reflect.DeepEqual": true}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.CallExpr:
+			if name := callee(n); forbidden[name] {
+				problems = append(problems, name+" is not constant-time")
+			}
+		case *ast.BinaryExpr:
+			if (n.Op == token.EQL || n.Op == token.NEQ) && (touchesMAC(n.X) || touchesMAC(n.Y)) {
+				problems = append(problems, "a MAC is compared with "+n.Op.String())
+			}
+		}
+		return true
+	})
+	var verify *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv != nil && fn.Name.Name == "Verify" {
+			verify = fn
+		}
+	}
+	if verify == nil {
+		return append(problems, "there is no Verify method")
+	}
+	compared := false
+	ast.Inspect(verify, func(n ast.Node) bool {
+		c, ok := n.(*ast.CallExpr)
+		if !ok || len(c.Args) != 2 {
+			return true
+		}
+		if name := callee(c); name != "hmac.Equal" && name != "subtle.ConstantTimeCompare" {
+			return true
+		}
+		isSig := func(e ast.Expr) bool { id, ok := e.(*ast.Ident); return ok && id.Name == "sig" }
+		isComputed := func(e ast.Expr) bool {
+			call, ok := e.(*ast.CallExpr)
+			if !ok {
+				return false
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			return ok && sel.Sel.Name == "mac"
+		}
+		if (isSig(c.Args[0]) && isComputed(c.Args[1])) || (isComputed(c.Args[0]) && isSig(c.Args[1])) {
+			compared = true
+		}
+		return true
+	})
+	if !compared {
+		problems = append(problems, "Verify does not compare the presented signature with the computed one using hmac.Equal or subtle.ConstantTimeCompare")
+	}
+	return problems
+}
+
+func TestUnsubscribeVerifyComparesTheMACInConstantTime(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile("unsubscribe.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if problems := macComparisonProblems(t, string(src)); len(problems) != 0 {
+		t.Fatalf("unsubscribe.go compares a MAC in a way that is not constant-time: %q", problems)
+	}
+}
+
+// The checker has to fail what it is for, or the test above proves nothing.
+func TestMACComparisonCheckerTellsRightFromWrong(t *testing.T) {
+	t.Parallel()
+	wrap := func(body string) string {
+		return "package p\nimport (\"bytes\"; \"crypto/hmac\"; \"crypto/subtle\")\nvar _, _, _ = bytes.Equal, hmac.Equal, subtle.ConstantTimeCompare\n" +
+			"type S struct{}\nfunc (s *S) mac(k string, b []byte) []byte { return nil }\nfunc (s *S) Verify(tok string) bool {\n\tvar sig, body []byte\n" + body + "\n\treturn true\n}\n"
+	}
+	cases := []struct {
+		name string
+		src  string
+		bad  bool
+	}{
+		{"hmac.Equal against the computed MAC", wrap(`if !hmac.Equal(sig, s.mac("k", body)) { return false }`), false},
+		{"the arguments the other way round", wrap(`if !hmac.Equal(s.mac("k", body), sig) { return false }`), false},
+		{"subtle.ConstantTimeCompare against the computed MAC", wrap(`if subtle.ConstantTimeCompare(sig, s.mac("k", body)) != 1 { return false }`), false},
+		{"a length check before the comparison", wrap(`if len(sig) != 32 || !hmac.Equal(sig, s.mac("k", body)) { return false }`), false},
+		{"bytes.Equal", wrap(`if !bytes.Equal(sig, s.mac("k", body)) { return false }`), true},
+		{"string comparison", wrap(`if string(sig) != string(s.mac("k", body)) { return false }`), true},
+		{"== on a computed MAC", wrap(`expected := s.mac("k", body); if len(sig) == len(expected) && string(sig) == string(expected) { return false }`), true},
+		{"hmac.Equal that is not the MAC check", wrap(`if !hmac.Equal(body, body) { return false }`), true},
+		{"hmac.Equal against a signature it did not compute", wrap(`if !hmac.Equal(sig, body) { return false }`), true},
+		{"no comparison at all", wrap(`_ = sig`), true},
+		{"bytes.Compare alongside a correct check", wrap(`_ = bytes.Compare(sig, body); if !hmac.Equal(sig, s.mac("k", body)) { return false }`), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			problems := macComparisonProblems(t, tc.src)
+			if (len(problems) != 0) != tc.bad {
+				t.Fatalf("problems = %q, want bad=%v", problems, tc.bad)
+			}
+		})
+	}
+	t.Run("a source with no Verify", func(t *testing.T) {
+		t.Parallel()
+		if problems := macComparisonProblems(t, "package p\n"); len(problems) == 0 {
+			t.Fatal("a file with no Verify passed")
+		}
+	})
 }
