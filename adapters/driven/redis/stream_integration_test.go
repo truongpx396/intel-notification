@@ -13,8 +13,8 @@ import (
 
 	"github.com/truongpx396/intel-notification/adapters/driven/redis"
 	"github.com/truongpx396/intel-notification/domain"
+	"github.com/truongpx396/intel-notification/internal/notifytest"
 	"github.com/truongpx396/intel-notification/internal/redistest"
-	"github.com/truongpx396/intel-notification/ports"
 )
 
 func identity(realm domain.Realm, tenant, recipient string) domain.Identity {
@@ -86,18 +86,16 @@ func nextMessage(t *testing.T, ch <-chan *goredis.Message) *goredis.Message {
 	}
 }
 
-func nextID(t *testing.T, ids <-chan string) string {
-	t.Helper()
-	select {
-	case id, ok := <-ids:
-		if !ok {
-			t.Fatal("the subscription closed before a nudge arrived")
-		}
-		return id
-	case <-time.After(wait):
-		t.Fatalf("no nudge within %v", wait)
-		return ""
-	}
+// The Redis stream runs the table the in-memory stream runs (notifytest.StreamContract), so what a
+// relay's unit test sees of the live path is what Redis gives it: isolation between identities, order,
+// no replay, Close and context semantics, and the refusal of a nudge of nothing.
+func TestStreamRunsTheStreamContract(t *testing.T) {
+	t.Parallel()
+	notifytest.StreamContract(t, func(t *testing.T) notifytest.LiveStream {
+		t.Helper()
+		s, _ := newStream(t)
+		return s
+	})
 }
 
 // The keys are the frozen ones, which are literal names every other test must stay
@@ -156,101 +154,6 @@ func TestStreamUsesTheFrozenKeys(t *testing.T) {
 				t.Fatalf("%s heard %q, the nudge published for %s", other.name, m.Payload, pub.name)
 			}
 		}
-	}
-}
-
-// A subscriber hears its own identity and none other, whichever component the other
-// identity differs in (D16). The sentinel published to the listener afterwards is
-// its first message if nothing was misrouted to it, with no waiting for silence.
-func TestSubscriptionHearsOnlyItsOwnIdentity(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name  string
-		other func(realm domain.Realm) domain.Identity
-	}{
-		{"the same user id in another tenant", func(r domain.Realm) domain.Identity { return identity(r, "w2", "u1") }},
-		{"another user in the tenant", func(r domain.Realm) domain.Identity { return identity(r, "w1", "u2") }},
-		{"the same tenant and user in another realm", func(r domain.Realm) domain.Identity { return identity(r+"-x", "w1", "u1") }},
-		{"the same ids as another kind of recipient", func(r domain.Realm) domain.Identity {
-			id := identity(r, "w1", "u1")
-			id.Recipient.Kind = "device"
-			return id
-		}},
-		{"the same ids as another kind of tenant", func(r domain.Realm) domain.Identity {
-			id := identity(r, "w1", "u1")
-			id.Tenant.Kind = "organization"
-			return id
-		}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s, rdb := newStream(t)
-			realm := ownRealm(t, rdb)
-			own, other := identity(realm, "w1", "u1"), tc.other(realm)
-			a, err := s.Subscribe(t.Context(), own)
-			if err != nil {
-				t.Fatalf("Subscribe own: %v", err)
-			}
-			defer a.Close()
-			b, err := s.Subscribe(t.Context(), other)
-			if err != nil {
-				t.Fatalf("Subscribe other: %v", err)
-			}
-			defer b.Close()
-
-			if err := s.Publish(t.Context(), own, "n-own"); err != nil {
-				t.Fatalf("Publish own: %v", err)
-			}
-			if err := s.Publish(t.Context(), other, "n-sentinel"); err != nil {
-				t.Fatalf("Publish other: %v", err)
-			}
-			if got := nextID(t, a.IDs()); got != "n-own" {
-				t.Fatalf("the subscriber heard %q, want n-own", got)
-			}
-			if got := nextID(t, b.IDs()); got != "n-sentinel" {
-				t.Fatalf("the other subscriber heard %q first, want only its own n-sentinel: it was sent another identity's nudge", got)
-			}
-		})
-	}
-}
-
-// A published nudge is heard once, in order, by every subscriber of the identity: a
-// relay per connected device.
-func TestSubscribersOfOneIdentityAllHearIt(t *testing.T) {
-	t.Parallel()
-	s, rdb := newStream(t)
-	id := identity(ownRealm(t, rdb), "w1", "u1")
-	var subs []*redis.Subscription
-	for range 3 {
-		sub, err := s.Subscribe(t.Context(), id)
-		if err != nil {
-			t.Fatalf("Subscribe: %v", err)
-		}
-		defer sub.Close()
-		subs = append(subs, sub)
-	}
-	for _, n := range []string{"n-1", "n-2", "n-3"} {
-		if err := s.Publish(t.Context(), id, n); err != nil {
-			t.Fatalf("Publish %s: %v", n, err)
-		}
-	}
-	for i, sub := range subs {
-		for _, want := range []string{"n-1", "n-2", "n-3"} {
-			if got := nextID(t, sub.IDs()); got != want {
-				t.Fatalf("subscriber %d heard %q, want %q", i, got, want)
-			}
-		}
-	}
-}
-
-// The stream is at-most-once and a fast path (D15, D16): a nudge nobody hears is
-// not a fault, and the unread count heals on the next connect.
-func TestPublishToNobodyIsNotAnError(t *testing.T) {
-	t.Parallel()
-	s, rdb := newStream(t)
-	if err := s.Publish(t.Context(), identity(ownRealm(t, rdb), "w1", "u1"), "n-1"); err != nil {
-		t.Fatalf("Publish with no subscriber = %v, want nil", err)
 	}
 }
 
@@ -377,24 +280,4 @@ func TestPublishClassifiesWhatARetryCannotFix(t *testing.T) {
 			t.Fatalf("Publish on a closed client = %v, want a transient error: the server may be back for the retry", err)
 		}
 	})
-	t.Run("there is nothing to nudge", func(t *testing.T) {
-		t.Parallel()
-		s, rdb := newStream(t)
-		cases := []struct {
-			name string
-			id   domain.Identity
-			nid  string
-		}{
-			{"no notification id", identity(ownRealm(t, rdb), "w1", "u1"), ""},
-			{"no tenant", domain.Identity{Realm: "aisat", Recipient: domain.Recipient{Kind: "user", ID: "u1"}}, "n-1"},
-			{"no recipient", domain.Identity{Realm: "aisat", Tenant: domain.Tenant{Kind: "workspace", ID: "w1"}}, "n-1"},
-		}
-		for _, tc := range cases {
-			if err := s.Publish(t.Context(), tc.id, tc.nid); !errors.Is(err, domain.ErrPermanent) {
-				t.Errorf("Publish with %s = %v, want an error wrapping ErrPermanent: no retry makes a nudge of nothing", tc.name, err)
-			}
-		}
-	})
 }
-
-var _ ports.StreamPublisher = (*redis.Stream)(nil)

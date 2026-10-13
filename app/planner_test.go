@@ -339,16 +339,37 @@ func TestPlan(t *testing.T) {
 			want: wantPlan{ds: []wd{imm("in_app"), imm("email")}, visible: true}},
 
 		// ---------------------------------------------------------------------- digest
-		{name: "a digest cadence folds each enabled channel into its window (NR-014)",
+		{name: "a digest cadence folds each digestible channel into its window (NR-014)",
 			setup: func(f *planFx) { f.setSchedule(cadence) },
-			want:  wantPlan{ds: []wd{digest("in_app"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 50}},
+			want:  wantPlan{ds: []wd{imm("in_app"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 50}},
+		{name: "an inbox-backed channel is never digested: its nudge interrupts no one, and a window could not name what to nudge (D39)",
+			why:   "otherwise a recipient who asks for an hourly email digest also gets their live bell an hour late",
+			setup: func(f *planFx) { f.setSchedule(cadence) },
+			want:  wantPlan{ds: []wd{imm("in_app"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 50}},
+		{name: "which channel is inbox-backed is read from its capability, not its name (NR-016)",
+			setup: func(f *planFx) {
+				f.def.DefaultChannels = []domain.ChannelKind{"feed", "email"}
+				f.caps["feed"] = domain.ChannelCapabilities{InboxBacked: true}
+				f.setSchedule(cadence)
+			},
+			want: wantPlan{ds: []wd{imm("feed"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 50}},
+		{name: "a channel named in_app that is not inbox-backed is digested like any other",
+			setup: func(f *planFx) {
+				f.caps["in_app"] = domain.ChannelCapabilities{NeedsAddress: true}
+				f.setSchedule(cadence)
+			},
+			want: wantPlan{ds: []wd{digest("in_app"), digest("email")}, visible: false, window: 15 * time.Minute, digestMax: 50}},
+		{name: "with only an inbox-backed channel enabled a cadence opens no window",
+			why:   "a window the plan names but no delivery uses would be a digest of nothing",
+			setup: func(f *planFx) { f.setPref("email", false); f.setSchedule(cadence) },
+			want:  wantPlan{ds: []wd{imm("in_app")}, visible: true}},
 		{name: "the configuration's defaults reach the plan: a window holds 100 members and there are 16 shards",
 			why: "an unset DigestMax would reach the store as 0, which it refuses",
 			setup: func(f *planFx) {
 				f.cfg = notify.Config{Realm: planRealm, StoreDSN: "x", RedisURL: "y"}
 				f.setSchedule(cadence)
 			},
-			want: wantPlan{ds: []wd{digest("in_app"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 100,
+			want: wantPlan{ds: []wd{imm("in_app"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 100,
 				shard: func() *domain.Shard { s := domain.ShardFor(planID, 16); return &s }()}},
 		{name: "no cadence, no digest",
 			setup: func(f *planFx) { f.setSchedule(domain.DeliverySchedule{Digest: 0}) },
@@ -381,7 +402,7 @@ func TestPlan(t *testing.T) {
 				f.setSchedule(cadence)
 				f.quotas.SetBudget(f.quotaKey("email"), 0, noon.Add(time.Hour))
 			},
-			want: wantPlan{ds: []wd{digest("in_app"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 50}},
+			want: wantPlan{ds: []wd{imm("in_app"), digest("email")}, visible: true, window: 15 * time.Minute, digestMax: 50}},
 
 		// ----------------------------------------------------------------------- quota
 		{name: "an exhausted quota defers that channel to the budget's reset (NR-023)",

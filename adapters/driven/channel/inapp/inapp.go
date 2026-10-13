@@ -60,10 +60,13 @@ func (*Channel) Capabilities() domain.ChannelCapabilities {
 // domain.ErrPermanent is Rejected, so it is dead-lettered at once with its reason,
 // and any other fault is Retry (D10, D12).
 //
-// A digest delivery names no notification. Its members carry no ids, and their
-// inbox rows are visible already, so there is nothing to point a nudge at and it
-// succeeds without one. A delivery that names neither a notification nor a digest
-// is malformed, and no retry changes that.
+// The planner never digests an inbox-backed channel (D39), so a digest delivery
+// should not reach this channel. One that does, from a queue planned before that
+// rule or by a host whose channel set changed, names no notification: its members
+// carry no ids, and their inbox rows are visible already. There is nothing to point
+// a nudge at, and dead-lettering the delivery would lose nothing the inbox does not
+// hold, so it succeeds without one. A delivery that names neither a notification nor
+// a digest is malformed, and no retry changes that.
 func (c *Channel) Deliver(ctx context.Context, d domain.Delivery) (domain.DeliveryResult, error) {
 	if d.NotificationID == "" {
 		if d.DigestID != "" {

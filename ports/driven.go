@@ -275,6 +275,28 @@ type StreamPublisher interface {
 	Publish(ctx context.Context, id domain.Identity, notificationID string) error
 }
 
+// StreamSubscriber is the relay's end of the live stream (D16): the nudges published to one
+// identity. The relay is a driving adapter and cannot reach the Redis adapter, so it stands on
+// this port. The identity it subscribes as is the authenticated session's, never one a client
+// supplied.
+type StreamSubscriber interface {
+	// Subscribe returns once the subscription is established, so a nudge published after it
+	// returns is heard. A nudge published before it is not replayed: the stream keeps no
+	// history (D15). An identity with an empty component wraps domain.ErrPermanent.
+	Subscribe(ctx context.Context, id domain.Identity) (Subscription, error)
+}
+
+// Subscription is one relay's live view of one identity's nudges.
+type Subscription interface {
+	// IDs delivers the notification id of each nudge, in the order published, and is closed
+	// when the subscription ends: its context ended, it was closed, or the connection could
+	// not be kept.
+	IDs() <-chan string
+	// Close ends the subscription and returns once it has stopped, with IDs closed. It is
+	// safe to call more than once.
+	Close() error
+}
+
 // Channel is one delivery target. Adding one is implementing this and
 // registering it, never an edit to fan-out, persistence, preferences,
 // deduplication or the schema (NR-016).
@@ -286,6 +308,15 @@ type Channel interface {
 	// address as Suppressed and a permanent refusal as Rejected, never as an
 	// error; a returned error means an infrastructure fault and is treated as
 	// Retry.
+	//
+	// Rejected is a verdict on the message: any provider would refuse it. A
+	// provider's own trouble, a revoked key, an unverified domain, a refused
+	// sender, is Retry, so a failover channel can route around it and an operator
+	// sees the last error when the ceiling is reached (D41). A channel with no
+	// address (Capabilities().NeedsAddress false) never reports Suppressed: there is
+	// no address to be dead, and the engine would suppress the empty address hash
+	// for the realm (D13). A Rejected carries a Detail, which is the dead letter's
+	// last error.
 	//
 	// It does not check suppressions (the dispatcher does, for every channel: D13)
 	// and does not retry internally (the dispatcher owns backoff: retrying inside

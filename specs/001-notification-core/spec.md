@@ -103,7 +103,8 @@ solving six problems that are easy to get subtly wrong and expensive to discover
 - **NR-014**: The system MUST coalesce a burst of same-`(recipient, topic)` notifications into digests
   per the recipient's cadence, rather than one delivery per event, while still persisting every
   underlying record. No digest may exceed the configured maximum member count. `critical` and essential
-  notifications MUST NOT be digested.
+  notifications MUST NOT be digested, and neither may a delivery on a channel that makes a notification
+  visible in the inbox ([D39](design-decisions.md#d39)).
 - **NR-015**: Every non-essential notification delivered over a channel that supports it MUST carry an
   unsubscribe affordance that disables that `(topic, channel)` pair. For email it MUST implement RFC 8058
   one-click unsubscribe, and a `GET` of the link MUST NOT change state. Topics registered as essential
@@ -198,8 +199,8 @@ solving six problems that are easy to get subtly wrong and expensive to discover
 - **NS-004**: An in-app notification reaches a connected recipient in under 5 seconds at p95, and the
   unread count reflects it without a page reload.
 - **NS-005**: A burst of N same-`(recipient, topic)` notifications inside a digest window produces
-  `ceil(N / DigestMax)` deliveries on each digestible channel — exactly one when N ≤ `DigestMax` — and N
-  persisted records.
+  `ceil(N / DigestMax)` deliveries on each digestible channel — one that is not inbox-backed
+  ([D39](design-decisions.md#d39)) — exactly one when N ≤ `DigestMax`, and N persisted records.
 - **NS-006**: Poison deliveries terminate. No delivery exceeds its attempt ceiling, including one that
   crashes its worker on every attempt, and every dead letter is inspectable with its reason and
   replayable.
@@ -234,7 +235,7 @@ solving six problems that are easy to get subtly wrong and expensive to discover
 | Recipient has no address for an enabled channel | Terminal `no_address`; the next fallback channel, if any, is enqueued (NR-006, NR-031) |
 | Recipient has three phones | Three deliveries; one failing retries alone (NR-028) |
 | Provider outage across all tenants | Deliveries retry under jittered backoff; the recovering provider is not hit by a synchronized herd (NR-007) |
-| 10,000 notifications for one recipient in one minute, `DigestMax` 100 | 100 digests per digestible channel; 10,000 records persisted (NR-014, NS-005) |
+| 10,000 notifications for one recipient in one minute, `DigestMax` 100 | 100 digests per digestible channel; 10,000 records persisted, and 10,000 nudges on the live stream, which is not digested ([D39](design-decisions.md#d39)) (NR-014, NS-005) |
 | Broadcast to a 50,000-member tenant; the worker crashes at member 30,000 | Caller returned promptly; expansion resumes at the next page; nobody is notified twice (NR-020) |
 | Two products share one deployment and reuse an idempotency key | Both deliver; the realm separates the key spaces (NR-010) |
 | One user in two workspaces receives the same periodic key | Both deliver; the tenant separates the key spaces (NR-010) |

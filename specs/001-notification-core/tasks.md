@@ -438,8 +438,10 @@ rule above.
       ([D10](design-decisions.md#d10)). 16 mutations of the suite itself are in the
       [ledger](../../docs/mutations.md); five survived their first run, because the fixtures did not isolate
       an assertion another one also caught, and now die. `make test-provider` runs the dedup cases against
-      Resend's sandbox: it compiles and fails loudly with no key, and has not been run against the real
-      provider.*
+      Resend's sandbox and fails loudly with no key. *Run against the real provider on 2026-10-13 it
+      passed, and with a fresh key per call it failed on the re-drive case. Direct calls agreed (one key
+      twice, one id; a changed body, `409 invalid_idempotent_request`). The 24-hour window itself was not
+      measured.*
 - [x] **T028** *red → green* `redis/stream.go`: sharded pub/sub on hash-tagged keys.
       **Red first:** against Redis under Testcontainers — an identity's keys share one cluster slot (CRC16
       of the hash tag); the same recipient id in two tenants gets two keys, checked against the frozen
@@ -447,8 +449,9 @@ rule above.
       **Mutate:** build the key without the tenant; drop the hash tag
       *Built as `redis.Stream`. `Publish` is `SPUBLISH` on `domain.StreamKey` and the payload is the id and
       nothing else. `Subscribe(ctx, identity)` returns a `Subscription` once the server has confirmed it, and
-      `Close` returns when the server has dropped it. The relay (T044) will want a port for the subscribing
-      side; the contract has none, so none was invented. A fault no retry fixes, an ACL that refuses the
+      `Close` returns when the server has dropped it. *The relay (T044) is a driving adapter and cannot import
+      this package, so the subscribing side is now `ports.StreamSubscriber`, held by
+      `notifytest.StreamContract`, which the Redis stream and the kit's in-memory `Stream` both run.* A fault no retry fixes, an ACL that refuses the
       command, a server without it, an identity or id with nothing to nudge, wraps the new
       `domain.ErrPermanent`, which the in-app channel reads as `Rejected`; every other fault is the transient
       kind, and only a Redis *server's* own error text is read for it. The suites found something about the
@@ -469,9 +472,9 @@ rule above.
       fault `Retry`. **One decision the contract does not make:** `domain.Notification` has no id, so a digest
       delivery's members carry none, and the sketch's `Publish(ctx, id, d.NotificationID)` would send `""`,
       which the stream refuses as permanent: every digested in-app delivery would be dead-lettered. The
-      channel succeeds without a nudge for a digest (their inbox rows are visible already). Whether an in-app
-      digest should nudge at all is the planner's open question, which digests an inbox-backed channel "like
-      any other". `notifytest.Stream` is the fake, with its own table test and 7 mutations. The channel is also
+      channel succeeds without a nudge for a digest (their inbox rows are visible already). *That was the
+      planner's open question, and [D39](design-decisions.md#d39) closed it: an inbox-backed channel is
+      never digested, so that branch is now defensive.* `notifytest.Stream` is the fake, with its own table test and 7 mutations. The channel is also
       run over the real Redis stream, for the bytes on the wire and the tenant boundary
       (`inapp_integration_test.go`). 17 mutations in the ledger, none surviving.*
 - [x] **T026** [P] *red → green* `channel/email`: template content, RFC 8058 headers and footer for
@@ -493,13 +496,39 @@ rule above.
       on the side of the unsubscribe link; a registry or link fault waits as `Retry` rather than sending
       without the headers. Provider-wide faults (a revoked key, an unverified domain, a refused sender) are
       reported as transient, not as a refusal of the message, so a failover chain can route around them. The
-      footer is plain English with `WithFooter` to replace it. **Not built here, and needed before the
-      `unsubscribe` and `webhooks` specs can run:** the signer behind `UnsubscribeLinks` (the token, its key
-      id and 60-day life are D34's, and T044 verifies them), and the webhook that turns a Resend bounce
-      into a suppression, since `POST /emails` cannot report one. No `text/plain` alternative part is sent.
+      footer is plain English with `WithFooter` to replace it. **Not built here:** the signer behind
+      `UnsubscribeLinks`, which is T026a, and the webhook that turns a Resend bounce into a suppression,
+      since `POST /emails` cannot report one, which is T044's and needed before the `webhooks` spec can run.
+      No `text/plain` alternative part is sent.
       73 mutations in the ledger: 55 died at once, 11 did not build and were rewritten, and nine survivors,
       over two passes, each exposed a missing test, now written; one real bug was found on the way (the connection deadline was
       taken from the injectable clock). `-tags provider` is as described under T029.*
+- [x] **T026a** *red → green* `domain/unsubscribe.go`, `channel/email/links.go`: the unsubscribe token and
+      the link that carries it (NR-015, [D34](design-decisions.md#d34)). T026 wrote `UnsubscribeLinks` as an
+      interface and left it without an implementation, so the email channel could not be wired; this is the
+      signer, the verifier T044 calls, and the links the channel asks for.
+      **Red first:** a frozen token computed with Python's `hmac`, `hashlib`, `base64` and `json`; a table that
+      alters each field of a signed token and keeps its signature; key rotation (an old key still verifies
+      the mail already sent, a retired one does not, one id relabelled to another key does not); the expiry
+      to the second, and a 60-day floor on the configured life; a table of what is not a token, none of which
+      may panic or verify; a signed payload that is not a whole scope; and for the links, the URL's shape
+      under a prefix and a trailing slash, an HTTPS-only base, and the pair and the date being the
+      delivery's own and the moment it is made.
+      **Mutate:** leave the key id out of the MAC; accept a token one second after it lapses; accept plain
+      HTTP by default; build the token for another pair than the delivery's
+      *Built as `domain.UnsubscribeSigner` (`Sign`, `Verify`) and `email.SignedLinks`. The token is
+      `v1.<key id>.<base64url payload>.<base64url HMAC-SHA256>`, the MAC over the key id and the payload
+      under a domain separator and checked in constant time before the payload is parsed; the payload is the
+      pair and the second it lapses. A token the signer did not make is `ErrInvalidUnsubscribeToken` and a
+      genuine one that has lapsed is `ErrExpiredUnsubscribeToken`, and the REST handler (T044) answers both
+      with a 410. Found by the tests: Go's base64 decoder skips CR and LF, so a token with a trailing
+      newline verified; the alphabet is now checked first. The length cap is observable only by a token with
+      a valid signature, so its test builds one. 27 mutations of the signer and 17 of the links are in the
+      [ledger](../../docs/mutations.md). The MAC comparison's *timing* is not measurable in a unit
+      test; its primitive is, and `TestUnsubscribeVerifyComparesTheMACInConstantTime` reads the source and
+      fails `bytes.Equal`, `bytes.Compare` and `==` on a MAC (four mutations survived every behaviour test
+      before it, and the checker is run against sources that get it right and wrong). The signing keys come
+      from the host's wiring; where the service reads them from is T045's.*
 - [x] **T027** [P] *red → green* `channel/failover`: ordered providers, weakest `Dedup` of its members
       ([D29](design-decisions.md#d29)).
       **Red first:** a table over every pairing of member `Dedup` levels showing the composite declares
@@ -782,7 +811,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021 (done), T024 (done) |
 | NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021 (done), T024 (done) |
 | NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021 (done), T034a, T035 |
-| NR-015 unsubscribe | email golden files; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T044, T047a |
+| NR-015 unsubscribe | email golden files; the token's vector and tamper table; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T026a (done), T044, T047a |
 | NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a, T053 (done) |
 | NR-017 a topic is a registration | topics integration table, no migration | T048 |
 | NR-018 re-anchoring identity is a host binding | structural: `Identity` is opaque strings with frozen vectors; `domain` imports nothing | T007 (done), T053 (done) |

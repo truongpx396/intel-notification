@@ -80,11 +80,15 @@ func NewPlanner(cfg notify.Config, d Deps) (*Planner, error) {
 // is not applied, with its digest cadence: the notification goes out now rather
 // than be lost to, or wake someone on, a guess about a broken window.
 //
-// Where the contract is silent: an inbox-backed channel is digested like any other
-// (the engine reads no capability for it); a scheduled send and one with an expiry
-// are never digested, because a window could deliver them before DeliverAfter or
-// after DeliverBefore; and the inbox shows a scheduled notification from its send
-// time, whatever quiet hours do to the deliveries.
+// An inbox-backed channel is never digested (D39). The inbox row is written when the
+// notification is accepted and its nudge interrupts no one, so a window would only
+// hold the live update back for as long as the recipient's cadence for their email,
+// and could not name what to nudge when it flushed. The channel is told by its
+// capability and not by its name (NR-016), and a plan opens a window only when a
+// channel uses it. A scheduled send and one with an expiry are never digested,
+// because a window could deliver them before DeliverAfter or after DeliverBefore;
+// and the inbox shows a scheduled notification from its send time, whatever quiet
+// hours do to the deliveries.
 func (p *Planner) Plan(ctx context.Context, id domain.Identity, n domain.Notification) (Planned, error) {
 	def, ok, err := p.topics.Lookup(ctx, id.Realm, n.Topic)
 	if err != nil {
@@ -131,15 +135,14 @@ func (p *Planner) Plan(ctx context.Context, id domain.Identity, n domain.Notific
 	if scheduled {
 		plan.VisibleFrom = n.DeliverAfter
 	}
-	digested := schedule.Digest > 0 && def.Digestible(n.Priority) && !scheduled && n.DeliverBefore.IsZero()
-	if digested {
-		plan.DigestWindow, plan.DigestMax = schedule.Digest, p.cfg.DigestMax
-	}
+	digestible := schedule.Digest > 0 && def.Digestible(n.Priority) && !scheduled && n.DeliverBefore.IsZero()
 	for _, ch := range fanOut {
+		inboxBacked := false
 		if c, registered := p.channels.Get(ch); registered && c.Capabilities().InboxBacked {
-			plan.InboxVisible = true
+			plan.InboxVisible, inboxBacked = true, true
 		}
-		if digested {
+		if digestible && !inboxBacked {
+			plan.DigestWindow, plan.DigestMax = schedule.Digest, p.cfg.DigestMax
 			plan.Deliveries = append(plan.Deliveries, domain.PlannedDelivery{Channel: ch, Mode: domain.PlanDigest})
 			continue
 		}

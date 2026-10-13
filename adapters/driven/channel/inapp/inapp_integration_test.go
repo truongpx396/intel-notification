@@ -14,11 +14,12 @@ import (
 	"github.com/truongpx396/intel-notification/adapters/driven/redis"
 	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/internal/redistest"
+	"github.com/truongpx396/intel-notification/ports"
 )
 
 func TestMain(m *testing.M) { os.Exit(redistest.Main(m)) }
 
-func nextID(t *testing.T, sub *redis.Subscription) string {
+func nextID(t *testing.T, sub ports.Subscription) string {
 	t.Helper()
 	select {
 	case id, ok := <-sub.IDs():

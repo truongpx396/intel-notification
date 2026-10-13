@@ -1,0 +1,46 @@
+name: provider
+
+# The channel suites against a real email provider's sandbox (make test-provider). It is the only
+# thing that can show a provider dedupes, so the dedup level a mailer declares (D32) is held to what
+# the provider does and not to what its documentation says.
+#
+# It spends sending quota and needs a credential, so it never runs on a push or a pull request: by
+# hand, or weekly. A missing credential FAILS the run. A green run that tested nothing would be worse
+# than a red one that says why, which is also why the suite itself fails, and does not skip, with no key.
+#
+# To enable it: add the repository secret NOTIFY_PROVIDER_RESEND_API_KEY, a Resend API key. The suite
+# sends only to resend.dev's documented test addresses, from onboarding@resend.dev unless
+# NOTIFY_PROVIDER_RESEND_FROM says otherwise. Run once by hand on 2026-10-13 it passed, and a variant
+# with the dedup deliberately broken failed (docs/mutations.md), so a red run here is a finding about
+# Resend or the mailer, not a flake.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * 1"   # Mondays, 05:17 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider
+  cancel-in-progress: false   # never cut a run off between a send and its check
+
+jobs:
+  resend-sandbox:
+    name: Resend sandbox
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NOTIFY_PROVIDER_RESEND_API_KEY: ${{ secrets.NOTIFY_PROVIDER_RESEND_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Require the credential
+        if: env.NOTIFY_PROVIDER_RESEND_API_KEY == ''
+        run: |
+          echo "::error::NOTIFY_PROVIDER_RESEND_API_KEY is not set, so the sandbox suite did not run and Resend's 24-hour idempotency is unverified."
+          exit 1
+      - name: Channel suites against Resend's sandbox
+        run: make test-provider

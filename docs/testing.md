@@ -126,7 +126,8 @@ per idempotency key, a channel registry, in-memory fakes for the read-side ports
   injects no failure). The suite is data, so its own test runs it against 21 deliberately broken channels
   and requires each to fail the case meant for it. Under `-tags provider` (`make test-provider`, which needs
   `NOTIFY_PROVIDER_RESEND_API_KEY` and spends sending quota) the email channel's dedup claim is held to the
-  provider's sandbox, the only way to show a provider dedupes.
+  provider's sandbox, the only way to show a provider dedupes. The `provider` workflow runs it weekly and on
+  demand, and fails, rather than skips, while the secret is unset.
 - **`Stream`.** An in-memory `ports.StreamPublisher` that refuses what the Redis stream refuses.
 - **`Probe` and `Channel`.** The probe counts sends and calls per key and injects a failure into a
   coming send; the channel honours the `Dedup` level it declares, so a re-drive collapses only where a

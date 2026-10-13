@@ -384,6 +384,12 @@ var (
 	ErrNoTemplate    = errors.New("notify: no template for topic, channel and locale")
 	ErrUnknownTopic  = errors.New("notify: topic is not registered")
 	ErrMissingIdem   = errors.New("notify: IdemKey is required")
+
+	// ErrPermanent is wrapped by a driven port to say a fault is one no retry fixes: an ACL that
+	// refuses a command, a server without it. A channel that meets it reports Rejected, so the
+	// delivery is dead-lettered at once with its reason; any other error from a port is transient
+	// (D40).
+	ErrPermanent = errors.New("notify: the fault is permanent; retrying cannot fix it")
 )
 ```
 
@@ -405,6 +411,12 @@ type Channel interface {
 	// It does NOT check suppressions (the dispatcher does, for every channel — D13) and
 	// does NOT retry internally (the dispatcher owns backoff; retrying inside a channel
 	// defeats the jitter that prevents a thundering herd — D10).
+	//
+	// Rejected is a verdict on the MESSAGE: any provider would refuse it. A provider's own trouble —
+	// a revoked key, an unverified domain, a refused sender — is Retry, so a failover channel can
+	// route around it (D41). A channel with NeedsAddress false never reports Suppressed: there is no
+	// address to be dead, and the engine would suppress the empty address hash for the realm (D13).
+	// A Rejected carries a Detail, which is the dead letter's last error.
 	Deliver(ctx context.Context, d Delivery) (DeliveryResult, error)
 
 	Capabilities() ChannelCapabilities
@@ -707,9 +719,24 @@ type PreCheck interface {
 	Remember(ctx context.Context, key, notificationID string, ttl time.Duration) error // after commit ONLY
 }
 
-// StreamPublisher carries the live nudge (D16): an id on hash(identity), nothing else.
+// StreamPublisher carries the live nudge (D16): an id on hash(identity), nothing else. It is
+// at-most-once, so a nudge nobody hears is not an error. An error that wraps ErrPermanent is one no
+// retry fixes, and the in-app channel reports Rejected for it; any other error is transient (D40).
 type StreamPublisher interface {
 	Publish(ctx context.Context, id Identity, notificationID string) error
+}
+
+// StreamSubscriber is the relay's end of the live stream (D16). The relay is a driving adapter and
+// cannot reach the Redis adapter, so it stands on this port. The identity is the authenticated
+// session's, never one a client supplied. Subscribe returns once the subscription is established, so
+// a nudge published after it returns is heard; nothing published before is replayed (D15).
+type StreamSubscriber interface {
+	Subscribe(ctx context.Context, id Identity) (Subscription, error)
+}
+
+type Subscription interface {
+	IDs() <-chan string // each nudge's notification id, in order; closed when the subscription ends
+	Close() error       // returns once stopped, with IDs closed; safe to call twice
 }
 
 type Clock interface{ Now() time.Time }
@@ -915,6 +942,17 @@ package notify_test
 // declares its guarantees through Capabilities, and the suite holds it to them (D32).
 // With -tags provider, newChannel may return a channel bound to the provider's sandbox,
 // which is the only way to prove a real provider dedupes.
+//
+// Built: notifytest.ChannelContract, with ChannelDedupContract, the cases that inject no
+// failure and so the ones a sandbox can answer. newChannel returns a ChannelUnderTest — the
+// channel, its probe, and, when it needs them, the key the provider side counts a send under (the
+// in-app effect is keyed by the notification, not the delivery), how to arm a failure on every
+// member of a composite, and how many provider calls one failed delivery may make. The suite is
+// data, so its own test runs it against 21 deliberately broken channels and requires each to fail
+// exactly the case meant for it. It holds a channel to more than the sketch below: a channel with
+// no address never reports Suppressed; a Rejected carries a Detail; a fault the provider did not
+// classify is Retry or an error and never a verdict; a window is declared only with DedupProvider;
+// and a channel does not retry inside (D10, D13, D32, D41).
 func ChannelContract(t *testing.T, newChannel func(t *testing.T) (notify.Channel, Probe)) {
 	ctx := context.Background()
 	d := func() notify.Delivery {
