@@ -438,8 +438,10 @@ rule above.
       ([D10](design-decisions.md#d10)). 16 mutations of the suite itself are in the
       [ledger](../../docs/mutations.md); five survived their first run, because the fixtures did not isolate
       an assertion another one also caught, and now die. `make test-provider` runs the dedup cases against
-      Resend's sandbox: it compiles and fails loudly with no key, and has not been run against the real
-      provider.*
+      Resend's sandbox and fails loudly with no key. *Run against the real provider on 2026-10-13 it
+      passed, and with a fresh key per call it failed on the re-drive case. Direct calls agreed (one key
+      twice, one id; a changed body, `409 invalid_idempotent_request`). The 24-hour window itself was not
+      measured.*
 - [x] **T028** *red → green* `redis/stream.go`: sharded pub/sub on hash-tagged keys.
       **Red first:** against Redis under Testcontainers — an identity's keys share one cluster slot (CRC16
       of the hash tag); the same recipient id in two tenants gets two keys, checked against the frozen

@@ -36,9 +36,11 @@ row under it shows the strengthened test killing it. In T029 the survivors were 
 self-test, whose broken-channel fixtures did not isolate an assertion that another one also caught; in
 T028 two were guarantees that loopback ordering hides; the others were a fixture that never exercised
 the branch. The `Stream` test double in the kit is `T025 (kit)`. The email provider's sandbox suite
-(`-tags provider`, `make test-provider`) was compiled and its failure on a missing key was seen, but it
-has not been run against Resend: that Resend dedupes for 24 hours stands on its documentation until it
-is run.
+(`-tags provider`, `make test-provider`) was first run against Resend on 2026-10-13 and passed, and a
+variant with a fresh idempotency key per call failed on its re-drive assertion (the `T026 (provider)`
+row). Direct calls to the API agreed: one key twice returned one message id, another key another id, and
+one key with a changed body was `409 invalid_idempotent_request` "within the last 24 hours". What was not
+measured is the 24 hours itself: the window length rests on that wording and on Resend's documentation.
 
 **Follow-up rows (D39, the stream contract, T026a).** The planner's `T021 (D39)` rows are the digest
 rule. `T028 (re-run after StreamContract)` is the same 16 mutations of the Redis stream re-run after several
@@ -918,6 +920,7 @@ property is not in the ledger because no test can hold it: that the MAC comparis
 | 2026-10-13 | T026a (links) | A links maker needs a signer | `links.go`: `if signer == nil {` removed | Killed by `links_test.go` | `links_test.go:107: NewSignedLinks accepted no signer` |
 | 2026-10-13 | T026a (links) | A links maker needs a clock | `links.go`: `if clock == nil {` removed | Killed by `links_test.go` | `links_test.go:113: NewSignedLinks accepted no clock` |
 | 2026-10-13 | T026a (links) | A signing fault is returned, not turned into a link with no token | `links.go`: `if err != nil {` → `_ = err` | Killed by `links_test.go` | `links_test.go:158: For = "https://notify.example.test/notifications/unsubscribe?token=", want an error` |
+| 2026-10-13 | T026 (provider) | A mailer's declared `DedupProvider` is held to what the provider does, not to what its documentation says ([D32](../specs/001-notification-core/design-decisions.md#d32)) | `provider_test.go`: `m.IdemKey = s.salt + key` → `m.IdemKey = s.salt + key + time.Now().Format(".000000000")` (a fresh key per call, so there is nothing for Resend to collapse) | Killed by `channelcontract.go`, run against the real Resend sandbox | `channelcontract.go:269: declared dedup 2, but a re-drive was 1 and the provider side saw 2 sends, want Delivered and 1` |
 
 ## Before this ledger
 

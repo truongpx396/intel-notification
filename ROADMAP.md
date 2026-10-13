@@ -66,8 +66,8 @@ and the use-cases a producer and a recipient meet first: the planner, `Notifier`
 `Cancel`, `Status`) with its Redis pre-check, and the inbox that renders at read time; and the channels
 (Stage 5): the Redis stream (sharded pub/sub on hash-tagged keys), `channel/inapp`, `channel/email` with
 SMTP and Resend mailers, `channel/failover`, and the `ChannelContract` every one is held to. Resend's
-24-hour idempotency is taken from its documentation until `make test-provider` has been run against its
-sandbox. The unsubscribe token and its signed links are built (T026a); the bounce webhook is the
+idempotency was checked against its sandbox on 2026-10-13 (`make test-provider`; the 24-hour window itself
+rests on its documentation). The unsubscribe token and its signed links are built (T026a); the bounce webhook is the
 transports'. Not built: the
 dispatcher, the transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics,
 templates and addresses, and the Redis quota counters). Task-level status is in

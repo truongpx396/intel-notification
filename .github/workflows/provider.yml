@@ -10,8 +10,9 @@ name: provider
 #
 # To enable it: add the repository secret NOTIFY_PROVIDER_RESEND_API_KEY, a Resend API key. The suite
 # sends only to resend.dev's documented test addresses, from onboarding@resend.dev unless
-# NOTIFY_PROVIDER_RESEND_FROM says otherwise. It has not yet been run: the first run may find a fault in
-# the suite itself, which is a finding, not a flake.
+# NOTIFY_PROVIDER_RESEND_FROM says otherwise. Run once by hand on 2026-10-13 it passed, and a variant
+# with the dedup deliberately broken failed (docs/mutations.md), so a red run here is a finding about
+# Resend or the mailer, not a flake.
 on:
   workflow_dispatch:
   schedule:
