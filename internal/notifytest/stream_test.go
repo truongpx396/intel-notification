@@ -1,8 +1,11 @@
 package notifytest
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/truongpx396/intel-notification/domain"
 )
@@ -83,5 +86,84 @@ func TestStreamRecordsNudgesAndCollapsesARepeatForTheProbe(t *testing.T) {
 	}
 	if p.Sends("n1") != 1 || p.Calls("n1") != 2 || p.Sends("n2") != 1 {
 		t.Fatalf("probe saw n1 sends=%d calls=%d, n2 sends=%d, want 1, 2 and 1", p.Sends("n1"), p.Calls("n1"), p.Sends("n2"))
+	}
+}
+
+// The in-memory stream runs the table the Redis adapter runs, so what a relay's unit test sees
+// of the live path is what Redis gives it (T044).
+func TestStreamRunsTheStreamContract(t *testing.T) {
+	t.Parallel()
+	StreamContract(t, func(*testing.T) LiveStream { return NewStream(NewProbe()) })
+}
+
+// A context that has already ended closes the subscription it was given. Under -race this
+// also fails if arming the context watch races the subscription's registration.
+func TestStreamSubscribeWithAnEndedContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	s := NewStream(NewProbe())
+	for range 50 {
+		sub, err := s.Subscribe(ctx, streamID)
+		if err != nil {
+			t.Fatalf("Subscribe: %v", err)
+		}
+		select {
+		case _, ok := <-sub.IDs():
+			if ok {
+				t.Fatal("a nudge arrived on a subscription whose context had ended")
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("IDs still open for a subscription whose context had ended")
+		}
+		if err := s.Publish(t.Context(), streamID, "n1"); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+}
+
+// A subscriber that has stopped reading misses nudges, as a pub/sub message is missed, and never
+// holds up the publisher: a stalled relay must not stall the dispatcher that publishes to it.
+func TestStreamPublishNeverWaitsForASlowSubscriber(t *testing.T) {
+	t.Parallel()
+	s := NewStream(NewProbe())
+	sub, err := s.Subscribe(t.Context(), streamID)
+	if err != nil {
+		t.Fatalf("Subscribe: %v", err)
+	}
+	// No Close: if Publish does block it holds the stream's lock, and a Close here would wait
+	// on it and turn the failure below into a hang. The stream is this test's alone.
+
+	const published = 3 * subscriptionBuffer
+	done := make(chan error, 1)
+	go func() {
+		for i := range published {
+			if err := s.Publish(t.Context(), streamID, fmt.Sprintf("n%d", i)); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Publish blocked on a subscriber that was not reading")
+	}
+	heard := 0
+	for {
+		select {
+		case <-sub.IDs():
+			heard++
+			continue
+		default:
+		}
+		break
+	}
+	if heard != subscriptionBuffer {
+		t.Fatalf("the slow subscriber heard %d of %d, want the %d its buffer held and none of the rest", heard, published, subscriptionBuffer)
 	}
 }

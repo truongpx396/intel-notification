@@ -26,17 +26,27 @@ type Nudge struct {
 // relay's behaviour, which loads one inbox row per id, however many nudges name it.
 // It is what makes a re-publish "only a re-nudge" (D16), and it is not something
 // the in-app channel could break.
+//
+// It is also the subscribing end (ports.StreamSubscriber), so a relay's unit test has a live path
+// without Redis. A nudge goes to the subscribers of exactly the identity it names, and is dropped
+// for one that has stopped reading, as a pub/sub message is: the stream is at-most-once (D15).
 type Stream struct {
 	probe *Probe
 
 	mu     sync.Mutex
 	nudges []Nudge
+	subs   map[domain.Identity]map[*subscription]struct{}
 }
 
-var _ ports.StreamPublisher = (*Stream)(nil)
+var (
+	_ ports.StreamPublisher  = (*Stream)(nil)
+	_ ports.StreamSubscriber = (*Stream)(nil)
+)
 
 // NewStream returns a stream reporting to probe.
-func NewStream(probe *Probe) *Stream { return &Stream{probe: probe} }
+func NewStream(probe *Probe) *Stream {
+	return &Stream{probe: probe, subs: map[domain.Identity]map[*subscription]struct{}{}}
+}
 
 // Publish implements ports.StreamPublisher.
 func (s *Stream) Publish(_ context.Context, id domain.Identity, notificationID string) error {
@@ -58,6 +68,12 @@ func (s *Stream) Publish(_ context.Context, id domain.Identity, notificationID s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nudges = append(s.nudges, Nudge{Identity: id, NotificationID: notificationID})
+	for sub := range s.subs[id] {
+		select {
+		case sub.ids <- notificationID:
+		default: // a subscriber that has stopped reading misses it
+		}
+	}
 	return nil
 }
 
@@ -66,4 +82,56 @@ func (s *Stream) Nudges() []Nudge {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.nudges)
+}
+
+// subscriptionBuffer is how many nudges a subscriber may fall behind by before it misses one.
+const subscriptionBuffer = 256
+
+// subscription is one subscriber of one identity.
+type subscription struct {
+	stream *Stream
+	id     domain.Identity
+	ids    chan string
+	once   sync.Once
+	stop   func() bool // releases the context watch; guarded by the stream's lock
+}
+
+// IDs implements ports.Subscription.
+func (u *subscription) IDs() <-chan string { return u.ids }
+
+// Close implements ports.Subscription. The subscriber leaves and its channel closes under the lock
+// a publish holds, so a publish never sends on a closed channel.
+func (u *subscription) Close() error {
+	u.once.Do(func() {
+		u.stream.mu.Lock()
+		defer u.stream.mu.Unlock()
+		if u.stop != nil {
+			u.stop()
+		}
+		delete(u.stream.subs[u.id], u)
+		if len(u.stream.subs[u.id]) == 0 {
+			delete(u.stream.subs, u.id)
+		}
+		close(u.ids)
+	})
+	return nil
+}
+
+// Subscribe implements ports.StreamSubscriber. It refuses an identity with an empty component, as
+// the Redis stream does, and ends the subscription with ctx.
+func (s *Stream) Subscribe(ctx context.Context, id domain.Identity) (ports.Subscription, error) {
+	if err := id.Validate(); err != nil {
+		return nil, fmt.Errorf("notifytest: %w: %w", domain.ErrPermanent, err)
+	}
+	sub := &subscription{stream: s, id: id, ids: make(chan string, subscriptionBuffer)}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.subs[id] == nil {
+		s.subs[id] = map[*subscription]struct{}{}
+	}
+	s.subs[id][sub] = struct{}{}
+	// Armed under the lock Close takes, so a context that has already ended cannot close the
+	// subscription before it is registered, or race the assignment.
+	sub.stop = context.AfterFunc(ctx, func() { _ = sub.Close() })
+	return sub, nil
 }

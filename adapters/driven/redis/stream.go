@@ -30,7 +30,10 @@ type Stream struct {
 	rdb goredis.UniversalClient
 }
 
-var _ ports.StreamPublisher = (*Stream)(nil)
+var (
+	_ ports.StreamPublisher  = (*Stream)(nil)
+	_ ports.StreamSubscriber = (*Stream)(nil)
+)
 
 // NewStream returns a stream over rdb. A cluster client routes by the key's slot;
 // a single node needs Redis 7.0 for sharded pub/sub.
@@ -73,9 +76,9 @@ func classify(err error) error {
 	return err
 }
 
-// Subscription is one relay's live view of one identity's nudges: the notification
+// subscription is one relay's live view of one identity's nudges: the notification
 // ids published to the identity's stream, from the moment Subscribe returned.
-type Subscription struct {
+type subscription struct {
 	ps      *goredis.PubSub
 	key     string
 	ids     chan string
@@ -88,12 +91,12 @@ type Subscription struct {
 // IDs delivers the notification id of each nudge, in the order published, and is
 // closed when the subscription ends: its context ended, it was closed, or the
 // connection could not be kept.
-func (s *Subscription) IDs() <-chan string { return s.ids }
+func (s *subscription) IDs() <-chan string { return s.ids }
 
 // Close ends the subscription and returns when the server has dropped it, so a
 // count of subscribers read afterwards no longer includes this one. It is safe to
 // call more than once.
-func (s *Subscription) Close() error {
+func (s *subscription) Close() error {
 	s.once.Do(func() {
 		close(s.closing)
 		if err := s.ps.SUnsubscribe(context.Background(), s.key); err != nil {
@@ -109,7 +112,7 @@ func (s *Subscription) Close() error {
 // subscription, so anything published afterwards is delivered. ctx bounds the
 // subscription as well as the call. A relay passes the authenticated session's
 // identity, never one a client supplied (D16).
-func (s *Stream) Subscribe(ctx context.Context, id domain.Identity) (*Subscription, error) {
+func (s *Stream) Subscribe(ctx context.Context, id domain.Identity) (ports.Subscription, error) {
 	if err := id.Validate(); err != nil {
 		return nil, fmt.Errorf("redis stream: %w: %w", domain.ErrPermanent, err)
 	}
@@ -119,7 +122,7 @@ func (s *Stream) Subscribe(ctx context.Context, id domain.Identity) (*Subscripti
 		_ = ps.Close()
 		return nil, fmt.Errorf("redis stream: subscribe: %w", classify(err))
 	}
-	sub := &Subscription{
+	sub := &subscription{
 		ps:      ps,
 		key:     key,
 		ids:     make(chan string),
@@ -131,7 +134,7 @@ func (s *Stream) Subscribe(ctx context.Context, id domain.Identity) (*Subscripti
 }
 
 // pump moves messages from the connection to IDs until the subscription ends.
-func (s *Subscription) pump(ctx context.Context, events <-chan interface{}) {
+func (s *subscription) pump(ctx context.Context, events <-chan interface{}) {
 	defer close(s.done)
 	defer close(s.ids)
 	defer func() { _ = s.ps.Close() }()

@@ -447,8 +447,9 @@ rule above.
       **Mutate:** build the key without the tenant; drop the hash tag
       *Built as `redis.Stream`. `Publish` is `SPUBLISH` on `domain.StreamKey` and the payload is the id and
       nothing else. `Subscribe(ctx, identity)` returns a `Subscription` once the server has confirmed it, and
-      `Close` returns when the server has dropped it. The relay (T044) will want a port for the subscribing
-      side; the contract has none, so none was invented. A fault no retry fixes, an ACL that refuses the
+      `Close` returns when the server has dropped it. *The relay (T044) is a driving adapter and cannot import
+      this package, so the subscribing side is now `ports.StreamSubscriber`, held by
+      `notifytest.StreamContract`, which the Redis stream and the kit's in-memory `Stream` both run.* A fault no retry fixes, an ACL that refuses the
       command, a server without it, an identity or id with nothing to nudge, wraps the new
       `domain.ErrPermanent`, which the in-app channel reads as `Rejected`; every other fault is the transient
       kind, and only a Redis *server's* own error text is read for it. The suites found something about the

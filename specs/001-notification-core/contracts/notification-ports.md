@@ -726,6 +726,19 @@ type StreamPublisher interface {
 	Publish(ctx context.Context, id Identity, notificationID string) error
 }
 
+// StreamSubscriber is the relay's end of the live stream (D16). The relay is a driving adapter and
+// cannot reach the Redis adapter, so it stands on this port. The identity is the authenticated
+// session's, never one a client supplied. Subscribe returns once the subscription is established, so
+// a nudge published after it returns is heard; nothing published before is replayed (D15).
+type StreamSubscriber interface {
+	Subscribe(ctx context.Context, id Identity) (Subscription, error)
+}
+
+type Subscription interface {
+	IDs() <-chan string // each nudge's notification id, in order; closed when the subscription ends
+	Close() error       // returns once stopped, with IDs closed; safe to call twice
+}
+
 type Clock interface{ Now() time.Time }
 type IDSource interface{ New() string } // UUIDv7
 ```
