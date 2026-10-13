@@ -29,6 +29,13 @@ var (
 	// ErrInvalidCursor is returned for a list cursor the store did not issue. A
 	// cursor is client input, so a bad one is a request error, not a fault.
 	ErrInvalidCursor = errors.New("notify: invalid list cursor")
+	// ErrUnknownDeadLetter is returned when a dead letter is replayed by an id that names
+	// none in the realm: it does not exist, or it is another realm's, and the two are
+	// not told apart. A malformed id is the same (NR-007).
+	ErrUnknownDeadLetter = errors.New("notify: no such dead letter")
+	// ErrNotReplayable is returned for a dead letter that holds no queue row to re-drive: one
+	// parked by the bus ingest (reason poison), which the producer must resend (NR-007).
+	ErrNotReplayable = errors.New("notify: this dead letter has no delivery to replay")
 	// ErrPermanent is wrapped by a driven port to say a fault is one no retry can fix:
 	// a Redis that refuses the command for this user, or does not have it. A channel
 	// that meets it reports Rejected rather than Retry, so the delivery is dead-lettered

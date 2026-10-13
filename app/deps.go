@@ -32,9 +32,13 @@ type Deps struct {
 	Quotas        ports.QuotaCounter
 	QuotaPolicies ports.QuotaPolicies // nil: an exhausted budget always defers
 	Stream        ports.StreamPublisher
-	PreCheck      ports.PreCheck // nil: every Notify takes the durable path
-	Clock         ports.Clock    // nil: the system clock
-	IDs           ports.IDSource // nil: UUIDv7
+	PreCheck      ports.PreCheck   // nil: every Notify takes the durable path
+	Metrics       ports.Metrics    // nil: nothing is counted
+	Steps         ports.StepHook   // nil: the dispatcher's steps are not observed (a test's seam)
+	Waker         ports.Waker      // nil: the Notifier wakes no dispatcher; polling finds the work
+	Listener      ports.WakeSource // nil: polling alone; needed only with Config.ListenNotify
+	Clock         ports.Clock      // nil: the system clock
+	IDs           ports.IDSource   // nil: UUIDv7
 }
 
 // systemClock is the default ports.Clock.

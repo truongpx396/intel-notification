@@ -74,6 +74,24 @@ their scope is minimal. The unsubscribe link changes state only on `POST` (RFC 8
 confirmation page, because mail scanners fetch every URL in a message
 ([D34](../specs/001-notification-core/design-decisions.md#d34)).
 
+## Outbound webhooks
+
+The `webhook` channel calls a URL a tenant supplied, which makes the engine's network position the
+tenant's to point. It is hostile input ([D44](../specs/001-notification-core/design-decisions.md#d44)):
+https only, never a connection to a loopback, private, link-local or carrier-grade-NAT address (checked
+on the address the connection is made to, after the name is resolved, so a name that points inward is no
+way round, and an IPv4 address written as IPv6 is judged as the IPv4 it is), no redirect followed, no
+proxy taken from the environment, and no credentials in the URL. A URL it must not call is reported as a
+dead address. Every request is signed with the channel's secret
+(`X-Notify-Signature: v1=<hex HMAC-SHA256 of "<timestamp>.<body>">`), so a receiver that verifies it
+and rejects a timestamp far from its own clock cannot be sent a forged or a replayed notification. What
+the channel reports of a failure never carries the URL, because a URL often holds a token and the report
+is stored in the dead letter.
+
+`WithAllowHTTP` and `WithAllowPrivateNetworks` relax those checks for a receiver inside your own trust
+boundary. Turn them on for a channel whose addresses tenants supply and a tenant can make the engine call
+your internal network, including a cloud's metadata service.
+
 ## Provider webhooks
 
 Bounce and complaint callbacks are **signature-verified before the body is parsed**. Parsing first means

@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D41. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D44. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -985,9 +985,123 @@ first refused hides the defect in the message.
 Verified: `TestSMTPClassifiesTheRelaysAnswers`, `TestResendClassifiesTheAnswers`,
 `TestCompositeWalksTheChain`.
 
+## D42 — The dispatcher's failure policy: what it owns, and what it does not · *built*
+
+**Decision.** Six choices the contract's nine steps leave open, each made so that a failure ends in a
+record and not in silence:
+
+- **A claim beyond the ceiling is finished unsent.** A delivery claimed more than `MaxAttempts` times is
+  finished as `max_attempts` at once, before any other work, without being handed to a channel. The sixth
+  claim is not an attempt, so its dead letter reads `MaxAttempts + 1` claims counted and `MaxAttempts` sends
+  made at most. The same ceiling applies to a failure the dispatcher records itself: a retry at attempt
+  `MaxAttempts` is parked.
+- **Anything the engine does not own that faults is a retry.** The address book, the suppression store, the
+  renderer, the topic registry, the store's `Load`, a channel that returns an error or an outcome it does not
+  have, a channel that is not registered on this worker, and the write of a suppression: each is `Queue.Retry`
+  with the error as the last error. A panic in a channel, a renderer or an address book is turned into the same
+  retry, with its stack sent to the error handler. The one exception is the quota counter, which fails open
+  ([D5](#d5)): a budget that cannot be read is a budget with units left.
+- **An outcome is recorded on a context that outlives the worker.** Every write that records an outcome uses
+  `context.WithoutCancel` with a timeout of its own.
+- **A channel-reported suppression is written before the delivery is finished.**
+- **A bound address is checked against the suppressions at every claim**, not only when it is first
+  resolved, so a bounce that lands while a delivery waits for its retry is honoured.
+- **A claimed batch is handled concurrently**, one goroutine per claim, and a handler's panic is raised again
+  in the caller's goroutine once the others have finished.
+
+**Alternative.** The ceiling enforced only where a failure is recorded, which is how the contract's list of
+steps reads. Faults in ports terminal (`no_address` for an address book that is down, `rejected` for a
+renderer that errors). The outcome recorded on the worker's own context. The suppression written after the
+finish, or by the finishing statement. A suppression checked when the address is bound and never again. A
+batch handled one claim after another.
+
+**What goes wrong without it.**
+
+- A delivery that kills its worker every time never reaches the place where a failed one is counted. Attempts
+  are counted at claim ([D19](#d19)) so the number is right, and a ceiling that is only looked at when a
+  failure is recorded never fires: the poison is claimed, kills the worker, and lapses, for ever.
+- A transient fault read as a verdict loses deliveries or lies in the record. An address book that is down
+  would finish every email as `no_address`, correct to the letter and false to the recipient; a renderer that
+  errors would dead-letter every delivery of the hour. A retry costs one attempt and a backoff, and the
+  ceiling still parks what never recovers. A channel panic that took the worker down would take the rest of
+  its batch with it, each left leased until it lapsed.
+- Shutdown arrives after a message was sent and before it is recorded, and the next worker sends it again, on
+  a channel that cannot tell ([D32](#d32)). Recording is the one write that must not be cancelled with the
+  worker.
+- Finished first, a worker that dies before the suppression is written leaves a delivery that is over and a
+  dead address nobody knows is dead; the next notification mails it again, after a hard bounce or a
+  complaint. Written first, the delivery is still pending, and the next claim finds it suppressed.
+- A suppression that lands between a fan-out and a retry is ignored by a retry that sends to the address it was
+  bound to.
+- The lease of a batch runs from the claim. Handled one by one, 100 sends of a few seconds outlive a
+  `ClaimLease` of five minutes although no single send does, and the later ones are re-driven by another
+  worker while this one is still going to send them. `ClaimLease` is documented as exceeding the slowest
+  send, not the slowest batch.
+
+Verified: `DispatcherContract` — "a delivery that crashes its worker every time terminates unsent at the
+ceiling", "a channel that panics is a retry", "a worker that dies right after a Suppressed ending has already
+recorded the suppression", "a suppression written after the address was bound is still honoured", "a batch is
+sent concurrently"; `TestAFaultingPortIsARetryAndNeverALostDelivery` (nine ports, one row each, and the quota
+counter that fails open); `TestRunDrainsEveryShardAndRecordsWhatWasInFlightAtShutdown`. Mutation-checked: each
+choice has rows in the [ledger](../../docs/mutations.md).
+
+## D43 — A dead letter is replayed once, as the same delivery · *built*
+
+**Decision.** `Maintenance.ReplayDeadLetter` marks the dead letter replayed and enqueues a fresh delivery from
+the queue row it kept, in one statement, with no `ON CONFLICT`. The fresh delivery starts over (no attempts, no
+lease, due now) and is the same delivery: it keeps its notification or digest, its bound address (so a channel
+dedupes it on the key it had), and its deadline. It carries no fallback chain. A dead letter of another realm,
+and one that does not exist, are the same `ErrUnknownDeadLetter`; one parked by the bus has no queue row and
+is `ErrNotReplayable`. A second call is a no-op, not an error.
+
+**Alternative.** A replay that enqueues the delivery as new, with the chain and without the deadline. A
+replay in two statements, or one that skips a conflict.
+
+**What goes wrong without it.** The fallback chain ran when the delivery was parked ([D29](#d29)); running it
+again sends on the fallback channel twice. A message that expired while it sat in the dead letters, a "meeting
+in 5 minutes" push, is sent late by the operator who meant to fix a bug. A replay in two statements, or one
+that skips a conflict, can mark the dead letter replayed when nothing was enqueued, and the failure is then no
+longer in the list of what an operator must look at. Two operators, or one script that retried, enqueue the
+same delivery twice. And an id that tells "another realm's" from "does not exist" lets one product probe
+another's dead letters.
+
+Verified: `TestReplayDeadLetterEnqueuesOneFreshDelivery`, `TestReplayDeadLetterTwiceEnqueuesOnce`,
+`TestReplayDeadLetterConcurrentlyEnqueuesOnce` (eight replayers, one delivery),
+`TestReplayDeadLetterThatConflictsLeavesTheDeadLetterUnreplayed`, `TestReplayDeadLetterRefusals`,
+`TestAReplayedDeliveryThatHasExpiredIsNotSentLate`.
+
+## D44 — A channel that calls a tenant's URL treats the URL as hostile · *built*
+
+**Decision.** The webhook channel ([T033a](tasks.md)) takes its address from a tenant, so it checks it: https
+only; no credentials in it; never a connection to a loopback, private, link-local, carrier-grade-NAT or
+reserved address, checked on the address the connection is made to, after the name is resolved, with an IPv4
+address written as IPv6 judged as the IPv4 it is; no redirect followed; no proxy from the environment. A URL
+it must not call is a dead address (`Suppressed`, `invalid_address`), not a fault. What it reports of a failure
+names the host and never the URL. A body it quotes is short and free of control characters. Each request is
+signed (`X-Notify-Signature`, an HMAC-SHA256 over the timestamp and the exact body) and carries the delivery
+key as `Idempotency-Key`; a channel with no secret is refused. The two opt-ins that relax the checks
+(`WithAllowHTTP`, `WithAllowPrivateNetworks`) are named for what they do and are for receivers inside the
+same trust boundary.
+
+**Alternative.** Post to whatever URL the address book holds, as the carried design's webhook channel did, and
+report the transport's error as it comes.
+
+**What goes wrong without it.** A tenant's webhook address is the engine's own network position, lent to the
+tenant: `http://169.254.169.254/latest/meta-data/` returns the host's cloud credentials, and a name that
+resolves to an internal address does the same through a check made on the name. A redirect from a public
+endpoint leads anywhere; `HTTPS_PROXY` in the environment makes the connection go to the proxy, whose address
+the check then judges instead of the destination's. `net/http`'s error carries the URL, and a URL often holds
+a token, which then sits in `last_error` of a dead letter every operator reads. Unsigned requests cannot be
+told from forged ones.
+
+Verified: `TestWebhookRefusesAddressesItMustNotCall`, `TestBlockedDestinations`, `TestTheTransportUsesNoProxy`,
+`TestWebhookDoesNotFollowRedirects`, `TestWebhookDetailNeverCarriesTheURLsSecrets`,
+`TestSignAgainstAnIndependentVector`.
+
 ---
 
 ## Open decisions
+
 
 None blocking Phase 1. Two are deferred to Phase 2 by design, recorded here so their absence is
 visible rather than implicit:

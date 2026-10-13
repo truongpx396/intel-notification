@@ -23,8 +23,8 @@ There is no broker in the default deployment and nothing to scale for one.
 |---|---|---|
 | `notify.outbox.depth` | rising for > 5 min | Deliveries are not draining. A channel is failing or workers are down |
 | `notify.outbox.oldest_age` | > 10 × `BackoffBase` | Something is stuck rather than slow — depth alone can look flat while one tenant or channel starves |
-| `notify.dlq.dead.count` | any increase | A genuine failure: someone was not told something. Suppressed and no-address outcomes never land here |
-| `notify.lease.lost` | sustained non-zero | Workers are losing claims mid-send: `ClaimLease` is shorter than a channel's send time, or workers are stalling. Each loss may mean a duplicate on a `DedupNone` channel |
+| `notify.dlq.dead.count` | any increase | A genuine failure: someone was not told something. Labelled `channel` and `reason` (`max_attempts` or `rejected`). Suppressed and no-address outcomes never land here, and a dead letter that a stale worker's write failed to record is not counted |
+| `notify.lease.lost` | sustained non-zero | Workers are losing claims mid-send: `ClaimLease` is shorter than a channel's send time, or workers are stalling. Labelled `channel`. Each loss may mean a duplicate on a `DedupNone` channel |
 | `notify.digest.overdue` | any window past `flush_at` + one interval | The flush job is not running; members are held, not delivered |
 | `notify.quota.exhausted` | per tenant | A tenant hit its ceiling — abuse, a bug in its producer, or a limit that needs raising |
 | `notify.partition.missing` | this month or next absent from `notifications`, `notification_deliveries` or `dead_letters` (`CheckPartitions.Missing`, one per table and month) | Provisioning lapsed; inserts dated in that month fail. Run `EnsurePartitions` |
@@ -44,7 +44,11 @@ There is no broker in the default deployment and nothing to scale for one.
    it has not, the quota job is not running.
 2. **Read `last_error`** on the oldest due rows. One provider dominating means an external outage and
    backoff doing its job — confirm retries are spreading rather than hammering.
-3. **Check worker replicas and `notify.lease.lost`.**
+3. **Check worker replicas and `notify.lease.lost`.** A worker handles each claimed batch concurrently,
+   so `ClaimLease` need only exceed one send, not a batch of them
+   ([D42](../specs/001-notification-core/design-decisions.md#d42)). A delivery claimed more than
+   `MaxAttempts` times without an outcome is finished as `max_attempts` unsent, so a delivery that kills its
+   worker on every attempt shows up as a dead letter whose `last_error` says so.
 4. **Do not delete from the queue.** Every row is an undelivered notification. To stop something, use
    `Cancel`, which records what it stopped.
 
@@ -60,8 +64,11 @@ There is no broker in the default deployment and nothing to scale for one.
    `notification_deliveries`, not here ([D12](../specs/001-notification-core/design-decisions.md#d12)).
 3. **Replay** with `POST /admin/notifications/dead-letters/{id}/replay` once the cause is fixed. Replay
    enqueues one fresh delivery and records `replayed_at`; a second replay of the same dead letter does
-   nothing. On a `DedupProvider` channel, a replay after the provider's window (24h for Resend) is a new
-   send.
+   nothing, and neither do several at once. The fresh delivery is the same delivery
+   ([D43](../specs/001-notification-core/design-decisions.md#d43)): it keeps the address it was bound to, so a
+   channel dedupes it on the key it had, and its deadline, so a message that has expired is finished as
+   `expired` and not sent late. It carries no fallback chain, which ran when the delivery was parked. On a
+   `DedupProvider` channel, a replay after the provider's window (24h for Resend) is a new send.
 
 ### Protecting the queue from its own database
 

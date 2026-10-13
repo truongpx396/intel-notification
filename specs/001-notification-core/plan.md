@@ -108,8 +108,8 @@ later stage.
 | **2. Domain + ports** | types, canonical encoding, derived keys, backoff, config validation | Frozen test vectors shared with the SQL; `Config.Validate` table tests |
 | **3. Store adapter** | the queue's transitions, persist-and-enqueue, inbox reads, preferences, suppressions (done) | The queue's integration suite; `StoreContract`, including the crash after commit; the inbox, preference and suppression suites |
 | **4. Notifier** | planner, `Notify`, `NotifyTx`, pre-check, `Cancel`, `Status`, the inbox use-case (done) | `NotifierContract`, in memory and on Redis |
-| **5. Channels** | in-app + email reference implementations, failover composite | `ChannelContract` against both; provider sandbox for email |
-| **6. Dispatcher** | the nine-step algorithm | `DispatcherContract` |
+| **5. Channels** | in-app + email reference implementations, failover composite | `ChannelContract` against both; provider sandbox for email (done) |
+| **6. Dispatcher** | the nine-step algorithm, the dead-letter replay, a third channel | `DispatcherContract`; the same suite with a third channel registered (done) |
 | **7. Digest, quotas, fairness** | windows, budgets, backlog deferral | Burst yields `ceil(N / DigestMax)`; NS-007 measured |
 | **8. Maintenance** | retention, partition provisioning with scope, idempotency and digest expiry, erasure | Retention with a pending delivery; TEST 5 green after provisioning |
 | **9. Broadcast** | durable, paged, resumable expansion | Crash mid-broadcast resumes; nobody notified twice |

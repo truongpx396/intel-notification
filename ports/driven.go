@@ -109,6 +109,17 @@ type Maintenance interface {
 	// created; a second run creates none.
 	EnsurePartitions(ctx context.Context, from time.Time, months int) ([]string, error)
 
+	// ReplayDeadLetter re-drives one dead letter, once: in one statement it records
+	// replayed_at on the dead letter and enqueues a fresh delivery from the queue row it
+	// kept, so a second call, and a concurrent one, enqueue nothing and return false. The
+	// fresh delivery has its attempts reset, no lease, and no fallback chain (the chain ran
+	// when the delivery was dead-lettered); it keeps its bound address, so the channel
+	// dedupes it on the same key, and its deadline, so a message that has expired is not
+	// sent late. A dead letter of another realm, or none at all, is
+	// domain.ErrUnknownDeadLetter; one that came from the bus has no queue row to
+	// re-drive here and is domain.ErrNotReplayable.
+	ReplayDeadLetter(ctx context.Context, realm domain.Realm, deadLetterID string) (replayed bool, err error)
+
 	// CheckPartitions reports, from the catalog alone, each range-partitioned
 	// table with no partition covering the month containing at or the next one,
 	// and notifications or any of its partitions that recipient scoping does not
@@ -350,4 +361,40 @@ type Clock interface {
 // IDSource issues identifiers: UUIDv7 by default, so they sort by creation time.
 type IDSource interface {
 	New() string
+}
+
+// Metrics counts the events an operator alarms on (docs/operations.md). The names
+// are domain constants (domain.MetricLeaseLost, domain.MetricDeadLetter), so a
+// dashboard and a test read the same words. A nil Metrics counts nothing.
+type Metrics interface {
+	// Inc adds one to the counter called name, for the given labels. Labels are a
+	// small closed set (a channel kind, a reason), never a tenant or a recipient:
+	// they become a time series each.
+	Inc(name string, labels map[string]string)
+}
+
+// StepHook is called as the dispatcher reaches each of its nine steps, before the
+// step does its work (domain.DispatchStep). It exists so a test can stand in for a
+// worker that is held at a step, or that dies there: an implementation may block,
+// or panic. Production wiring leaves it nil.
+type StepHook interface {
+	Reach(ctx context.Context, step domain.DispatchStep)
+}
+
+// Waker is told that work is due, so an idle dispatcher claims at once instead of
+// at its next poll. The Notifier calls it after a Notify commits in a process that
+// also runs a dispatcher (D22). It never blocks and carries no data: a missed wake
+// costs one poll interval, never a delivery.
+type Waker interface {
+	Wake()
+}
+
+// WakeSource is the optional LISTEN end of D22: it signals when another session
+// committed work. It is a latency optimisation over polling and never the
+// guarantee, so it may fail, and a dispatcher that loses it polls alone.
+type WakeSource interface {
+	// Listen returns a channel that receives a value after work was committed
+	// somewhere. Signals coalesce: one value may stand for many commits. The channel
+	// is closed when ctx ends or the connection behind it is lost.
+	Listen(ctx context.Context) (<-chan struct{}, error)
 }

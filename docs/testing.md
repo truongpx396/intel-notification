@@ -150,7 +150,17 @@ per idempotency key, a channel registry, in-memory fakes for the read-side ports
 - **Contract tables.** `PreferenceStoreContract` and `PreCheckContract` are run by an in-memory fake and by
   the adapter it stands in for. `NotifierContract` is run by the in-process Notifier, in memory and on
   Redis, and is written so the transports reuse it: the cases that join a caller's transaction hold for
-  the in-process Notifier only.
+  the in-process Notifier only. `DispatcherContract` is run by the in-process Dispatcher over the Env's real
+  queue, and again by the webhook package with a third channel registered, to show a channel is one
+  registration.
+- **`Scripted`, `Normalizing`, `Metrics`.** The probe-backed `Channel` cannot say what the dispatcher handed
+  it, nor answer with a Retry-After or a chosen suppression. `Scripted` answers from a script, remembers
+  every `Delivery` it was asked to send (as copies), and can hold or kill a send with `OnDeliver`;
+  `Normalizing` gives any channel a definition of address equality; `Metrics` is the `ports.Metrics` the
+  dispatcher's two counters go to, with the labels each carried.
+- **The dispatcher's loop** is tested with `testing/synctest`, where time is virtual: a wait of 400ms
+  costs nothing and is exact, so a test says when each pass happened to the millisecond (`app/dispatcher_test.go`).
+  Its queue is a recording stand-in in the test file, not a fake the kit offers.
 
 Waiting for something concurrent is done with `testing/synctest`, not a sleep: `synctest.Wait` returns
 once every goroutine is blocked, so "the worker is still held" is an assertion, not a guess.

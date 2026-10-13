@@ -68,9 +68,12 @@ and the use-cases a producer and a recipient meet first: the planner, `Notifier`
 SMTP and Resend mailers, `channel/failover`, and the `ChannelContract` every one is held to. Resend's
 idempotency was checked against its sandbox on 2026-10-13 (`make test-provider`; the 24-hour window itself
 rests on its documentation). The unsubscribe token and its signed links are built (T026a); the bounce webhook is the
-transports'. Not built: the
-dispatcher, the transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics,
-templates and addresses, and the Redis quota counters). Task-level status is in
+transports'. And the dispatcher (Stage 6): the nine steps, adaptive polling with an in-process wakeup and an
+optional `LISTEN/NOTIFY`, suppression before every delivery, the dead-letter alarm and the replay of a dead letter,
+and a third channel, `channel/webhook`, added with no change to fan-out, persistence or preferences (NS-008).
+Not built: the digest flush and the quota counters the dispatcher already honours (Stage 7), maintenance, the
+transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics, templates and addresses).
+Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
 → [specs/001-notification-core](specs/001-notification-core/)
 

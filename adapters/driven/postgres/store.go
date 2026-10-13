@@ -42,8 +42,9 @@ var (
 
 // settings are what every store in this package is built with.
 type settings struct {
-	clock ports.Clock
-	ids   ports.IDSource
+	clock  ports.Clock
+	ids    ports.IDSource
+	notify bool
 }
 
 // Option configures a store of this package.
@@ -61,6 +62,16 @@ func WithClock(c ports.Clock) Option {
 // default is a UUIDv7 stamped from the store's clock, so ids sort by creation time.
 func WithIDSource(ids ports.IDSource) Option {
 	return func(s *settings) { s.ids = ids }
+}
+
+// WithNotify makes the persist path issue a NOTIFY on dispatchChannel inside the same
+// transaction as the queue rows it writes, so a [Listener] in another process hears of
+// the work at its commit and not before (D22). It is off by default, and
+// Config.ListenNotify is how an operator turns it on: PostgreSQL serializes the commit
+// of every transaction that issued a NOTIFY behind a database-wide lock, which becomes
+// the bottleneck at the write rates this engine targets.
+func WithNotify() Option {
+	return func(s *settings) { s.notify = true }
 }
 
 func newSettings(opts []Option) settings {

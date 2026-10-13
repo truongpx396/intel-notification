@@ -14,9 +14,12 @@ as a self-contained service that any language can call.
 > suppressions, proven against a real PostgreSQL 16 by an integration suite, and the **notifier**:
 > the planner, `Notify`, `NotifyTx`, `Cancel` and `Status`, the Redis pre-check, and the recipient's
 > inbox rendered at read time. Also built: the reference **channels** (in-app over a Redis shard-channel
-> stream, email over SMTP or Resend, and a provider-failover composite), each held to one channel
-> contract. The dispatcher and the transports are not built yet, so a channel cannot be driven end to
-> end and most snippets below still describe the intended interface.
+> stream, email over SMTP or Resend, a provider-failover composite, and a signed **webhook**), each held
+> to one channel contract, and the **dispatcher** that drives them through the nine steps of the
+> contract: the fenced claim, retries under jittered backoff, the attempt ceiling, suppression, quotas,
+> expiry, the dead-letter path with its alarm, and the replay of a dead letter. The transports and the
+> one-call `New` are not built yet, so a host wires the pieces by hand and most snippets below still
+> describe the intended interface.
 > [ROADMAP.md](ROADMAP.md) says what exists, what is designed and what is deliberately absent;
 > [tasks.md](specs/001-notification-core/tasks.md) is the build order.
 >
@@ -161,7 +164,7 @@ commit, that can skip a database round-trip and can never skip a notification.
 | [ROADMAP.md](ROADMAP.md) | scope, phases, and when to use something else |
 | [specs/001-notification-core/](specs/001-notification-core/) | the normative specification |
 | [contracts/notification-ports.md](specs/001-notification-core/contracts/notification-ports.md) | every port, the 16 invariants, the dispatcher algorithm, contract tests, the gRPC surface |
-| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 38 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement |
+| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 44 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D44 from building the stages |
 | [data-model.md](specs/001-notification-core/data-model.md) | tables, keys, RLS, state transitions, retention |
 | [plan.md](specs/001-notification-core/plan.md) | build order and the capacity model |
 | [research.md](specs/001-notification-core/research.md) | the originating research the design rests on, carried with its history |
