@@ -267,7 +267,10 @@ type PreCheck interface {
 }
 
 // StreamPublisher carries the live nudge (D16): a notification id on the stream
-// keyed by the hash of the identity, and nothing else.
+// keyed by the hash of the identity, and nothing else. It is at-most-once, so a
+// nudge nobody hears is not an error. An error that wraps domain.ErrPermanent is one
+// no retry fixes, and the in-app channel reports Rejected for it; any other error is
+// transient.
 type StreamPublisher interface {
 	Publish(ctx context.Context, id domain.Identity, notificationID string) error
 }

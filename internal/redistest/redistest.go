@@ -8,6 +8,13 @@
 // another's keys, as pgtest does with a cloned PostgreSQL database. The server is
 // started with enough databases for that, and with persistence off: nothing here is
 // meant to outlive its test.
+//
+// Keys, and only keys. Pub/sub lives outside the key space: a channel, ordinary or
+// sharded, is shared by every database on the server, so a test that publishes and a
+// test that subscribes on the same name hear each other however private their
+// databases are. A test of the stream publishes as an identity of its own (a realm
+// derived from DB.Index), and a test that must use a literal channel name owns that
+// name alone.
 package redistest
 
 import (

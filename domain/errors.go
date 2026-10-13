@@ -29,4 +29,10 @@ var (
 	// ErrInvalidCursor is returned for a list cursor the store did not issue. A
 	// cursor is client input, so a bad one is a request error, not a fault.
 	ErrInvalidCursor = errors.New("notify: invalid list cursor")
+	// ErrPermanent is wrapped by a driven port to say a fault is one no retry can fix:
+	// a Redis that refuses the command for this user, or does not have it. A channel
+	// that meets it reports Rejected rather than Retry, so the delivery is dead-lettered
+	// with its reason at once instead of burning every attempt first (D10, D12). An
+	// error that does not wrap it is an infrastructure fault, which is Retry.
+	ErrPermanent = errors.New("notify: the fault is permanent; retrying cannot fix it")
 )
