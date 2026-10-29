@@ -690,18 +690,51 @@ rule above.
 
 ## Stage 7 — Digest, quotas, fairness
 
-- [ ] **T035** *red* Burst test: N notifications yield `ceil(N / DigestMax)` deliveries and N rows
+- [x] **T035** *red* Burst test: N notifications yield `ceil(N / DigestMax)` deliveries and N rows
       (NS-005). A table over N = `DigestMax` − 1, `DigestMax`, `DigestMax` + 1 and 2 × `DigestMax` + 1,
       plus a `critical` burst and an essential burst that must never be digested (NR-014)
-- [ ] **T034a** *red* The digest flush job, for what T035 does not reach (NR-014): two flushers of one
+      *Built as `TestABurstYieldsOneDigestPerDigestMaxMembers` and `TestACriticalOrEssentialBurstIsNeverDigested`
+      (`app/digest_integration_test.go`), on the Env's real store, queue and dispatcher: 99, 100, 101 and 201
+      notifications give 1, 1, 2 and 3 deliveries, every member is in exactly one of them, none carries more than
+      `DigestMax`, and every notification is a record. The critical burst is shown three ways (by the notification,
+      by its topic's default, and an essential topic), each of `DigestMax` + 1. Written against a
+      `DigestFlusher` whose `Flush` returned "not implemented": every case failed on `Flush = 0, not implemented,
+      want 1 windows flushed`, none on a fixture. The critical and essential cases went further before they failed,
+      since the planner already holds that rule (T021): no window opens and each notification is a delivery of its
+      own. A window's flush time is the database's `now()`, as every due time in the queue is, so the tests age a
+      window with the admin connection, which a fixture may use. 5 rows in the [ledger](../../docs/mutations.md),
+      none surviving.*
+- [x] **T034a** *red* The digest flush job, for what T035 does not reach (NR-014): two flushers of one
       window produce one delivery; a window overdue after a crash is flushed by the next run; a digest
       whose members are all canceled ends `canceled` and not delivered. Integration, on the T013a `Env`,
       written before `app/digest.go` exists
-- [ ] **T034** *green* `app/digest.go`: append through `Digests.AppendDigest`, leased flush job, render
+      *Built as `app/digest_integration_test.go` (the cases above, plus a lease held by another worker, a window that
+      fails to flush, every shard and every batch, and a member canceled after the flush) and `app/digest_test.go`
+      (the lease, the loop, the wake and the wiring, with no database and on virtual time). Two flushers of one
+      window is four at once, and it is the store's idempotent flush that makes it one delivery; the lease is shown
+      by its own test, since a flusher with no lease passes the first. The crash is a flusher whose `FlushDigest`
+      panics: the window stays due, and the next run flushes it once the dead worker's lease has lapsed, which the
+      test brings about by ending the lease with the admin connection. Written against the stub: all 21 tests failed on
+      their first assertion (`Flush = 0, not implemented, …`, `NewDigestFlusher succeeded, want an error`). 1 row in
+      the ledger of its own, the overdue window; the lease and the loop are T034's.*
+- [x] **T034** *green* `app/digest.go`: append through `Digests.AppendDigest`, leased flush job, render
       members skipping canceled ones (NR-014). Make T035 and then T034a pass.
       **Mutate:** flush without the lease; render a canceled member; skip the overdue window after a
       crash
-- [ ] **T037** *red* Noisy-neighbour test for NS-007, written before the quota code. Integration on the
+      *Built as `app.DigestFlusher` (`Flush`, `Run`), with `WithFlushInterval`, `WithFlushBatch`, `WithFlushOwner` and
+      `WithFlushErrorHandler`. Two of the task's three parts were built already: the append is the persist path's
+      (a notification is folded into its window in the transaction that accepts it), and the render is
+      `Store.Load`'s, which the dispatcher reads at send, minus the canceled members (T015, T033). What was left is
+      the part between, the window's flush time. The choices are [D46](design-decisions.md#d46): the job keeps no
+      memory of what it meant to flush, so a window that came due while no one ran is late and not skipped; the
+      lease is taken or renewed before every batch and not once per pass; a fault in one window or one shard is
+      reported and does not hold the others back; a batch in which nothing could be flushed ends the pass and
+      is not read again; a pass that queued work wakes the dispatcher of the process. The lease's owner name is
+      the host, the process and a random suffix, so two flushers never share one. Of the task's **Mutate** list,
+      "flush without the lease", "render a canceled member" and "skip the overdue window after a crash" each
+      have a row (the last as a `DueDigests` that looks back ten minutes and no further). 13 rows, none
+      surviving, three of which did not build on their first form and were rewritten.*
+- [x] **T037** *red* Noisy-neighbour test for NS-007, written before the quota code. Integration on the
       T013a `Env`, with no sleeps and no wall-clock reads, so it cannot flake. One tenant is exhausted
       (`Env.Quotas`) and holds a due backlog many claim batches deep on every shard; a quiet tenant sends
       at a steady rate. The dispatcher is driven one pass at a time, and the quiet tenant's delay is
@@ -715,7 +748,24 @@ rule above.
       in the commit message as the failure line. The row-by-row deferral that D24 rejects is not a
       hypothetical build to red against; it is T036's first mutation, and it must send this test red too.
       The wall-clock p95 under real load is the fairness row of T055
-- [ ] **T036** *red → green* `app/quota.go` + `redis/quota.go`: peek at enqueue, take at dispatch,
+      *Built as `TestAnExhaustedNeighbourDoesNotSlowAQuietTenant` (`app/fairness_integration_test.go`). A neighbour
+      with an exhausted budget holds twelve due rows on each of the 16 shards, four claim batches of three; the quiet
+      tenant sends one notification to a recipient on every shard in each of 30 passes, 480 in all. A pass is one
+      `Drain` of a batch from every shard, which is what `Dispatcher.Run` repeats. **The comparison holds the quiet
+      tenant's traffic fixed and varies one thing**: whether a neighbour with an exhausted budget and a deep backlog
+      exists, the baseline being the quiet tenant alone. A neighbour that is not exhausted is a tenant with a
+      backlog to send, and the quiet tenant waits behind it however the queue is built, so that comparison would
+      not tell the designs apart. The measure is the passes it took to be claimed, so the baseline is exactly 1, and
+      the test says so, since the measure means nothing if it is not. The budget runs out *after* the neighbour's
+      rows were queued, or the planner, which peeks at enqueue, would have written them due at the reset and there
+      would be no backlog. **The red the task describes cannot be witnessed against the dispatcher as T030 left
+      it**, because T030 built the backlog deferral with the rest of the dispatcher and the test passes there. It
+      was witnessed by taking the feature out, as T031's was: with the `DeferTenantChannel` call removed from
+      `Dispatcher.exhausted`, which leaves exactly the row-by-row deferral D24 rejects, `p95 due-to-claimed: 1
+      passes alone, 4 passes beside an exhausted neighbour`. Both p95s are in the commit message. With the backlog
+      moved, only the quiet rows of the first pass on the first shard wait an extra pass, which is under 5% of 480.
+      1 row in the ledger, the removal itself.*
+- [x] **T036** *red → green* `app/quota.go` + `redis/quota.go`: peek at enqueue, take at dispatch,
       backlog deferral, `drop_non_essential` never for essential or critical (NR-023,
       [D24](design-decisions.md#d24)). Make T037 pass.
       **Red first:** a peek consumes nothing; a take consumes once, and a deferral returns the attempt;
@@ -723,6 +773,30 @@ rule above.
       error; a table for `drop_non_essential` over {info, warning, critical} × {essential, not}.
       **Mutate:** peek consumes; defer row by row instead of moving the backlog (T037 must go red); drop
       an essential notification
+      *Built as `redis.Quota`, `postgres.Quotas` (which reads `channel_quotas`), `app/quota.go` (the gate the
+      planner's peek and the dispatcher's take both go through), `domain.QuotaLimits`, `QuotaWindow` and
+      `QuotaCounterKey`, the new port `ports.QuotaLimits`, and `notifytest.QuotaContract`. The planner already
+      peeked and the dispatcher already took, deferred and moved the backlog, against the kit's fake (T022,
+      T030); what did not exist was a counter, and anything that supplies its ceilings. The contract was silent
+      on what a budget is made of and the choices are [D45](design-decisions.md#d45): two fixed windows
+      aligned to UTC, a take that spends both or neither in one script, a refusal that resets at the end of the
+      longest spent window, ceilings read from `channel_quotas` with the tenant's row over the realm's and
+      remembered for 30 seconds, a row of zero that allows none, and no rollover job, since the window is in the key.
+      `QuotaContract` is the table the in-memory fake already passed (its own tests moved into it, as the
+      preferences' did in T018) and the Redis counter must pass: a peek consumes nothing, a take consumes
+      once, one budget is not another's, 80 concurrent takers take exactly the 20 given, and losing the state
+      resets the budget without an error. Written against stubs that returned "not implemented", every new
+      test failed on its assertion (`Limits(…) = {PerHour:0 PerDay:0}, false, not implemented, want {PerHour:10
+      PerDay:100}, true`); `TestADeliveryTakesOneUnitAndADeferralTakesNone` passed already, on the fake, and
+      is there for the system as a whole. "A deferral returns the attempt" is T016's (`TestFencedWrites`) and
+      is asserted again here against the real queue. `app/quota.go` is a refactor with a test of its own,
+      since the planner and the dispatcher each shadow its fail-open answers with a guard (the planner ignores
+      a reset that is not in the future, the dispatcher reads the error before the answer), so a gate that
+      failed the wrong way passed through both: the two mutations that showed it survived their first run. Of
+      the task's **Mutate** list, "peek consumes" and "drop an essential notification" each have rows, and
+      "defer row by row" is T037's. 46 rows, four of which survived their first run: two equivalent
+      mutants (a redundant `.UTC()`, removed, and a tenant-kind test the table's `CHECK` makes redundant,
+      kept) and the two gaps above, closed.*
 
 ## Stage 8 — Maintenance
 
@@ -879,9 +953,9 @@ that lists no red task has no test scheduled.
 | NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024 (done), T029 (done) |
 | NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020 (done), T033 (done) |
 | NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
-| NS-005 digest burst | burst test | T035 |
+| NS-005 digest burst | burst test | T035 (done) |
 | NS-006 poison terminates | `DispatcherContract` (worker panic, attempt ceiling); dead-letter inspect and replay | T033 (done), T032 (done) |
-| NS-007 tenant fairness | noisy-neighbour test in dispatcher passes; the load test's fairness row in wall time | T037, T055 |
+| NS-007 tenant fairness | noisy-neighbour test in dispatcher passes; the load test's fairness row in wall time | T037 (done), T055 |
 | NS-008 a channel is one file and one line | third-channel demonstration | T033a (done) |
 | NS-009 builds with no host | no-host CI job | T054 (done) |
 | NS-010 capacity | load-test thresholds | T055 |
@@ -909,7 +983,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021 (done), T024 (done) |
 | NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021 (done), T024 (done) |
 | NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021 (done), T024 (done) |
-| NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021 (done), T034a, T035 |
+| NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021 (done), T034a (done), T035 (done) |
 | NR-015 unsubscribe | email golden files; the token's vector and tamper table; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T026a (done), T044, T047a |
 | NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a (done), T053 (done) |
 | NR-017 a topic is a registration | topics integration table, no migration | T048 |
@@ -918,7 +992,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-020 resumable paged broadcast | crash between pages and inside a page; deterministic member keys | T042 |
 | NR-021 stable shard, changeable count | shard vectors; `RehomeShards` integration test | T010 (done), T016 (done) |
 | NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding; `n_tup_del` unmoved | T006 (done), T038, T039 |
-| NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; quota table; noisy-neighbour test | T016 (done), T036, T037 |
+| NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; `QuotaContract` and the `channel_quotas` table; noisy-neighbour test | T016 (done), T036 (done), T037 (done) |
 | NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017 (done), T025 (done), T028 (done) |
 | NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
 | NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |

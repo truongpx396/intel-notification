@@ -50,13 +50,14 @@ has the rules):
 - `domain/`: pure rules, imports nothing from the module. Canonical encoding and every derived key
   (`keys.go`), shard, backoff, the terminal-outcome policy, dispatch steps.
 - `ports/`: `driven.go` and `driving.go`, the interfaces. Every other layer depends on these.
-- `app/`: the use-cases, which own the invariants: the planner, the `Notifier` and the recipient `Inbox`
-  (rendered at read time). `Deps` is the one struct they are all built from.
+- `app/`: the use-cases, which own the invariants: the planner, the `Notifier`, the recipient `Inbox`
+  (rendered at read time), the `Dispatcher`, the leased `DigestFlusher`, and the quota gate the planner and
+  the dispatcher share. `Deps` is the one struct they are all built from.
 - `adapters/driven/postgres/`: the delivery queue, digests and maintenance jobs, the store's persist and
-  read paths, the inbox, preferences and suppressions. Broadcast (T041) and the catalog adapters (T048)
-  are not built yet.
+  read paths, the inbox, preferences and suppressions, and the `channel_quotas` reader. Broadcast (T041)
+  and the catalog adapters (T048) are not built yet.
 - `adapters/driven/redis/`: the pre-check, a fast path that only ever misses, and the live stream
-  (sharded pub/sub on hash-tagged keys). The quota counters are not built yet.
+  (sharded pub/sub on hash-tagged keys), and the quota counter (two fixed UTC windows, taken in one script).
 - `adapters/driven/channel/`: `inapp` (a nudge naming a notification), `email` (SMTP and Resend mailers)
   and `failover` (ordered providers, the weakest `Dedup` of its members). Each depends on `domain` and
   `ports` only, and each is held to `notifytest.ChannelContract`.

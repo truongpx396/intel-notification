@@ -512,7 +512,7 @@ type Admin interface {
 }
 
 // Jobs runs the single-owner jobs — retention, partition provisioning, idempotency
-// and digest expiry, digest flush, quota rollover, broadcast expansion — each under a
+// and digest expiry, digest flush, broadcast expansion — each under a
 // notify_job_leases lease that it renews while it runs, so any number of workers may
 // call Run and each job still has one runner at a time (D22). It drives the driven
 // Maintenance and Digests ports.
@@ -715,6 +715,17 @@ type QuotaPolicies interface {
 }
 
 type QuotaPolicy string // "defer" | "drop_non_essential"
+
+// QuotaLimits reads a budget's ceilings: channel_quotas.max_per_hour and max_per_day, with the
+// realm-wide row as the default for a tenant with none of its own, and a tenant's own row
+// overriding it (D5, D45). ok is false when nothing configures the key: an unlimited budget that
+// keeps no count. A ceiling of zero allows none. Configuration, not counter state, like
+// QuotaPolicies; the Redis counter reads it, remembers it for a short while, and goes on with the
+// last ceilings it read when the table is away.
+type QuotaLimits interface {
+	// limits is domain.QuotaLimits{PerHour, PerDay int}.
+	Limits(ctx context.Context, k QuotaKey) (limits domain.QuotaLimits, ok bool, err error)
+}
 
 // PreCheck is the OPTIONAL fast duplicate check (D18). A hit was written after a commit, under
 // the durable guard's key, for no longer than the idempotency window, so it answers the replay

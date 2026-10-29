@@ -135,7 +135,8 @@ per idempotency key, a channel registry, in-memory fakes for the read-side ports
 - **The fakes** (`Topics`, `Preferences`, `QuotaCounter`, `AddressBook`, `Templates`) are real
   in-memory implementations of their ports, each with its own table test. Where a fake stands in for an
   adapter, the table is shared so the two cannot drift: `PreferenceStoreContract` is run by the
-  `Preferences` fake as a unit test and by the PostgreSQL store against a database. There is no fake `Queue` or
+  `Preferences` fake as a unit test and by the PostgreSQL store against a database, and `QuotaContract` by the
+  `QuotaCounter` fake and by the Redis counter. There is no fake `Queue` or
   `Store`, on purpose: their leases, fencing and row-level security only PostgreSQL can hold, and a fake
   that passed where the real one fails would be worse than none.
 - **`Env`.** A private database (cloned for that test alone) with the real queue, digest, maintenance and

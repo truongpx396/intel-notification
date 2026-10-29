@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D44. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D46. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -1097,6 +1097,75 @@ told from forged ones.
 Verified: `TestWebhookRefusesAddressesItMustNotCall`, `TestBlockedDestinations`, `TestTheTransportUsesNoProxy`,
 `TestWebhookDoesNotFollowRedirects`, `TestWebhookDetailNeverCarriesTheURLsSecrets`,
 `TestSignAgainstAnIndependentVector`.
+
+## D45 — A budget is two fixed windows, and its ceilings are a table the counter reads · *built*
+
+**Decision.** A `(realm, tenant, channel)` budget is counted in two **fixed windows aligned to UTC**: the
+hour and the day. A take spends one unit in both or in neither, in one Redis script, so concurrent takers
+cannot spend what is not there and a refused take counts nowhere. A refusal reports when units return: the
+**end of the longest window that is spent**, since a delivery deferred to the end of an hour whose day is
+spent would find the day still spent and be deferred again. The window's start is in the key
+(`domain.QuotaCounterKey`, with a hash tag over the budget so its two counters share a slot), so a window
+that has ended is a key nobody reads again, and expires by itself; **there is no quota rollover job**.
+
+The ceilings are not the counter's. `ports.QuotaLimits` reads `channel_quotas.max_per_hour` and
+`max_per_day`, with a tenant's own row overriding the realm-wide default, from the same row as
+`on_exhausted`, so a tenant is never judged by its own ceiling and the realm's policy. The counter
+remembers what it read for 30 seconds, because a take is on the path of every delivery; it goes on with the
+last ceilings it read when the table is away; and a budget with no row at all is **unlimited and keeps no
+count**. A row of zero allows none: it is a row, not the absence of one.
+
+Quota fails open and correctness does not. Redis losing its state is a budget with all its units back and no
+error. A Redis that cannot be reached allows the delivery and returns the fault, so a caller that ignores it
+still sends and one that reads it can say so. The one place that is held is `app/quota.go`: the planner
+peeks and the dispatcher takes through the same gate, which answers a failure the same way for both.
+
+**Alternative.** A sliding window, or a token bucket. Or a counter that reads the table on every take.
+
+**What goes wrong without it.** `Queue.Defer` and `DeferTenantChannel` move a delivery to an instant
+([D24](#d24)). A sliding window has no such instant until the oldest unit ages out, and every claimant would
+compute a different one, so the single statement that moves a tenant's backlog out of the claim range has
+nothing to move it to. Resetting at the end of the hour while the day is spent defers the same deliveries
+every hour until midnight. A refusal that counted would spend the day on deliveries that were never made. A
+check and a spend in two steps lets 80 concurrent takers take 27 of 20 units (the mutation that does it is in
+the ledger). A counter that read the table per take puts a query in front of every send. And a ceiling of zero
+read as "no limit" would send for a tenant an operator meant to silence.
+
+The price of a fixed window is that a tenant may spend two hours' budget across a boundary. The budget is a
+bound on a tenant's share of the drainers and of a provider's allowance, not a rate limit on the provider.
+
+Verified: `QuotaContract` (run by the in-memory fake and by the Redis counter), `TestTheHourlyBudgetReturnsAtTheNextHour`,
+`TestTheDailyBudgetBindsAndResetsAtMidnight`, `TestARefusedTakeSpendsNeitherWindow`,
+`TestCeilingsAreReadOncePerTTL`, `TestAnUnreadableTableKeepsTheLastCeilingsAndOtherwiseFailsOpen`,
+`TestAnUnreachableRedisFailsOpenAndSaysSo`, `TestQuotasReadTheRealmDefaultUntilATenantOverridesIt`,
+`TestQuotaWindows`, `TestQuotaLimitsStatus`, the frozen vectors of `QuotaCounterKey`, and, against the real counter
+and the real table, `TestARealBudgetIsPeekedAtEnqueueAndTakenAtDispatch`. NS-007 itself is
+`TestAnExhaustedNeighbourDoesNotSlowAQuietTenant`: a neighbour exhausted with a backlog twelve rows deep on all 16
+shards leaves the quiet tenant's p95 at one pass, and with the backlog move removed it is four.
+
+## D46 — The digest flush job keeps no memory of what it meant to flush · *built*
+
+**Decision.** `app.DigestFlusher` finds the windows whose time has passed and flushes them, and nothing
+else: it keeps no cursor, no last-run time and no list. It reads the due windows of every shard in batches
+under the `digest_flush` lease, **taking or renewing the lease before every batch** and not once per pass.
+A window that will not flush, or a shard that cannot be read, is reported and does not hold the others back;
+a batch in which nothing could be flushed ends the pass and is not read again. The interval is an option of
+the job (5 seconds), not a `Config` field.
+
+**Alternative.** A job that flushes the windows that came due since it last ran, or that holds the lease once
+for the whole pass.
+
+**What goes wrong without it.** A window that comes due while no one holds the job, because the worker that did
+died, is overdue; a job that asks for "the windows due since my last run" never sees it, and its members are
+held and never delivered, which is the storm the window exists to prevent (invariant 8) turned into silence. A
+lease taken once per pass lapses under a backlog deeper than its ttl, and a second worker reads the same
+windows. A fault that repeats on one window, retried by a loop that treats a full batch as a reason to read
+again, spins. The flush itself is idempotent in the store ([D4](#d4)), so a lease lost mid-batch costs a window
+flushed twice, which is flushed once; the lease is what makes the job single-owner, not what makes it correct.
+
+Verified: `TestAWindowOverdueAfterACrashIsFlushedByTheNextRun`, `TestAFlusherWithoutTheLeaseFlushesNothing`,
+`TestTheFlushJobRenewsItsLeaseBetweenShardsAndStopsWhenItLosesIt`, `TestAPassThatCanFlushNothingDoesNotSpin`,
+`TestAWindowThatFailsToFlushDoesNotHoldBackTheOthers`, `TestAPassFlushesEveryShardAndEveryBatch`.
 
 ---
 

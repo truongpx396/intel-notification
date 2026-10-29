@@ -2,7 +2,9 @@ package domain
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
+	"time"
 )
 
 // Frozen vectors, computed independently from the definitions in data-model.md
@@ -31,6 +33,16 @@ func TestDerivedKeys(t *testing.T) {
 			"notify:applied:aisat:2006f991ca0e66c48051540129023c7fc5c3f7f77455b4f8a3b70bade98c8df1"},
 		{"StreamKey", func() string { return StreamKey(u1) },
 			"notify:inbox:{f0072fa3f1ee37a2e7c239330a27dc874f5d80b52732d40e27fcc3eae00dae7c}"},
+		// sha256 of "5:aisat,9:workspace,2:w1,5:email", and the Unix seconds of the window's
+		// start (2031-03-01T12:00:00Z; 2031-03-01T00:00:00Z), from Python's hashlib and datetime.
+		{"QuotaCounterKey for an hour", func() string {
+			return QuotaCounterKey(w1Email, QuotaHour, time.Date(2031, 3, 1, 12, 34, 56, 0, time.UTC))
+		},
+			"notify:quota:{f5d8327c20bb2a3b834070454a9486c0237fdc8acef869557ec18abdf3bcec58}:h:1930132800"},
+		{"QuotaCounterKey for a day", func() string {
+			return QuotaCounterKey(w1Email, QuotaDay, time.Date(2031, 3, 1, 12, 34, 56, 0, time.UTC))
+		},
+			"notify:quota:{f5d8327c20bb2a3b834070454a9486c0237fdc8acef869557ec18abdf3bcec58}:d:1930089600"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,5 +94,63 @@ func TestDerivedKeysSeparate(t *testing.T) {
 				t.Fatalf("keys collide: %s", tc.a)
 			}
 		})
+	}
+}
+
+var w1Email = QuotaKey{Realm: "aisat", Tenant: Tenant{Kind: "workspace", ID: "w1"}, Channel: "email"}
+
+// A quota counter's key names the budget and the window it counts, and only those:
+// every instant of a window is one key, the next window is another, and no two budgets
+// share one. The braces around the budget keep a budget's hour and day on one slot.
+func TestQuotaCounterKeyNamesTheBudgetAndTheWindow(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2031, 3, 1, 12, 34, 56, 0, time.UTC)
+	hour := QuotaCounterKey(w1Email, QuotaHour, at)
+
+	same := []struct {
+		name string
+		at   time.Time
+	}{
+		{"the first instant of the hour", time.Date(2031, 3, 1, 12, 0, 0, 0, time.UTC)},
+		{"the last instant of the hour", time.Date(2031, 3, 1, 12, 59, 59, 999999999, time.UTC)},
+		{"the same instant in another zone", at.In(time.FixedZone("UTC+7", 7*3600))},
+	}
+	for _, tc := range same {
+		if got := QuotaCounterKey(w1Email, QuotaHour, tc.at); got != hour {
+			t.Errorf("%s: key %s, want the hour's %s", tc.name, got, hour)
+		}
+	}
+	if got := QuotaCounterKey(w1Email, QuotaHour, time.Date(2031, 3, 1, 13, 0, 0, 0, time.UTC)); got == hour {
+		t.Errorf("the next hour has the same key %s", got)
+	}
+
+	other := map[string]string{
+		"the day":             QuotaCounterKey(w1Email, QuotaDay, at),
+		"another realm":       QuotaCounterKey(QuotaKey{Realm: "other", Tenant: w1Email.Tenant, Channel: "email"}, QuotaHour, at),
+		"another tenant":      QuotaCounterKey(QuotaKey{Realm: "aisat", Tenant: Tenant{Kind: "workspace", ID: "w2"}, Channel: "email"}, QuotaHour, at),
+		"another tenant kind": QuotaCounterKey(QuotaKey{Realm: "aisat", Tenant: Tenant{Kind: "org", ID: "w1"}, Channel: "email"}, QuotaHour, at),
+		"another channel":     QuotaCounterKey(QuotaKey{Realm: "aisat", Tenant: w1Email.Tenant, Channel: "sms"}, QuotaHour, at),
+	}
+	for name, key := range other {
+		if key == hour {
+			t.Errorf("%s has the same key %s", name, hour)
+		}
+	}
+
+	tag := func(key string) string {
+		open, closing := strings.Index(key, "{"), strings.Index(key, "}")
+		if open < 0 || closing < open {
+			return ""
+		}
+		return key[open : closing+1]
+	}
+	if tag(hour) == "" {
+		t.Fatalf("the key %q has no hash tag", hour)
+	}
+	if tag(hour) != tag(other["the day"]) {
+		t.Errorf("the hour %s and the day %s are on different hash tags: one script could not take both", hour, other["the day"])
+	}
+	if tag(hour) == tag(other["another tenant"]) {
+		t.Errorf("two tenants share the hash tag %s: a product's traffic would sit on one slot", tag(hour))
 	}
 }

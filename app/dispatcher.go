@@ -53,11 +53,10 @@ type Dispatcher struct {
 	store        ports.Store
 	queue        ports.Queue
 	suppressions ports.SuppressionStore
-	quotas       ports.QuotaCounter
-	policies     ports.QuotaPolicies // nil: an exhausted budget defers
-	metrics      ports.Metrics       // nil: nothing is counted
-	steps        ports.StepHook      // nil: the steps are not observed
-	listener     ports.WakeSource    // nil: polling alone
+	quota        quotaGate
+	metrics      ports.Metrics    // nil: nothing is counted
+	steps        ports.StepHook   // nil: the steps are not observed
+	listener     ports.WakeSource // nil: polling alone
 	clock        ports.Clock
 
 	rnd     func() float64
@@ -113,8 +112,8 @@ func NewDispatcher(cfg notify.Config, d Deps, opts ...DispatcherOption) (*Dispat
 	}
 	disp := &Dispatcher{
 		cfg: cfg, channels: d.Channels, topics: d.Topics, renderer: d.Renderer, addresses: d.Addresses,
-		store: d.Store, queue: d.Queue, suppressions: d.Suppressions, quotas: d.Quotas,
-		policies: d.QuotaPolicies, metrics: d.Metrics, steps: d.Steps, listener: d.Listener, clock: d.clockOf(),
+		store: d.Store, queue: d.Queue, suppressions: d.Suppressions, quota: newQuotaGate(d),
+		metrics: d.Metrics, steps: d.Steps, listener: d.Listener, clock: d.clockOf(),
 		rnd: rand.Float64, onError: func(error) {}, wake: make(chan struct{}, 1),
 	}
 	for _, opt := range opts {
@@ -328,7 +327,7 @@ func (d *Dispatcher) handle(ctx context.Context, topics *topicCache, c domain.Cl
 	// 5. Quota.
 	d.reach(ctx, domain.StepQuota)
 	key := domain.QuotaKey{Realm: e.Identity.Realm, Tenant: e.Identity.Tenant, Channel: e.Channel}
-	allowed, resetAt, qerr := d.quotas.Take(ctx, key)
+	allowed, resetAt, qerr := d.quota.take(ctx, key)
 	switch {
 	case qerr != nil:
 		// Quota fails open: a counter that cannot answer must not hold deliveries back.
@@ -464,14 +463,8 @@ func (d *Dispatcher) address(ctx context.Context, c domain.Claim, ch ports.Chann
 // in one statement, so the tenant stops occupying the head of every shard (D24).
 func (d *Dispatcher) exhausted(ctx context.Context, topics *topicCache, c domain.Claim, key domain.QuotaKey, resetAt time.Time) error {
 	e := c.Entry
-	policy := domain.QuotaDefer
-	if d.policies != nil {
-		if p, err := d.policies.Policy(ctx, key); err == nil {
-			policy = p
-		}
-	}
 	// A topic that cannot be read is not known to be droppable, and dropping discards.
-	if def, known, err := topics.lookup(ctx, e.Identity.Realm, e.Topic); err == nil && known && policy.Drops(def, e.Priority) {
+	if def, known, err := topics.lookup(ctx, e.Identity.Realm, e.Topic); err == nil && known && d.quota.drops(ctx, key, def, e.Priority) {
 		return d.finish(ctx, c, domain.OutcomeDroppedQuota, "", "the channel's budget is spent and its policy drops non-essential notifications")
 	}
 

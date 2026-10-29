@@ -4,9 +4,9 @@
 // driving.go holds what callers use: Notifier, Inbox, Admin, Dispatcher and
 // Jobs. This file holds what the engine uses: the delivery queue, digest windows
 // and maintenance operations, the persist and read paths, the inbox, preferences
-// and suppressions, which adapters/driven/postgres implements as plain SQL, and
-// the catalog, channels and counters whose implementations land with their own
-// tasks. The Go declarations are normative;
+// and suppressions, which adapters/driven/postgres implements as plain SQL, the
+// channels and counters, and the catalog, whose implementation lands with its own
+// task. The Go declarations are normative;
 // specs/001-notification-core/contracts/notification-ports.md explains them.
 //
 // An interface has no behaviour to test. It is the seam the contract suites are
@@ -266,6 +266,16 @@ type QuotaCounter interface {
 // QuotaPolicies the same way: deferring discards nothing, and dropping can.
 type QuotaPolicies interface {
 	Policy(ctx context.Context, k domain.QuotaKey) (domain.QuotaPolicy, error)
+}
+
+// QuotaLimits reads a budget's ceilings: channel_quotas.max_per_hour and max_per_day,
+// with the realm-wide row as the default for a tenant with none of its own, and a
+// tenant's own row overriding it (D5). ok is false when nothing configures the key, which
+// is an unlimited budget. Like QuotaPolicies it is configuration, held in a table and not
+// in the counter, so losing Redis does not reset it, and a counter that cannot read it
+// does not turn quotas off for a tenant it has already read.
+type QuotaLimits interface {
+	Limits(ctx context.Context, k domain.QuotaKey) (limits domain.QuotaLimits, ok bool, err error)
 }
 
 // PreCheck is the optional fast duplicate check (D18). A nil PreCheck means

@@ -33,8 +33,7 @@ type Planner struct {
 	topics   ports.TopicRegistry
 	prefs    ports.PreferenceStore
 	channels ports.ChannelRegistry
-	quotas   ports.QuotaCounter
-	policies ports.QuotaPolicies // nil: an exhausted budget defers
+	quota    quotaGate
 	clock    ports.Clock
 }
 
@@ -51,7 +50,7 @@ func NewPlanner(cfg notify.Config, d Deps) (*Planner, error) {
 	}
 	return &Planner{
 		cfg: cfg.WithDefaults(), topics: d.Topics, prefs: d.Prefs, channels: d.Channels,
-		quotas: d.Quotas, policies: d.QuotaPolicies, clock: d.clockOf(),
+		quota: newQuotaGate(d), clock: d.clockOf(),
 	}, nil
 }
 
@@ -161,8 +160,8 @@ func (p *Planner) planChannel(ctx context.Context, id domain.Identity, def domai
 	}
 
 	key := domain.QuotaKey{Realm: id.Realm, Tenant: id.Tenant, Channel: ch}
-	if exhausted, resetAt, err := p.quotas.Peek(ctx, key); err == nil && exhausted && resetAt.After(sendAt) {
-		if p.dropsWhenExhausted(ctx, key, def, n.Priority) {
+	if exhausted, resetAt := p.quota.peek(ctx, key); exhausted && resetAt.After(sendAt) {
+		if p.quota.drops(ctx, key, def, n.Priority) {
 			return domain.PlannedDelivery{Channel: ch, Mode: domain.PlanDropped, Reason: reasonQuota}
 		}
 		due, reason = resetAt, reasonQuota
@@ -182,14 +181,4 @@ func (p *Planner) planChannel(ctx context.Context, id domain.Identity, def domai
 		d.Mode = domain.PlanDeferred
 	}
 	return d
-}
-
-// dropsWhenExhausted reports whether the channel's spent budget drops this
-// notification. With no policy store, or one that cannot answer, it does not.
-func (p *Planner) dropsWhenExhausted(ctx context.Context, key domain.QuotaKey, def domain.TopicDef, pr domain.Priority) bool {
-	if p.policies == nil {
-		return false
-	}
-	policy, err := p.policies.Policy(ctx, key)
-	return err == nil && policy.Drops(def, pr)
 }

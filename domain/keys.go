@@ -3,6 +3,8 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
+	"time"
 )
 
 // ChannelKind selects a channel implementation. The engine never branches on
@@ -69,4 +71,13 @@ func PreCheckKey(id Identity, idemKey string) string {
 // Redis Cluster hash tag, so sharded pub/sub keeps one recipient on one slot.
 func StreamKey(id Identity) string {
 	return "notify:inbox:{" + sha256Hex(id.Canonical()) + "}"
+}
+
+// QuotaCounterKey is the Redis counter for one budget in one window (D5, D24). The
+// braces are a hash tag over the budget, so its hour and its day are on one slot and
+// the two are taken in one script; the window's start is in the key, so a window that
+// has ended is a key nobody reads again and expires by itself.
+func QuotaCounterKey(k QuotaKey, w QuotaWindow, at time.Time) string {
+	return "notify:quota:{" + sha256Hex(Canonical(string(k.Realm), k.Tenant.Kind, k.Tenant.ID, string(k.Channel))) + "}:" +
+		string(w) + ":" + strconv.FormatInt(w.Start(at).Unix(), 10)
 }
