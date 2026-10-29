@@ -128,7 +128,8 @@ eng, err := app.New(cfg, app.Deps{
     Store: pg.Store, Queue: pg.Queue, Digests: pg.Digests, Maintenance: pg.Maintenance,
     Inbox: pg.Inbox, Prefs: pg.Prefs,
     Suppressions: pg.Suppressions,
-    Quotas: redis.NewQuota(rdb), Stream: redis.NewStream(rdb), PreCheck: redis.NewPreCheck(rdb),
+    Quotas: redis.NewQuota(rdb, pg.Quotas), QuotaPolicies: pg.Quotas,
+    Stream: redis.NewStream(rdb), PreCheck: redis.NewPreCheck(rdb),
 })
 ```
 
@@ -198,7 +199,9 @@ Tick per host. This is the originating design's checklist, extended by the revie
 - [ ] **Audiences** — paged resolver, `Directory` callback, or inline lists.
 - [ ] **Transactional producers use `NotifyTx`**; the rest retry `Notify` with a stable key.
 - [ ] **Dispatcher and maintenance running.**
-- [ ] **Quotas configured** — a realm-wide default at minimum, if you are multi-tenant.
+- [ ] **Quotas configured** — a realm-wide default row in `channel_quotas` at minimum, if you are
+      multi-tenant: a tenant with no row and no default is unlimited and is not counted
+      ([D45](../specs/001-notification-core/design-decisions.md#d45)).
 - [ ] **Isolation verified** — `make verify-schema` green; `StreamIsolationContract` green against your
       relay.
 - [ ] **Unsubscribe reachable** — the `POST` endpoint behind your `List-Unsubscribe` URL.

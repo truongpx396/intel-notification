@@ -12,8 +12,9 @@ Running the engine. Written for the person on call, so each section leads with t
 | Maintenance | runs in every worker; each job single-owner through a `notify_job_leases` lease | nothing — the lease picks one runner |
 
 Maintenance jobs: retention, partition provisioning, idempotency expiry, digest flush and expiry,
-quota rollover, broadcast expansion. `SELECT * FROM notify_job_leases` shows who holds each and when it
-last ran.
+broadcast expansion. `SELECT * FROM notify_job_leases` shows who holds each and when it last ran; the
+digest flush is the row `digest_flush`. There is no quota job: a budget's windows are in its Redis keys and
+lapse by themselves.
 
 There is no broker in the default deployment and nothing to scale for one.
 
@@ -40,8 +41,11 @@ There is no broker in the default deployment and nothing to scale for one.
 ### Queue depth climbing
 
 1. **One tenant or all?** `SELECT tenant_id, channel, count(*) FROM notification_outbox WHERE next_attempt_at <= now() AND (lease_expires_at IS NULL OR lease_expires_at <= now()) GROUP BY 1, 2 ORDER BY 3 DESC`.
-   A single tenant with an exhausted quota should already have been deferred out of the due range; if
-   it has not, the quota job is not running.
+   A single tenant with an exhausted quota should already have been deferred out of the due range: the
+   dispatcher moves its whole backlog on that channel to the budget's reset the first time it finds the
+   budget spent ([D24](../specs/001-notification-core/design-decisions.md#d24)). If it has not, the counter
+   is answering "allowed", because it cannot be reached (the dispatcher reports it) or because the tenant has
+   no row in `channel_quotas` and no realm default covers it.
 2. **Read `last_error`** on the oldest due rows. One provider dominating means an external outage and
    backoff doing its job — confirm retries are spreading rather than hammering.
 3. **Check worker replicas and `notify.lease.lost`.** A worker handles each claimed batch concurrently,
@@ -155,7 +159,14 @@ would resume sending to someone who complained. Redis holds nothing to erase —
 
 - The pre-check in Redis is an optimization. If Redis is empty, every `Notify` takes the durable path and
   **stays correct**. If Redis is down, the live stream falls back to reconnect-time counts and quotas
-  fail open. Neither loses a notification.
+  fail open. Neither loses a notification. Redis forgetting its quota counters gives every tenant its whole
+  hour back, once.
+- **Quotas are rows in `channel_quotas`**: `max_per_hour`, `max_per_day` and `on_exhausted` per
+  `(realm, tenant, channel)`, the row with an empty tenant being the realm-wide default for every tenant
+  without its own. A change reaches the dispatchers within 30 seconds (the counter remembers the ceilings that
+  long). Windows are the UTC hour and the UTC day, so a tenant may spend two hours' budget across a boundary.
+  A row of zero allows none. A tenant covered by no row is unlimited and is not counted
+  ([D45](../specs/001-notification-core/design-decisions.md#d45)).
 - The unread badge is a bounded count on a partial index. A relay redeploy reconnecting every client is
   a burst of cheap reads, not a scan of every inbox.
 - The queue holds pending work only. A deep queue means a large backlog, never accumulated history.

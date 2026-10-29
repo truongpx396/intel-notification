@@ -68,8 +68,8 @@ type Admin interface {
 }
 
 // Jobs runs the single-owner jobs — retention, partition provisioning,
-// idempotency and digest expiry, digest flush, quota rollover, broadcast
-// expansion — each under a notify_job_leases lease it renews while it runs, so
+// idempotency and digest expiry, digest flush, broadcast expansion — each under a
+// notify_job_leases lease it renews while it runs, so
 // any number of workers may call Run and each job still has one runner at a time
 // (D22). It drives the driven Maintenance and Digests ports.
 type Jobs interface {

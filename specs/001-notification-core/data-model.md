@@ -202,7 +202,9 @@ a member still to arrive (TEST 7).
 ### `channel_quotas` — per-tenant channel budget
 
 `max_per_hour`, `max_per_day` and `on_exhausted` per `(realm, tenant, channel)`; the empty tenant pair
-is the realm-wide default ([D5](design-decisions.md#d5)). The hot counter lives in Redis.
+is the realm-wide default ([D5](design-decisions.md#d5)). The hot counter lives in Redis, in two fixed UTC
+windows, hour and day, whose start is in the key, so there is nothing to roll over
+([D45](design-decisions.md#d45)).
 
 ### Catalog tables (`0003`) — the data-backed ports
 
