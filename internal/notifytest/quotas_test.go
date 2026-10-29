@@ -209,3 +209,18 @@ func TestQuotaCounterPolicyIsPerKeyAndSurvivesLose(t *testing.T) {
 		t.Fatalf("Policy after setting defer again = %q, want it replaced", got)
 	}
 }
+
+// fakeQuotaWorld is the fake as a QuotaWorld: a budget is a count and a reset.
+type fakeQuotaWorld struct{ *QuotaCounter }
+
+func (w fakeQuotaWorld) Grant(k domain.QuotaKey, n int) time.Time {
+	reset := t0.Add(time.Hour)
+	w.SetBudget(k, n, reset)
+	return reset
+}
+
+// The fake holds the same table as the Redis counter (T036).
+func TestQuotaCounterRunsTheContract(t *testing.T) {
+	t.Parallel()
+	QuotaContract(t, func(*testing.T) QuotaWorld { return fakeQuotaWorld{NewQuotaCounter()} })
+}

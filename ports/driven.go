@@ -268,6 +268,16 @@ type QuotaPolicies interface {
 	Policy(ctx context.Context, k domain.QuotaKey) (domain.QuotaPolicy, error)
 }
 
+// QuotaLimits reads a budget's ceilings: channel_quotas.max_per_hour and max_per_day,
+// with the realm-wide row as the default for a tenant with none of its own, and a
+// tenant's own row overriding it (D5). ok is false when nothing configures the key, which
+// is an unlimited budget. Like QuotaPolicies it is configuration, held in a table and not
+// in the counter, so losing Redis does not reset it, and a counter that cannot read it
+// does not turn quotas off for a tenant it has already read.
+type QuotaLimits interface {
+	Limits(ctx context.Context, k domain.QuotaKey) (limits domain.QuotaLimits, ok bool, err error)
+}
+
 // PreCheck is the optional fast duplicate check (D18). A nil PreCheck means
 // every Notify takes the durable path and stays correct. Its keys are the
 // durable guard's key space, hashed, and it can only ever miss.
