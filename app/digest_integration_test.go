@@ -67,7 +67,7 @@ func sendNote(t *testing.T, e *notifytest.Env, id domain.Identity, n domain.Noti
 // passed.
 func ageWindows(t *testing.T, e *notifytest.Env) {
 	t.Helper()
-	if _, err := e.DB.Admin.Exec(t.Context(), `UPDATE digest_buffer SET flush_at = now() - interval '1 minute' WHERE flushed_at IS NULL`); err != nil {
+	if _, err := e.DB.Admin.Exec(t.Context(), `UPDATE digest_buffer SET flush_at = now() - interval '1 hour' WHERE flushed_at IS NULL`); err != nil {
 		t.Fatal(err)
 	}
 }
