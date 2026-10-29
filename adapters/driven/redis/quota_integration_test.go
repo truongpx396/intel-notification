@@ -113,12 +113,12 @@ func (fx *quotaFx) take(t *testing.T, k domain.QuotaKey) (bool, time.Time) {
 	return allowed, resetAt
 }
 
-// redisWorld is the counter as a notifytest.QuotaWorld: a budget of n is n an hour and n
-// a day, resetting at the end of the hour.
+// redisWorld is the counter as a notifytest.QuotaWorld: a budget of n is n an hour, with
+// a day so large it never binds, so the budget resets at the end of the hour.
 type redisWorld struct{ *quotaFx }
 
 func (w redisWorld) Grant(k domain.QuotaKey, n int) time.Time {
-	w.src.set(k, domain.QuotaLimits{PerHour: n, PerDay: n})
+	w.src.set(k, domain.QuotaLimits{PerHour: n, PerDay: 1 << 30})
 	return domain.QuotaHour.End(w.clock.Now())
 }
 
@@ -227,7 +227,7 @@ func TestARefusedTakeSpendsNeitherWindow(t *testing.T) {
 // A ceiling lowered under what has already been counted is spent, not unlimited.
 func TestACeilingLoweredUnderTheCountIsSpent(t *testing.T) {
 	t.Parallel()
-	fx := newQuotaFx(t)
+	fx := newQuotaFx(t, redis.WithLimitsTTL(0))
 	fx.src.set(w1Email, domain.QuotaLimits{PerHour: 10, PerDay: 100})
 	for range 5 {
 		fx.take(t, w1Email)
@@ -261,8 +261,10 @@ func TestTheCountersAreOnePairOfKeysThatExpire(t *testing.T) {
 		}
 		ttl, err := fx.rdb.TTL(t.Context(), key).Result()
 		remaining := window.End(now).Sub(now)
-		if err != nil || ttl < remaining || ttl > remaining+2*time.Hour {
-			t.Fatalf("TTL of %s = %v, %v, want at least the %v left in its window and not an unbounded one", key, ttl, err, remaining)
+		// The counter outlives its window by a grace, so a clock a little behind Redis's
+		// does not lose a count it still needs; and it does not outlive it by much.
+		if err != nil || ttl <= remaining || ttl > remaining+2*time.Hour {
+			t.Fatalf("TTL of %s = %v, %v, want more than the %v left in its window, and a bounded more", key, ttl, err, remaining)
 		}
 	}
 }

@@ -46,17 +46,40 @@ const (
 	QuotaDay  QuotaWindow = "d"
 )
 
-// Start is the first instant of the window containing t.
-func (w QuotaWindow) Start(t time.Time) time.Time { return time.Time{} }
+// length is how long the window is. There are two, so any other is a bug in the caller.
+func (w QuotaWindow) length() time.Duration {
+	switch w {
+	case QuotaHour:
+		return time.Hour
+	case QuotaDay:
+		return 24 * time.Hour
+	}
+	panic("domain: unknown quota window " + string(w))
+}
+
+// Start is the first instant of the window containing t. Truncate counts from the zero
+// time, which is midnight UTC, and does so in absolute time, so an hour and a day are
+// aligned to UTC whatever zone t is in, and an instant on a boundary belongs to the window
+// that starts there.
+func (w QuotaWindow) Start(t time.Time) time.Time { return t.Truncate(w.length()) }
 
 // End is the instant the window containing t ends, and its count starts again at zero.
-func (w QuotaWindow) End(t time.Time) time.Time { return time.Time{} }
+func (w QuotaWindow) End(t time.Time) time.Time { return w.Start(t).Add(w.length()) }
 
 // Status judges a budget at now, given what has been counted so far in the current
 // hour and the current day. It is exhausted when either window has reached its
 // ceiling. resetAt is when units return: the end of the longest window that is spent,
 // since a delivery deferred to the end of the hour would find a spent day. A budget
 // with units left reports the end of the hour.
+//
+// A ceiling of zero is spent in every window, so its reset is only the next time a
+// delivery is worth looking at again.
 func (l QuotaLimits) Status(now time.Time, hour, day int) (exhausted bool, resetAt time.Time) {
-	return false, time.Time{}
+	switch {
+	case day >= l.PerDay:
+		return true, QuotaDay.End(now)
+	case hour >= l.PerHour:
+		return true, QuotaHour.End(now)
+	}
+	return false, QuotaHour.End(now)
 }

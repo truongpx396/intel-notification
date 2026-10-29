@@ -3,6 +3,7 @@ package domain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"time"
 )
 
@@ -77,5 +78,6 @@ func StreamKey(id Identity) string {
 // the two are taken in one script; the window's start is in the key, so a window that
 // has ended is a key nobody reads again and expires by itself.
 func QuotaCounterKey(k QuotaKey, w QuotaWindow, at time.Time) string {
-	return ""
+	return "notify:quota:{" + sha256Hex(Canonical(string(k.Realm), k.Tenant.Kind, k.Tenant.ID, string(k.Channel))) + "}:" +
+		string(w) + ":" + strconv.FormatInt(w.Start(at).Unix(), 10)
 }
