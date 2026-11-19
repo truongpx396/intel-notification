@@ -13,7 +13,7 @@ PostgreSQL, a user-visible behaviour through the running service.
 | Layer | Tool | What it proves | Run | In CI |
 |---|---|---|---|---|
 | **Unit** | `go test`, table-driven, parallel | Pure rules in `domain/`: the canonical encoding and every derived key (frozen vectors), shard, backoff, the terminal-outcome policy | `make test` | `unit` |
-| **Schema** | `psql` against a throwaway PostgreSQL 16 | What the schema alone holds: constraints, forced row-level security on every scoped table and partition, key spaces, shapes | `make verify-schema` | `schema` |
+| **Schema** | `psql` against a throwaway PostgreSQL 16 (and 17: `make test-pg-next`) | What the schema alone holds: constraints, forced row-level security on every scoped table and partition, key spaces, shapes | `make verify-schema` | `schema` |
 | **Integration** | `go test -tags integration` + **Testcontainers** | Every state transition in `adapters/driven/postgres`, against a real PostgreSQL, as the non-superuser table owner — including real concurrency | `make test-integration` | `integration` |
 | **End to end** | **Playwright** | The running service as a host's front end sees it: the REST inbox, the SSE stream, unsubscribe links, provider callbacks | `make e2e` | `e2e-suite` (typecheck + list) now; `e2e` once the service exists |
 | **Benchmark** | `go test -bench` + Testcontainers | What one PostgreSQL primary sustains: queue throughput, WAL and HOT-update share per delivery, claim latency under backlog. Not a pass/fail gate. `soak` runs the queue under sustained load and watches for bloat and drift | `make bench`, `make soak` | — |
@@ -79,7 +79,7 @@ A vector produced by running the code only proves the code agrees with itself.
 ### Integration tests: Testcontainers, one database per test
 
 Integration tests carry `//go:build integration`, so `make test` needs no Docker. `internal/pgtest`
-starts **one** PostgreSQL 16 container per test binary and builds a template database once: every
+starts **one** PostgreSQL 16 container per test binary (`PGTEST_IMAGE`, or `make test-integration PG_IMAGE=…`, picks another major; `make test-pg-next` runs 17, and CI runs both) and builds a template database once: every
 migration, the non-superuser owner role, and any state the package prepares (partitions for the current
 month). `internal/redistest` does the same for Redis 7, with a logical database per test instead of a
 clone. That isolates keys and **not pub/sub channels**, which every database on the server shares: a test of
@@ -106,6 +106,15 @@ Rules:
 - **Check a guarantee against something independent of the code.** The erasure test lists the tables
   that can hold a recipient from the database catalog, not from the adapter's own list, so a table the
   code forgot — or one added later — fails the test.
+- **A leg for another major must prove it ran that major.** Where PostgreSQL moved something between majors
+  (the checkpoint counters, in 17) the code has a branch for each, and only a run on each holds both.
+  `PGTEST_IMAGE` chooses the image and `PGTEST_EXPECT_MAJOR`, set apart from it, makes the suite refuse a server of
+  another major, so a CI leg whose image never reached the suite fails and does not pass as a run it did not make.
+- **A query over server state a test cannot produce is run against rows made for it.** A table named like the catalog
+  view, in a schema the test role searches first (`ALTER ROLE … IN DATABASE … SET search_path = shadow, pg_catalog`),
+  gives the unchanged query rows the test chooses; the first case is a control that the query reads them, so a result
+  of nothing is the filter at work and not a table never read. `TestDatabaseConditionsCountsOnlyClientBackends` does
+  this for `pg_stat_activity`, whose autovacuum worker no test can make appear on demand.
 
 ### The kit: `internal/notifytest`
 

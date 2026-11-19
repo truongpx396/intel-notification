@@ -853,8 +853,30 @@ rule above.
       old `CASE` restored it fails with `the holder's renewal kept last_started_at, so the column shows the job last ran
       when worker-1 took it, and notify.job.stale fires for a healthy job (D50)`. Both mutations are killed (ledger).
       The alarm thresholds are per job, in a table in [operations.md](../../docs/operations.md#maintenance-jobs-and-their-leases).
-      `last_finished_at` is still not written, and a job that takes its lease and fails every run is not stale: that is
-      the error handler's report. No refactor was needed: it is one expression.*
+      A job that takes its lease and fails every run is not stale, which is what T038b is for.
+      No refactor was needed: it is one expression.*
+- [x] **T038b** *red → green* `Maintenance.FinishJob(job, owner)` records a run that ended cleanly in
+      `notify_job_leases.last_finished_at`, for the job's current owner only, and `app.Maintenance.Pass` and
+      `DigestFlusher.Flush` call it, so a job that takes its lease and fails at every run can be told from one that works
+      ([D52](design-decisions.md#d52)). Found when T038a was closed: `last_started_at` says a worker is taking a job and cannot
+      say it is getting anywhere, and the error handler that does say so is the host's to wire.
+      **Red first:** a run that ended cleanly records its end once, after its work; one that failed, was refused, lost its
+      lease on the way or was stopped does not; a finish that cannot be recorded is reported and stops no other job; the same
+      for the flush pass; in PostgreSQL only the owner records an end, a grant and a take-over leave the column alone, and a
+      job and an owner are both required.
+      **Mutate:** record the end of a failed job; of a job that lost its lease; of one cut short by a stop; for a worker that is
+      not the owner; under the wrong name; ignore a finish that failed; let one stop the other jobs
+      *Red witnessed first, for the use-cases and for PostgreSQL (Docker answered this time, so there is no departure from
+      the rule as there was for T039): with the port method stubbed, the failures are
+      `recorded the end of [], want [partition_provision retention idem_expiry ...]` and `the owner's finish was not
+      recorded, so a job that works is indistinguishable from one that fails every run (D52)`, in the `test:` commit. The tests
+      that say *not finished* pass against a stub, as they must, and are held by their mutants. 24 mutants, all killed (ledger),
+      over the SQL, `Pass`, `Flush` and the end-to-end wiring; the end-to-end test
+      (`TestAJobThatFailsEveryRunIsStartedAndNeverFinished`) runs a real database whose expiry always fails and finds that job
+      started and never finished while the other five finished. Two guards were redundant and were removed, not kept
+      unexercised. The alarm `notify.job.failing` is in [operations.md](../../docs/operations.md). **Not done:** the column does not
+      say *why* a job fails (the error handler and the log do), and a run longer than its threshold also shows as failing,
+      which is a thing to look at.*
 - [x] **T040** *red → green* `app/erasure.go` + `Admin.Erase`; test NS-012.
       **Red first:** erase a recipient, then scan every table listed by the database catalog, not by the
       adapter, and find no row carrying the recipient; the erasure record keeps no identity; a suppression
@@ -869,7 +891,7 @@ rule above.
       or address, and that a later notification to the suppressed address is recorded as suppressed with the channel
       never asked. The task's mutations are killed by it and by `TestErase`: *skip a table* (`notify_idem` removed from
       the list) and *delete the suppression* (`Erase` also deletes the realm's suppressions).*
-- [ ] **T040a** *red → green* `app/maintenance.go`: `Maintenance.Preflight`, at startup and on a
+- [x] **T040a** *red → green* `app/maintenance.go`: `Maintenance.Preflight`, at startup and on a
       schedule, reports as warnings and never failures the database conditions the queue depends on —
       `max_wal_size` against the observed WAL rate, the connected role's
       `idle_in_transaction_session_timeout` and `statement_timeout`, the age of the oldest `backend_xmin`
@@ -895,10 +917,18 @@ rule above.
       see other roles' sessions, because a clean reading through one is a clean bill it has not earned. The gauges need a
       `Metrics` that can hold a level, which `ports.Metrics` (`Inc` only) cannot, so there is an optional
       `ports.GaugeMetrics`.
-      **Open, so the box stays open, for two reasons.** *Count backends that are not clients* survived and cannot be
-      killed from a test: the only such backend that holds a snapshot in this database is an autovacuum worker, which a
-      test cannot make appear on demand, and the definition of done wants a survivor fixed. And the PostgreSQL 17 branch
-      of the checkpoint read, where the counters moved to `pg_stat_checkpointer`, has no test, because the suite runs on 16.*
+      **Closed by a follow-up, which is why the box is ticked.** Two gaps had kept it open. *Count backends that are not clients*
+      survived because a test cannot make an autovacuum worker appear and stay; the query now runs, unchanged, against a table
+      named `pg_stat_activity` in a schema the test database's owner searches before `pg_catalog`
+      (`TestDatabaseConditionsCountsOnlyClientBackends`: an autovacuum worker, a walsender and a background worker an hour
+      old are not counted, a client backend in the same table is, which is the control, and a worker older than a client
+      does not hide it), and the mutant dies three ways. The PostgreSQL 17 branch had no test because the suite started 16:
+      `PGTEST_IMAGE` now chooses the image, `make test-pg-next` runs the schema and integration suites on `postgres:17-alpine`,
+      CI runs both majors, and `PGTEST_EXPECT_MAJOR` fails a leg that did not start the major it names. The whole suite and
+      the schema assertions passed on 17.12 unchanged, and the 17 branch's mutants (the counters swapped, the wrong view
+      read, on 17 and on 16) are killed. The tests that closed the gaps were written against code that already held, so their red
+      is the mutant, not a failing run: the rows are in the ledger (36 for this follow-up). As for the red of this task's
+      PostgreSQL tests, it was witnessed after the green, and T039's note says why.*
 - [x] **T040b** *red → green* `Admin.Erase` forgets the pre-check's entries for the recipient's idempotency keys, so a
       producer retrying a key after an erasure is not told it is a replay of a notification that is gone (NR-034,
       [D51](design-decisions.md#d51)). Found when Stage 8 was reviewed: `Erase` removed the `notify_idem` rows and left
@@ -1095,7 +1125,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext; `Admin.Erase`'s own table (`TestErase…` in `app`); the pre-check's entries for the recipient's keys forgotten before the erasure (`TestEraseForgets…`, the `Forget` cases of `PreCheckContract`, `TestIdemKeys`) | T019 (done), T040, T040b |
 | NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack | T020 (done), T052 |
 | NR-036 capacity envelope stated | stated in [plan.md § Capacity model](plan.md#capacity-model); the load-test thresholds | T055 |
-| NR-037 preflight warnings | `TestAssessDatabase` and `TestWALRate`; `TestPreflight…` in `app`; `TestDatabaseConditions…` against PostgreSQL (the PostgreSQL 17 branch of the checkpoint read has no test) | T040a |
+| NR-037 preflight warnings | `TestAssessDatabase` and `TestWALRate`; `TestPreflight…` in `app`; `TestDatabaseConditions…` against PostgreSQL 16 and 17 (`make test-pg-next`; CI runs both), `TestDatabaseConditionsCountsOnlyClientBackends` for the filter | T040a |
 
 ---
 

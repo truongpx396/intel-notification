@@ -569,6 +569,7 @@ type Digests interface {
 
 type Maintenance interface {
 	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error) // D22; every grant, a renewal included, is the job's last start (D50)
+	FinishJob(ctx context.Context, job, owner string) error                              // D52: the job's last finish, for its current owner only; a run that ended cleanly
 	RehomeShards(ctx context.Context, shards int) (int, error)                           // D11
 	ExpireIdem(ctx context.Context, olderThan time.Time, batch int) (int, error)         // D21
 	ExpireDigests(ctx context.Context, olderThan time.Time, batch int) (int, error)      // D4

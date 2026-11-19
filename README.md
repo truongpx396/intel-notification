@@ -222,6 +222,7 @@ cd intel-notification
 make test              # unit tests: -race -shuffle=on, no Docker, no network
 make verify-schema     # migrations + schema assertions on a throwaway PostgreSQL 16 (Docker)
 make test-integration  # the adapters and use-cases against PostgreSQL 16 via Testcontainers (Docker)
+make test-pg-next      # both of those again on PostgreSQL 17 (Docker); CI runs 16 and 17
 make ci                # everything CI runs today
 ```
 
@@ -354,7 +355,8 @@ as the intended interface, but do not exist in code:
 > proven at the schema, the adapter and end to end (`TestNS012…` lists the tables from the catalog, and checks that the
 > pre-check's Redis entries for the recipient's keys go with the rows). Retention is proven through `RetirePartitions`,
 > the leased jobs that call it (`app.Maintenance`) and a witness that no row is deleted on the way, because retirement
-> drops tables. The preflight has two documented gaps ([T040a](specs/001-notification-core/tasks.md)).
+> drops tables. The preflight's PostgreSQL reading is held on 16 and on 17, and its filter for vacuum's own workers is run
+> against rows made for it ([T040a](specs/001-notification-core/tasks.md)).
 
 Two suites prove these, both **as the table owner** — the role a worker actually uses, neither
 superuser nor BYPASSRLS:
@@ -505,7 +507,7 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | 5 | Channels — Redis stream, `inapp`, `email`, unsubscribe tokens, `failover` | ✅ built |
 | 6 | Dispatcher — the nine steps, retries, suppression, dead letters and replay, `webhook` | ✅ built |
 | 7 | Digest, quotas, fairness — leased flush job, Redis counter, noisy-neighbour test | ✅ built |
-| 8 | Maintenance — leased retention jobs, `Admin.Erase`, startup preflight | ✅ built; T040a (the preflight) stays open for two documented test gaps |
+| 8 | Maintenance — leased retention jobs, `Admin.Erase`, startup preflight, a record of each job's last clean finish | ✅ built |
 | 9 | Broadcast — durable, paged, resumable | 🚧 not built |
 | 10 | Transports — gRPC, REST, SSE relay, in-process port | 🚧 not built |
 | 11 | Service mode — data-backed topics, templates and addresses; recipient token verification; NATS ingest | 🚧 not built |
@@ -518,9 +520,9 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
   intended shape and cannot build, and the Playwright suite is typechecked and listed but not run.
 - **No one-call `New`.** A host assembles `app.Deps` by hand, as above.
 - **No `Broadcast`.** `Notifier.Broadcast` is a stub that returns an error (T042), and its adapter is not built.
-- **The preflight has two untested corners (T040a).** Counting only client backends cannot be tested from a test
-  (it needs an autovacuum worker on demand), and the PostgreSQL 17 branch of the checkpoint read has no test, because
-  the suite runs on 16.
+- **PostgreSQL 16 is the supported version, and 17 is tested.** The checkpoint counters moved views in 17 and the code
+  reads each where it is, so CI runs the schema and integration suites on both (`make test-pg-next` is the second by hand).
+  PostgreSQL 18 is not run.
 - **No data-backed catalog.** Topics, templates and addresses are the host's to implement.
 - **No tag.** `extraction-baseline-intel-agent` is not a release. Migrations are rewritten in place until
   the first `v*` tag and are immutable after it.
@@ -564,7 +566,7 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | [specs/001-notification-core/](specs/001-notification-core/) | the normative specification |
 | [constitution](.specify/memory/constitution.md) | the principles every decision is held to; first in the order of authority |
 | [contracts/notification-ports.md](specs/001-notification-core/contracts/notification-ports.md) | every port, the 16 invariants, the dispatcher algorithm, contract tests, the gRPC surface |
-| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 51 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D51 from building the stages |
+| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 52 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D52 from building the stages |
 | [data-model.md](specs/001-notification-core/data-model.md) | tables, keys, RLS, state transitions, retention |
 | [plan.md](specs/001-notification-core/plan.md) | build order and the capacity model |
 | [tasks.md](specs/001-notification-core/tasks.md) | the task list, how a task is worked, and traceability |
