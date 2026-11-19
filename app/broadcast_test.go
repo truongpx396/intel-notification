@@ -41,6 +41,9 @@ type committedPage struct {
 	token string
 }
 
+// runawayLeases is how many leases a case may take before the stand-in has no more to give.
+const runawayLeases = 200
+
 // bcastStore is the broadcast half of ports.Store.
 type bcastStore struct {
 	ports.Store
@@ -81,7 +84,9 @@ func (s *bcastStore) LeaseBroadcast(_ context.Context, ttl time.Duration) (*doma
 	if s.leaseErr != nil {
 		return nil, s.leaseErr
 	}
-	if len(s.pending) == 0 {
+	// A worker that loops on one broadcast for ever is a regression, and a test must say
+	// so by failing and not by hanging: past this many leases there is no more work.
+	if len(s.pending) == 0 || s.leases > runawayLeases {
 		return nil, nil
 	}
 	j := *s.pending[0]
@@ -537,6 +542,25 @@ func TestAFaultInAPageCommitsNothingAndEndsThePass(t *testing.T) {
 	}
 	if first := f.store.commits[0]; first.job.ID != "b-1" || first.job.Cursor != "" {
 		t.Errorf("the next pass began with %q at cursor %q, want b-1 at its start", first.job.ID, first.job.Cursor)
+	}
+}
+
+// A fault in planning one recipient fails the page and commits nothing of it, rather than a
+// page committed short: the topic was withdrawn after the broadcast was recorded, and sending
+// the recipients planned before the fault would notify some of an audience and never the rest.
+func TestAFaultInPlanningFailsThePageAndCommitsNothing(t *testing.T) {
+	t.Parallel()
+	f := newBcastFx(t)
+	req := request(users(3)...)
+	req.Topic = "withdrawn_since" // the Notifier checked the topic when it recorded the broadcast
+	f.pend("b-1", req, "")
+
+	pages, err := f.expander().Expand(t.Context())
+	if !errors.Is(err, domain.ErrUnknownTopic) || pages != 0 {
+		t.Fatalf("Expand = %d, %v, want 0 pages and ErrUnknownTopic", pages, err)
+	}
+	if len(f.store.commits) != 0 || f.store.leases != 1 {
+		t.Errorf("%d pages committed over %d leases, want none and one: a fault ends the pass", len(f.store.commits), f.store.leases)
 	}
 }
 

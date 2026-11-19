@@ -3,12 +3,14 @@
 package postgres
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/truongpx396/intel-notification/domain"
 )
@@ -119,33 +121,32 @@ func (e *env) commit(job *domain.BroadcastJob, page []domain.PageItem, next stri
 
 // A broadcast is accepted once per (realm, tenant, key): a retry finds its row and is told
 // so, with the id the first call got. The tenant and the realm are in the key, so another
-// tenant's broadcast under the same key is its own (D17).
+// tenant's broadcast under the same key is its own (D17). The others are recorded FIRST, and
+// sort before the one asked about, so a replay that read the row by less than the whole key
+// would find theirs.
 func TestCreateBroadcastIsIdempotentOnItsKeyWithinATenant(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 
+	otherTenant := inline("launch", "u1")
+	otherTenant.Tenant = domain.Tenant{Kind: "workspace", ID: "a0"} // sorts before w1
+	tenantsID := e.createBroadcast(otherTenant)
+	otherRealm, err := e.s.CreateBroadcast(t.Context(), "a-other", inline("launch", "u1")) // sorts before aisat
+	if err != nil || !otherRealm.Applied {
+		t.Fatalf("another realm's broadcast = %+v, %v, want it recorded", otherRealm, err)
+	}
+
 	first := e.createBroadcast(inline("launch", "u1", "u2"))
-	if !first.Applied || first.BroadcastID == "" {
-		t.Fatalf("first CreateBroadcast = %+v, want applied with an id", first)
+	if !first.Applied || first.BroadcastID == "" || first.BroadcastID == tenantsID.BroadcastID || first.BroadcastID == otherRealm.BroadcastID {
+		t.Fatalf("first CreateBroadcast = %+v, want applied with an id of its own", first)
 	}
 	replay := e.createBroadcast(inline("launch", "u1", "u2"))
 	if replay.Applied || replay.BroadcastID != first.BroadcastID {
-		t.Fatalf("replay = %+v, want not applied and the first call's id %s", replay, first.BroadcastID)
-	}
-	if n := e.count(`SELECT count(*) FROM notification_broadcasts`); n != 1 {
-		t.Fatalf("%d rows after a replay, want 1", n)
-	}
-
-	other := inline("launch", "u1")
-	other.Tenant = domain.Tenant{Kind: "workspace", ID: "w2"}
-	if r := e.createBroadcast(other); !r.Applied || r.BroadcastID == first.BroadcastID {
-		t.Fatalf("another tenant's broadcast under the same key = %+v, want its own", r)
-	}
-	if r, err := e.s.CreateBroadcast(t.Context(), "other-realm", inline("launch", "u1")); err != nil || !r.Applied || r.BroadcastID == first.BroadcastID {
-		t.Fatalf("another realm's broadcast under the same key = %+v, %v, want its own", r, err)
+		t.Fatalf("replay = %+v, want not applied and the first call's id %s: not %s (another tenant's) or %s (another realm's)",
+			replay, first.BroadcastID, tenantsID.BroadcastID, otherRealm.BroadcastID)
 	}
 	if n := e.count(`SELECT count(*) FROM notification_broadcasts`); n != 3 {
-		t.Fatalf("%d rows, want 3", n)
+		t.Fatalf("%d rows, want 3: one for each of the tenant, the realm and the pair asked about", n)
 	}
 }
 
@@ -726,5 +727,60 @@ func TestAPageThatIsNotTheLastNeedsACursor(t *testing.T) {
 	}
 	if got := e.broadcastRow("launch"); !got.leased || got.cursor != "" {
 		t.Fatalf("broadcast row = %+v, want it untouched and still leased", got)
+	}
+}
+
+// A broadcast that is not pending is nobody's to commit to, whatever lease it still carries,
+// and is never leased: the schema allows it to be canceled, and a worker that holds a page of
+// one must not write it.
+func TestACanceledBroadcastIsNeitherLeasedNorCommittedTo(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.createBroadcast(selector("launch", "everyone"))
+	held := e.leaseBroadcast()
+	if _, err := e.db.Admin.Exec(t.Context(), `UPDATE notification_broadcasts SET status = 'canceled' WHERE idem_key = 'launch'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := e.commit(held, pageOf("launch", "u1"), "c1", false); !errors.Is(err, domain.ErrBroadcastLeaseLost) {
+		t.Fatalf("a commit to a canceled broadcast = %v, want ErrBroadcastLeaseLost", err)
+	}
+	if n, g, q := e.written(); n != 0 || g != 0 || q != 0 {
+		t.Fatalf("a refused commit wrote %d notifications, %d guards and %d queue rows, want nothing", n, g, q)
+	}
+	e.lapseBroadcastLeases()
+	if job := e.leaseBroadcast(); job != nil {
+		t.Fatalf("a canceled broadcast was leased: %+v", job)
+	}
+}
+
+// A worker looking for a broadcast does not queue behind one that is being committed: the
+// row a page's transaction holds is skipped, and the worker is handed the next. Without
+// SKIP LOCKED every other worker would stand still for the length of each page.
+func TestLeasingDoesNotWaitBehindAPageBeingCommitted(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for i, key := range []string{"first", "second"} {
+		e.createBroadcast(inline(key, "u1"))
+		if _, err := e.db.Admin.Exec(t.Context(),
+			`UPDATE notification_broadcasts SET created_at = created_at + $2::int * interval '1 minute' WHERE idem_key = $1`, key, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The oldest broadcast is held, as a worker's page transaction holds it.
+	tx, err := e.db.Admin.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+	if _, err := tx.Exec(t.Context(), `SELECT 1 FROM notification_broadcasts WHERE idem_key = 'first' FOR UPDATE`); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	job, err := e.s.LeaseBroadcast(ctx, lease)
+	if err != nil || job == nil || job.Request.IdemKey != "second" {
+		t.Fatalf("LeaseBroadcast behind a held row = %+v, %v, want the next broadcast, at once", job, err)
 	}
 }
