@@ -662,3 +662,63 @@ func TestALargePageIsOneTransaction(t *testing.T) {
 		t.Fatalf("broadcast row = %+v, want 300 fanned at cursor c300", got)
 	}
 }
+
+// The store holds the derivation of a recipient's key, so no caller can get it slightly
+// wrong: a page whose notification is not keyed by the broadcast's member key for its
+// recipient is refused whole. A key derived any other way, from the page's number or its
+// place in it, would notify the recipient again when the broadcast is retried (NR-020).
+func TestAPageNotKeyedByTheBroadcastsMemberKeysIsRefused(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		key  func(item domain.PageItem, i int) string
+	}{
+		{"a key from the position in the page", func(_ domain.PageItem, i int) string { return fmt.Sprintf("launch:%d", i) }},
+		{"another broadcast's member key", func(item domain.PageItem, _ int) string {
+			return domain.BroadcastMemberKey("another", item.Notification.Recipient)
+		}},
+		{"the broadcast's key itself", func(domain.PageItem, int) string { return "launch" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			e.createBroadcast(selector("launch", "everyone"))
+			job := e.leaseBroadcast()
+
+			page := pageOf("launch", "u1", "u2")
+			for i := range page {
+				page[i].Notification.IdemKey = tc.key(page[i], i)
+			}
+			if err := e.commit(job, page, "c2", false); err == nil || errors.Is(err, domain.ErrBroadcastLeaseLost) {
+				t.Fatalf("CommitBroadcastPage = %v, want a refusal that is not a lost lease", err)
+			}
+			if n, g, q := e.written(); n != 0 || g != 0 || q != 0 {
+				t.Fatalf("a refused page wrote %d notifications, %d guards and %d queue rows, want nothing", n, g, q)
+			}
+			if got := e.broadcastRow("launch"); got.cursor != "" || got.fanned != 0 {
+				t.Fatalf("broadcast row = %+v, want it untouched", got)
+			}
+		})
+	}
+}
+
+// A page that is not the last must say where the next begins. An empty cursor is where a
+// broadcast starts, so committing one would send the next worker back to the first page,
+// and the broadcast would never end.
+func TestAPageThatIsNotTheLastNeedsACursor(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.createBroadcast(selector("launch", "everyone"))
+	job := e.leaseBroadcast()
+
+	if err := e.commit(job, pageOf("launch", "u1"), "", false); err == nil || errors.Is(err, domain.ErrBroadcastLeaseLost) {
+		t.Fatalf("CommitBroadcastPage = %v, want a refusal that is not a lost lease", err)
+	}
+	if n, _, _ := e.written(); n != 0 {
+		t.Fatalf("%d notifications written by a refused page, want none", n)
+	}
+	if got := e.broadcastRow("launch"); !got.leased || got.cursor != "" {
+		t.Fatalf("broadcast row = %+v, want it untouched and still leased", got)
+	}
+}
