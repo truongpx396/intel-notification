@@ -255,17 +255,11 @@ func (m *Maintenance) jobs() []maintJob {
 	return []maintJob{
 		{JobPartitions, m.partitions},
 		{JobRetention, m.retention},
-		{JobIdemExpiry, func(ctx context.Context, now time.Time, lease func() (bool, error)) error {
-			return m.expire(ctx, lease, m.store.ExpireIdem, now.Add(-m.cfg.IdempotencyWindow))
-		}},
+		{JobIdemExpiry, m.expiry(m.store.ExpireIdem)},
 		// A flushed window is read by Status as long as the key it was accepted under is
 		// remembered, so it is kept for the same window.
-		{JobDigestExpiry, func(ctx context.Context, now time.Time, lease func() (bool, error)) error {
-			return m.expire(ctx, lease, m.store.ExpireDigests, now.Add(-m.cfg.IdempotencyWindow))
-		}},
-		{JobBroadcastCleanup, func(ctx context.Context, now time.Time, lease func() (bool, error)) error {
-			return m.expire(ctx, lease, m.store.ExpireBroadcasts, now.Add(-m.cfg.IdempotencyWindow))
-		}},
+		{JobDigestExpiry, m.expiry(m.store.ExpireDigests)},
+		{JobBroadcastCleanup, m.expiry(m.store.ExpireBroadcasts)},
 		{JobPreflight, func(ctx context.Context, _ time.Time, lease func() (bool, error)) error {
 			if ok, err := lease(); err != nil || !ok {
 				return err
@@ -341,6 +335,13 @@ func (m *Maintenance) partitions(ctx context.Context, now time.Time, lease func(
 		m.inc(domain.MetricPartitionUnscoped, map[string]string{domain.LabelPartition: name})
 	}
 	return errors.Join(errs...)
+}
+
+// expiry is the job that deletes, through del, what is older than the idempotency window.
+func (m *Maintenance) expiry(del func(ctx context.Context, olderThan time.Time, batch int) (int, error)) func(context.Context, time.Time, func() (bool, error)) error {
+	return func(ctx context.Context, now time.Time, lease func() (bool, error)) error {
+		return m.expire(ctx, lease, del, now.Add(-m.cfg.IdempotencyWindow))
+	}
 }
 
 // expire deletes in batches until one comes back short, taking the lease again before each:

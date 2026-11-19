@@ -108,6 +108,17 @@ func erasureFx(t *testing.T, keys ...string) (*app.Admin, *recMaintenance, *recP
 	return a, m, pre, ev
 }
 
+// erasePageSize is how many keys Erase asks the store for at a time, read off the one ask an
+// erasure of a recipient with no keys makes, so the tests need not know the constant.
+func erasePageSize(t *testing.T) int {
+	t.Helper()
+	a, m, _, _ := erasureFx(t)
+	if _, err := a.Erase(t.Context(), erasable); err != nil || len(m.asks) != 1 || m.asks[0].limit < 2 {
+		t.Fatalf("probing the page size: %v, asks %+v, want one ask with a limit of at least 2", err, m.asks)
+	}
+	return m.asks[0].limit
+}
+
 func TestNewAdminNamesTheMissingPortAndRefusesABadConfig(t *testing.T) {
 	t.Parallel()
 	_, err := app.NewAdmin(notify.Config{Realm: planRealm, StoreDSN: "x", RedisURL: "y"}, app.Deps{})
@@ -307,11 +318,7 @@ func TestEraseForgetsThePreCheckEntryOfEachOfTheRecipientsKeysBeforeErasing(t *t
 // first ask, and the cases sit on either side of its multiples.
 func TestEraseForgetsEveryKeyWhateverThePageSize(t *testing.T) {
 	t.Parallel()
-	probe, pm, _, _ := erasureFx(t)
-	if _, err := probe.Erase(t.Context(), erasable); err != nil || len(pm.asks) != 1 || pm.asks[0].limit < 2 {
-		t.Fatalf("probing the page size: %v, asks %+v, want one ask with a limit of at least 2", err, pm.asks)
-	}
-	page := pm.asks[0].limit
+	page := erasePageSize(t)
 
 	for _, n := range []int{0, 1, page - 1, page, page + 1, 2 * page, 2*page + 1} {
 		t.Run(fmt.Sprintf("%d keys", n), func(t *testing.T) {
@@ -411,11 +418,7 @@ func TestEraseWhoseForgetIsRefusedErasesNothing(t *testing.T) {
 // ever. The loop stops at the first answer that does not move past the last key it has.
 func TestEraseStopsWhenTheStoreDoesNotAdvanceThroughItsKeys(t *testing.T) {
 	t.Parallel()
-	probe, pm, _, _ := erasureFx(t)
-	if _, err := probe.Erase(t.Context(), erasable); err != nil || len(pm.asks) != 1 {
-		t.Fatalf("probing the page size: %v, asks %+v", err, pm.asks)
-	}
-	keys := make([]string, pm.asks[0].limit+5)
+	keys := make([]string, erasePageSize(t)+5)
 	for i := range keys {
 		keys[i] = fmt.Sprintf("k%07d", i)
 	}
