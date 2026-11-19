@@ -42,7 +42,7 @@ type Option func(*PreCheck)
 func WithMaxTTL(d time.Duration) Option { return func(p *PreCheck) { p.maxTTL = d } }
 
 // WithErrorHandler reports each Redis fault the pre-check turned into a miss, with
-// the operation ("seen" or "remember") that met it. The default ignores them.
+// the operation ("seen", "remember" or "forget") that met it. The default ignores them.
 func WithErrorHandler(f func(op string, err error)) Option {
 	return func(p *PreCheck) {
 		if f != nil {
@@ -89,5 +89,28 @@ func (p *PreCheck) Remember(ctx context.Context, key, notificationID string, ttl
 	return nil
 }
 
-// Forget implements ports.PreCheck. STUB for the red run (T040b): it removes nothing.
-func (p *PreCheck) Forget(context.Context, []string) error { return nil }
+// forgetChunk is how many keys one pipeline carries: enough to make an erasure of a recipient
+// with thousands of keys a handful of round trips, few enough that none is large.
+const forgetChunk = 1000
+
+// Forget implements ports.PreCheck. It deletes each key with a command of its own, sent in
+// pipelines of forgetChunk, and not with one multi-key DEL: the keys are hashes that share no
+// slot, and a multi-key command across slots is refused by a Redis Cluster.
+//
+// A fault is the fast path's, as it is for Seen and Remember: it is reported to the error
+// handler, once for the call and not once for each chunk behind it, and Forget returns nil,
+// because an entry left behind lapses with its ttl and the erasure that asked is not the
+// pre-check's to fail (D51).
+func (p *PreCheck) Forget(ctx context.Context, keys []string) error {
+	for start := 0; start < len(keys); start += forgetChunk {
+		pipe := p.rdb.Pipeline()
+		for _, key := range keys[start:min(start+forgetChunk, len(keys))] {
+			pipe.Del(ctx, key)
+		}
+		if _, err := pipe.Exec(ctx); err != nil {
+			p.onError("forget", err)
+			return nil
+		}
+	}
+	return nil
+}

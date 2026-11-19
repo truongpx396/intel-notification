@@ -493,7 +493,34 @@ func (s *Store) DatabaseConditions(ctx context.Context) (domain.DatabaseConditio
 	return c, nil
 }
 
-// IdemKeys implements ports.Maintenance. STUB for the red run (T040b): it lists nothing.
-func (s *Store) IdemKeys(context.Context, domain.Identity, string, int) ([]string, error) {
-	return nil, nil
+// idemKeysSQL lists one recipient's idempotency keys after $6, a page of $7. Both the
+// comparison and the order are bytewise (COLLATE "C"), whatever the database's collation, so
+// the caller can compare the keys it is given as bytes, as Go does; the recipient's keys are a
+// few rows read through the primary key's leading columns, and sorting them costs nothing.
+const idemKeysSQL = `
+SELECT idem_key FROM notify_idem
+ WHERE ` + identityPredicate + `
+   AND idem_key COLLATE "C" > $6
+ ORDER BY idem_key COLLATE "C"
+ LIMIT $7`
+
+// IdemKeys implements ports.Maintenance. It runs under the recipient's own scope, as Erase
+// does, so the policy bounds what it can read to that recipient.
+func (s *Store) IdemKeys(ctx context.Context, id domain.Identity, after string, limit int) ([]string, error) {
+	if limit < 1 {
+		return nil, fmt.Errorf("idempotency keys: limit must be >= 1, got %d", limit)
+	}
+	var keys []string
+	err := readScoped(ctx, s.pool, id, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, idemKeysSQL, append(identityArgs(id), after, limit)...)
+		if err != nil {
+			return err
+		}
+		keys, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("idempotency keys: %w", err)
+	}
+	return keys, nil
 }

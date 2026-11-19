@@ -15,13 +15,16 @@ import (
 // nil would tell an operator that a tenant's default was set.
 type Admin struct {
 	maintenance ports.Maintenance
-	waker       ports.Waker // nil: no dispatcher in this process to wake
+	waker       ports.Waker    // nil: no dispatcher in this process to wake
+	pre         ports.PreCheck // nil: no fast path whose entries an erasure must forget
 }
 
 var _ ports.Admin = (*Admin)(nil)
 
 // NewAdmin returns an Admin for cfg over d. It refuses a configuration that does not
-// validate, and names the port it needs when d leaves it nil. Deps.Waker is optional.
+// validate, and names the port it needs when d leaves it nil. Deps.Waker and Deps.PreCheck
+// are optional; pass the PreCheck the Notifier was built with, or an erasure leaves its
+// entries for the recipient's keys behind (D51).
 func NewAdmin(cfg notify.Config, d Deps) (*Admin, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -31,7 +34,7 @@ func NewAdmin(cfg notify.Config, d Deps) (*Admin, error) {
 	if err := g.err("Admin"); err != nil {
 		return nil, err
 	}
-	return &Admin{maintenance: d.Maintenance, waker: d.Waker}, nil
+	return &Admin{maintenance: d.Maintenance, waker: d.Waker, pre: d.PreCheck}, nil
 }
 
 // ReplayDeadLetter re-drives one dead letter, once (T032). A dead letter that was
