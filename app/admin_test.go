@@ -139,14 +139,11 @@ func TestReplayDeadLetterRefusals(t *testing.T) {
 	}
 }
 
-// The parts of the operator surface that belong to later tasks say so, because a nil
-// would tell an operator that a recipient was erased.
+// The part of the operator surface that belongs to a later task says so, because a nil
+// would tell an operator that a tenant's default was set.
 func TestTheAdminMethodsNotBuiltYetSaySo(t *testing.T) {
 	t.Parallel()
 	a, _, _ := adminFx(t, false, nil)
-	if _, err := a.Erase(t.Context(), domain.Identity{}); err == nil || !strings.Contains(err.Error(), "T040") {
-		t.Errorf("Erase = %v, want an error naming T040", err)
-	}
 	if err := a.SetTenantPreference(t.Context(), "aisat", domain.TenantPreference{}); err == nil || !strings.Contains(err.Error(), "T044") {
 		t.Errorf("SetTenantPreference = %v, want an error naming T044", err)
 	}

@@ -10,9 +10,9 @@ import (
 )
 
 // Admin is the operator surface: ports.Admin over the maintenance operations. What it
-// builds today is the dead-letter replay (T032, NS-006); erasure is T040's and the
-// tenant preference is the REST surface's (T044), and until then they say so, because a
-// nil would tell an operator that a recipient was erased.
+// builds today is the dead-letter replay (T032, NS-006) and erasure (T040, NS-012); the
+// tenant preference is the REST surface's (T044), and until then it says so, because a
+// nil would tell an operator that a tenant's default was set.
 type Admin struct {
 	maintenance ports.Maintenance
 	waker       ports.Waker // nil: no dispatcher in this process to wake
@@ -56,11 +56,6 @@ func (a *Admin) ReplayDeadLetter(ctx context.Context, realm domain.Realm, deadLe
 		a.waker.Wake()
 	}
 	return nil
-}
-
-// Erase is built with the erasure use-case (T040).
-func (a *Admin) Erase(context.Context, domain.Identity) (map[string]int, error) {
-	return nil, errNotBuilt("Admin.Erase", "T040")
 }
 
 // SetTenantPreference is built with the REST surface (T044).

@@ -142,6 +142,14 @@ func WithPreflightLimits(l domain.PreflightLimits) MaintenanceOption {
 // does not validate, names every port it needs and d leaves nil, and refuses an option
 // that could not work. Deps.Clock and Deps.Metrics are optional.
 func NewMaintenance(cfg notify.Config, d Deps, opts ...MaintenanceOption) (*Maintenance, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	var g gaps
+	g.need("Maintenance", d.Maintenance == nil)
+	if err := g.err("Maintenance"); err != nil {
+		return nil, err
+	}
 	m := &Maintenance{
 		store: d.Maintenance, clock: d.clockOf(), metrics: d.Metrics,
 		cfg: cfg.WithDefaults(), owner: defaultMaintenanceOwner(),
@@ -155,6 +163,30 @@ func NewMaintenance(cfg notify.Config, d Deps, opts ...MaintenanceOption) (*Main
 	}
 	for _, opt := range opts {
 		opt(m)
+	}
+	switch {
+	case m.tick <= 0:
+		return nil, fmt.Errorf("app: Maintenance tick %v is not positive", m.tick)
+	case m.batch < 1:
+		return nil, fmt.Errorf("app: Maintenance batch %d is not at least one row", m.batch)
+	case m.owner == "":
+		return nil, errors.New("app: Maintenance owner has no name, and the jobs' leases are held under one")
+	case m.limits.OldestTransaction <= 0 || m.limits.WALHeadroom <= 0:
+		return nil, fmt.Errorf("app: Maintenance preflight limits %+v must both be positive, or they judge nothing", m.limits)
+	}
+	for job, every := range m.every {
+		if _, known := defaultJobIntervals[job]; !known {
+			return nil, fmt.Errorf("app: Maintenance has no job %q", job)
+		}
+		if every <= 0 {
+			return nil, fmt.Errorf("app: Maintenance interval %v for the %s job is not positive", every, job)
+		}
+	}
+	if m.onError == nil {
+		m.onError = func(error) {}
+	}
+	if m.onWarn == nil {
+		m.onWarn = func(domain.PreflightWarning) {}
 	}
 	return m, nil
 }
@@ -170,14 +202,173 @@ func defaultMaintenanceOwner() string {
 }
 
 // Pass runs, once, every job that is due, each under its lease, and returns the names of
-// the jobs it ran. A job whose lease another worker holds is skipped without error and is
-// not in the list. A job that fails is reported in the error, joined with the others'
-// and does not stop them.
+// the jobs it ran, in the order it ran them. A job whose lease another worker holds is
+// skipped without error and is not in the list. A job that fails is reported in the error,
+// joined with the others' and does not stop them, and still counts as having run: it is
+// tried again at its next interval, and not at every tick until it works.
 func (m *Maintenance) Pass(ctx context.Context) ([]string, error) {
+	var (
+		ran  []string
+		errs []error
+	)
+	for _, j := range m.jobs() {
+		if ctx.Err() != nil {
+			break
+		}
+		now := m.clock.Now()
+		if !m.due(j.name, now) {
+			continue
+		}
+		held := false
+		lease := func() (bool, error) {
+			ok, err := m.store.TryLeaseJob(ctx, j.name, m.owner, m.leaseTTL(j.name))
+			if err != nil {
+				return false, fmt.Errorf("lease the %s job: %w", j.name, err)
+			}
+			held = held || ok
+			return ok, nil
+		}
+		err := j.run(ctx, now, lease)
+		if held {
+			m.mu.Lock()
+			m.lastRun[j.name] = now
+			m.mu.Unlock()
+			ran = append(ran, j.name)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", j.name, err))
+		}
+	}
+	return ran, errors.Join(errs...)
+}
+
+// maintJob is one job. lease takes or renews its lease and says whether the worker holds
+// it: a job asks before it works, and a job that works in batches asks before each.
+type maintJob struct {
+	name string
+	run  func(ctx context.Context, now time.Time, lease func() (bool, error)) error
+}
+
+// jobs lists the jobs in the order a pass runs them. Provisioning is first, because a
+// fresh deployment cannot accept a notification until the month exists.
+func (m *Maintenance) jobs() []maintJob {
+	return []maintJob{
+		{JobPartitions, m.partitions},
+		{JobRetention, m.retention},
+		{JobIdemExpiry, func(ctx context.Context, now time.Time, lease func() (bool, error)) error {
+			return m.expire(ctx, lease, m.store.ExpireIdem, now.Add(-m.cfg.IdempotencyWindow))
+		}},
+		// A flushed window is read by Status as long as the key it was accepted under is
+		// remembered, so it is kept for the same window.
+		{JobDigestExpiry, func(ctx context.Context, now time.Time, lease func() (bool, error)) error {
+			return m.expire(ctx, lease, m.store.ExpireDigests, now.Add(-m.cfg.IdempotencyWindow))
+		}},
+		{JobBroadcastCleanup, func(ctx context.Context, now time.Time, lease func() (bool, error)) error {
+			return m.expire(ctx, lease, m.store.ExpireBroadcasts, now.Add(-m.cfg.IdempotencyWindow))
+		}},
+		{JobPreflight, func(ctx context.Context, _ time.Time, lease func() (bool, error)) error {
+			if ok, err := lease(); err != nil || !ok {
+				return err
+			}
+			_, err := m.Preflight(ctx)
+			return err
+		}},
+	}
+}
+
+// due is whether the job's interval has passed since this worker last ran it. A lease the
+// worker was refused is not a run, so a job that has never run is always due.
+func (m *Maintenance) due(job string, now time.Time) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, _, _ = m.wal, m.lastRun, partitionsAhead // the jobs' state, until they are built
-	return nil, errors.New("not implemented")
+	last, ran := m.lastRun[job]
+	return !ran || now.Sub(last) >= m.every[job]
+}
+
+// leaseTTL outlives the gap between a job's runs. The holder takes the lease again at each
+// run, and until then it is what keeps every other worker out: a lease that lapsed
+// between runs would let a second worker in, and the job would run once per worker per
+// interval. The price is that a worker that dies leaves its jobs unrun for up to twice
+// their interval, which is harmless for work measured in months and minutes.
+func (m *Maintenance) leaseTTL(job string) time.Duration { return max(minJobLease, 2*m.every[job]) }
+
+// retention retires the partitions that have aged past each table's window, counted back
+// from now. A partition goes only when its whole range is older than the window, so a
+// notification outlives RetentionWindow by up to a month, read or unread (D33). A table
+// that fails does not stop the others.
+func (m *Maintenance) retention(ctx context.Context, now time.Time, lease func() (bool, error)) error {
+	if ok, err := lease(); err != nil || !ok {
+		return err
+	}
+	var errs []error
+	for _, t := range []struct {
+		table  string
+		window time.Duration
+	}{
+		{domain.TableNotifications, m.cfg.RetentionWindow},
+		{domain.TableDeliveries, m.cfg.DeliveryLogRetention},
+		{domain.TableDeadLetters, m.cfg.DeadLetterRetention},
+	} {
+		if _, err := m.store.RetirePartitions(ctx, t.table, now.Add(-t.window)); err != nil {
+			errs = append(errs, fmt.Errorf("retire %s: %w", t.table, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// partitions creates the months ahead and then checks the catalog, so what it reports is
+// what is there once provisioning has done what it could. A provisioning that failed (a
+// role that cannot create tables) does not skip the check: that is when a month is
+// missing and the alarm is wanted.
+func (m *Maintenance) partitions(ctx context.Context, now time.Time, lease func() (bool, error)) error {
+	if ok, err := lease(); err != nil || !ok {
+		return err
+	}
+	var errs []error
+	if _, err := m.store.EnsurePartitions(ctx, now, partitionsAhead); err != nil {
+		errs = append(errs, fmt.Errorf("provision partitions: %w", err))
+	}
+	health, err := m.store.CheckPartitions(ctx, now)
+	if err != nil {
+		return errors.Join(append(errs, fmt.Errorf("check partitions: %w", err))...)
+	}
+	for _, gap := range health.Missing {
+		m.inc(domain.MetricPartitionMissing, map[string]string{
+			domain.LabelTable: gap.Table, domain.LabelMonth: gap.Month.UTC().Format("2006-01"),
+		})
+	}
+	for _, name := range health.Unscoped {
+		m.inc(domain.MetricPartitionUnscoped, map[string]string{domain.LabelPartition: name})
+	}
+	return errors.Join(errs...)
+}
+
+// expire deletes in batches until one comes back short, taking the lease again before each:
+// a job that takes long keeps it, and one that loses it stops where it is, because the
+// worker that holds it now owns the rest. A fault ends this job's loop, not the pass.
+func (m *Maintenance) expire(ctx context.Context, lease func() (bool, error),
+	del func(ctx context.Context, olderThan time.Time, batch int) (int, error), olderThan time.Time,
+) error {
+	for ctx.Err() == nil {
+		if ok, err := lease(); err != nil || !ok {
+			return err
+		}
+		n, err := del(ctx, olderThan, m.batch)
+		if err != nil {
+			return err
+		}
+		if n < m.batch {
+			return nil
+		}
+	}
+	return nil
+}
+
+// inc counts an alarm, when there is anything to count it.
+func (m *Maintenance) inc(name string, labels map[string]string) {
+	if m.metrics != nil {
+		m.metrics.Inc(name, labels)
+	}
 }
 
 // Run makes a pass at once, so a fresh deployment has its partitions and its preflight
@@ -186,7 +377,19 @@ func (m *Maintenance) Pass(ctx context.Context) ([]string, error) {
 // stops a service starting. Run is one loop; more workers are more loops, and the leases
 // keep them from running the same job.
 func (m *Maintenance) Run(ctx context.Context) error {
-	return errors.New("not implemented")
+	for ctx.Err() == nil {
+		if _, err := m.Pass(ctx); err != nil && ctx.Err() == nil {
+			m.onError(err)
+		}
+		timer := time.NewTimer(m.tick)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+	return nil
 }
 
 // Preflight reads the database's conditions and reports, as warnings and never as
@@ -198,5 +401,21 @@ func (m *Maintenance) Run(ctx context.Context) error {
 // conditions could not be read, which is a fault and not a warning, and the caller
 // carries on: a database that cannot be asked is not a reason to stop.
 func (m *Maintenance) Preflight(ctx context.Context) ([]domain.PreflightWarning, error) {
-	return nil, errors.New("not implemented")
+	c, err := m.store.DatabaseConditions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read the database's conditions: %w", err)
+	}
+	m.mu.Lock()
+	rate := m.wal.Observe(c)
+	m.mu.Unlock()
+
+	if g, ok := m.metrics.(ports.GaugeMetrics); ok {
+		g.Gauge(domain.MetricDBOldestXminAge, c.OldestTransactionAge.Seconds(), nil)
+		g.Gauge(domain.MetricDBCheckpointsRequested, float64(c.CheckpointsRequested), nil)
+	}
+	warnings := domain.AssessDatabase(c, rate, m.limits)
+	for _, w := range warnings {
+		m.onWarn(w)
+	}
+	return warnings, nil
 }

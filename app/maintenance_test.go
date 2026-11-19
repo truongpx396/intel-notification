@@ -282,6 +282,13 @@ func (f *maintFx) pass(t *testing.T, m *app.Maintenance) []string {
 	return ran
 }
 
+func firstTTL(asks []maintCall) time.Duration {
+	if len(asks) == 0 {
+		return 0
+	}
+	return asks[0].ttl
+}
+
 func indexOf(log []maintCall, match func(maintCall) bool) int {
 	return slices.IndexFunc(log, match)
 }
@@ -363,7 +370,8 @@ func TestALeaseOutlivesTheGapBetweenRuns(t *testing.T) {
 	for _, job := range maintJobs {
 		asks := f.store.leaseAsks(job)
 		if len(asks) == 0 || asks[0].ttl < 10*time.Minute {
-			t.Errorf("%s: lease asks %+v, want a ttl of at least the job's 10 minute interval", job, asks)
+			t.Errorf("%s: asked for the lease %d times, the first with a ttl of %v, want at least the job's 10 minute interval",
+				job, len(asks), firstTTL(asks))
 		}
 	}
 }
@@ -447,12 +455,12 @@ func TestAJobRunsNoOftenerThanItsInterval(t *testing.T) {
 	}{
 		{0, maintJobs},
 		{30 * time.Second, nil},
-		{30 * time.Second, []string{app.JobPreflight}},                                         // a minute
-		{4 * time.Minute, []string{app.JobIdemExpiry, app.JobDigestExpiry, app.JobPreflight}},  // five
-		{4 * time.Minute, []string{app.JobPreflight}},                                          // nine
-		{51 * time.Minute, maintJobs},                                                          // an hour
-		{59 * time.Minute, []string{app.JobIdemExpiry, app.JobDigestExpiry, app.JobPreflight}}, // not yet two
-		{time.Minute, maintJobs},                                                               // two hours
+		{30 * time.Second, []string{app.JobPreflight}},                                                          // a minute
+		{4 * time.Minute, []string{app.JobIdemExpiry, app.JobDigestExpiry, app.JobPreflight}},                   // five
+		{4 * time.Minute, []string{app.JobPreflight}},                                                           // nine
+		{51 * time.Minute, maintJobs},                                                                           // an hour
+		{59 * time.Minute, []string{app.JobIdemExpiry, app.JobDigestExpiry, app.JobPreflight}},                  // not yet two
+		{time.Minute, []string{app.JobPartitions, app.JobRetention, app.JobBroadcastCleanup, app.JobPreflight}}, // two hours: the expiries ran a minute ago
 	}
 	for _, st := range steps {
 		f.clock.Advance(st.advance)
@@ -836,7 +844,7 @@ func TestNewMaintenanceRefusesWhatCouldNotWork(t *testing.T) {
 			t.Parallel()
 			m, err := app.NewMaintenance(tc.cfg, tc.deps, tc.opts...)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("NewMaintenance = %v, %v, want an error naming %q", m, err, tc.want)
+				t.Fatalf("NewMaintenance built = %v, err = %v, want an error naming %q", m != nil, err, tc.want)
 			}
 		})
 	}
