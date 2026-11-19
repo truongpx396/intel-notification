@@ -26,6 +26,17 @@ type recMaintenance struct {
 
 	realm domain.Realm
 	id    string
+
+	// Erase: what it answers, and who it was asked about.
+	counts   map[string]int
+	eraseErr error
+	erased   []domain.Identity
+}
+
+func (m *recMaintenance) Erase(_ context.Context, id domain.Identity) (map[string]int, error) {
+	m.ev.add("erase:" + id.Recipient.ID)
+	m.erased = append(m.erased, id)
+	return m.counts, m.eraseErr
 }
 
 func (m *recMaintenance) ReplayDeadLetter(_ context.Context, realm domain.Realm, id string) (bool, error) {
@@ -138,5 +149,79 @@ func TestTheAdminMethodsNotBuiltYetSaySo(t *testing.T) {
 	}
 	if err := a.SetTenantPreference(t.Context(), "aisat", domain.TenantPreference{}); err == nil || !strings.Contains(err.Error(), "T044") {
 		t.Errorf("SetTenantPreference = %v, want an error naming T044", err)
+	}
+}
+
+// ---------------------------------------------------------------- erasure --
+
+var erasable = domain.Identity{
+	Realm:     "aisat",
+	Tenant:    domain.Tenant{Kind: "workspace", ID: "w1"},
+	Recipient: domain.Recipient{Kind: "user", ID: "u9"},
+}
+
+// T040: erasure asks the store for the identity it was given, once, and hands back what the
+// store removed so the operator can see it (D35). That nothing of the recipient is left,
+// in any table the catalog lists, and that the suppression is, are the PostgreSQL suite's
+// (TestErase) and NS-012's end to end (TestNS012...); here it is that the use-case
+// does not stand between them.
+func TestEraseHandsTheIdentityToTheStoreAndReturnsWhatItRemoved(t *testing.T) {
+	t.Parallel()
+	a, m, ev := adminFx(t, false, nil)
+	m.counts = map[string]int{"notifications": 3, "notification_outbox": 1, "recipient_addresses": 2}
+
+	got, err := a.Erase(t.Context(), erasable)
+	if err != nil {
+		t.Fatalf("Erase = %v, want nil", err)
+	}
+	if !slices.Equal(ev.all(), []string{"erase:u9"}) || len(m.erased) != 1 || m.erased[0] != erasable {
+		t.Fatalf("the store was asked %v about %v, want one erasure of %v", ev.all(), m.erased, erasable)
+	}
+	if fmt.Sprint(got) != fmt.Sprint(m.counts) {
+		t.Fatalf("Erase returned %v, want what the store removed: %v", got, m.counts)
+	}
+}
+
+// An identity with an empty component never reaches the store. The schema would refuse
+// the scope too, but an erasure that fails halfway through a table list is worse than one
+// that never starts, and an empty component is the one that equals an unset scope setting.
+func TestEraseRefusesAnIdentityWithAnEmptyComponentBeforeTouchingTheStore(t *testing.T) {
+	t.Parallel()
+	cases := map[string]func(*domain.Identity){
+		"no realm":          func(i *domain.Identity) { i.Realm = "" },
+		"no tenant kind":    func(i *domain.Identity) { i.Tenant.Kind = "" },
+		"no tenant id":      func(i *domain.Identity) { i.Tenant.ID = "" },
+		"no recipient kind": func(i *domain.Identity) { i.Recipient.Kind = "" },
+		"no recipient id":   func(i *domain.Identity) { i.Recipient.ID = "" },
+	}
+	for name, blank := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			a, _, ev := adminFx(t, false, nil)
+			id := erasable
+			blank(&id)
+			counts, err := a.Erase(t.Context(), id)
+			if !errors.Is(err, domain.ErrEmptyIdentity) || counts != nil {
+				t.Fatalf("Erase = %v, %v, want domain.ErrEmptyIdentity and no counts", counts, err)
+			}
+			if got := ev.all(); len(got) != 0 {
+				t.Fatalf("the store was asked %v for an identity it cannot scope", got)
+			}
+		})
+	}
+}
+
+// A store that fails does not report an erasure: no counts, the fault wrapped so the
+// caller can see what failed, and nothing to suggest the recipient is gone.
+func TestEraseReportsAStoreFailureAndNoCounts(t *testing.T) {
+	t.Parallel()
+	a, m, _ := adminFx(t, false, nil)
+	boom := errors.New("deadlock detected")
+	m.eraseErr = boom
+	m.counts = map[string]int{"notifications": 3} // what a store must not leak when it failed
+
+	counts, err := a.Erase(t.Context(), erasable)
+	if !errors.Is(err, boom) || counts != nil {
+		t.Fatalf("Erase = %v, %v, want the fault and no counts: an erasure that failed has erased nothing", counts, err)
 	}
 }

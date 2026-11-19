@@ -126,6 +126,29 @@ type Maintenance interface {
 	// hold on. It changes nothing; the report is what the notify.partition.missing
 	// and notify.partition.unscoped alarms fire on.
 	CheckPartitions(ctx context.Context, at time.Time) (domain.PartitionHealth, error)
+
+	// RetirePartitions drops each partition of table whose whole range lies before
+	// before, oldest first, and returns their names; it retires a partition and never a
+	// row, so it is a catalog operation and not a purge (NR-022, D33). table is one of
+	// domain.TableNotifications, TableDeliveries and TableDeadLetters, and any other is
+	// an error. A partition that is still in range, a default partition and one with no
+	// upper bound are never retired. It waits only briefly for the lock a drop needs and
+	// skips a partition it cannot lock, which the next call finds again (D47), so a long
+	// transaction delays retention and never stalls the inbox. Nothing references an
+	// aged partition (D6), so a pending delivery or a dead letter that names a retired
+	// notification is not an obstacle: the dispatcher finishes the delivery as canceled.
+	RetirePartitions(ctx context.Context, table string, before time.Time) ([]string, error)
+
+	// ExpireBroadcasts deletes up to batch completed broadcasts that finished before
+	// olderThan. A broadcast still pending is never deleted, whatever its age.
+	ExpireBroadcasts(ctx context.Context, olderThan time.Time, batch int) (int, error)
+
+	// DatabaseConditions reads, in one round trip and changing nothing, the settings and
+	// the activity of the database the queue lives in that NR-037 asks to be reported:
+	// max_wal_size, the connected role's timeouts, the oldest transaction that pins
+	// vacuum, the WAL written and the checkpoints taken. It judges none of it
+	// (domain.AssessDatabase does), and a condition it cannot read is a fault to return.
+	DatabaseConditions(ctx context.Context) (domain.DatabaseConditions, error)
 }
 
 // Store is the persist and read path: what Notify writes and what a claim

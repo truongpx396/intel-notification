@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -155,7 +156,7 @@ VALUES ($1, $2, $3::jsonb, now())`, string(id.Realm), domain.SubjectHash(id), re
 
 // partitionedTables are the range-partitioned tables provisioning keeps ahead
 // of the clock.
-var partitionedTables = []string{"notifications", "notification_deliveries", "dead_letters"}
+var partitionedTables = []string{domain.TableNotifications, domain.TableDeliveries, domain.TableDeadLetters}
 
 // EnsurePartitions implements ports.Maintenance. For each month from the one
 // containing from, for months months, it creates any missing monthly partition
@@ -300,4 +301,19 @@ func (s *Store) CheckPartitions(ctx context.Context, at time.Time) (domain.Parti
 	}
 	h.Missing, h.Unscoped = gaps, unscoped
 	return h, nil
+}
+
+// RetirePartitions implements ports.Maintenance.
+func (s *Store) RetirePartitions(context.Context, string, time.Time) ([]string, error) {
+	return nil, errors.New("not implemented")
+}
+
+// ExpireBroadcasts implements ports.Maintenance.
+func (s *Store) ExpireBroadcasts(context.Context, time.Time, int) (int, error) {
+	return 0, errors.New("not implemented")
+}
+
+// DatabaseConditions implements ports.Maintenance.
+func (s *Store) DatabaseConditions(context.Context) (domain.DatabaseConditions, error) {
+	return domain.DatabaseConditions{}, errors.New("not implemented")
 }
