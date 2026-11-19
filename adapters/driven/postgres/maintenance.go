@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/truongpx396/intel-notification/domain"
 )
@@ -303,17 +305,185 @@ func (s *Store) CheckPartitions(ctx context.Context, at time.Time) (domain.Parti
 	return h, nil
 }
 
-// RetirePartitions implements ports.Maintenance.
-func (s *Store) RetirePartitions(context.Context, string, time.Time) ([]string, error) {
-	return nil, errors.New("not implemented")
+// retirableSQL lists, oldest first, the direct partitions of table $1 whose whole range
+// ended at or before $2 and before the database's own now. Bounds are read back from the
+// catalog the way missingPartitionsSQL reads them, each side a quoted timestamp or
+// MINVALUE/MAXVALUE, and the cast is inside a CASE so the planner cannot try it on a
+// MAXVALUE. A default partition is excluded, and so is one with no upper bound: neither has
+// a range that has ended. Capping the cutoff at now() is what stops a cutoff in the future,
+// a caller's bug, from dropping the partitions that hold this month and the next (D33).
+//
+// The name comes back twice: bare, for the caller, and quoted and schema-qualified, for
+// the DROP, so a partition in another schema or with an odd name is dropped as itself.
+const retirableSQL = `
+WITH bounds AS (
+    SELECT c.relname::text AS name,
+           format('%I.%I', n.nspname, c.relname) AS qualified,
+           CASE WHEN b.v[2] = 'MAXVALUE' THEN NULL
+                ELSE btrim(b.v[2], '''')::timestamptz END AS upper_bound
+      FROM pg_inherits i
+      JOIN pg_class c ON c.oid = i.inhrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_partitioned_table p ON p.partrelid = i.inhparent
+     CROSS JOIN LATERAL regexp_match(pg_get_expr(c.relpartbound, c.oid),
+                                     '^FOR VALUES FROM \((.+)\) TO \((.+)\)$') AS b(v)
+     WHERE i.inhparent = to_regclass($1::text)
+       AND c.oid <> p.partdefid
+)
+SELECT name, qualified
+  FROM bounds
+ WHERE upper_bound <= least($2::timestamptz, now())
+ ORDER BY upper_bound, name COLLATE "C"`
+
+// lockNotAvailable is SQLSTATE 55P03: the lock_timeout ran out waiting for a lock.
+const lockNotAvailable = "55P03"
+
+// RetirePartitions implements ports.Maintenance. Retiring is DROP TABLE on a partition
+// whose whole range has ended: no row is read or deleted, so it costs the same for a
+// partition of ten rows and one of ten million, and it is the only way to retire inbox
+// history without a mass purge and the vacuum debt that follows one (NR-022, D33).
+//
+// Dropping a partition asks for ACCESS EXCLUSIVE on the table, and a request for it
+// queues every later reader and writer of the table behind itself until it is granted.
+// Behind a long transaction that is an outage, so each drop is its own transaction with
+// a lock_timeout (D47): a partition it cannot lock in that time is skipped, reported in
+// the error, and found again by the next call, while the others go on. Names that were
+// retired are returned even when err is not nil.
+func (s *Store) RetirePartitions(ctx context.Context, table string, before time.Time) ([]string, error) {
+	if !slices.Contains(partitionedTables, table) {
+		return nil, fmt.Errorf("retire partitions: %q is not a range-partitioned table; it is one of %v", table, partitionedTables)
+	}
+	rows, err := s.pool.Query(ctx, retirableSQL, table, before)
+	if err != nil {
+		return nil, fmt.Errorf("retire partitions of %s: list: %w", table, err)
+	}
+	type partition struct{ name, qualified string }
+	candidates, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (partition, error) {
+		var p partition
+		return p, r.Scan(&p.name, &p.qualified)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retire partitions of %s: list: %w", table, err)
+	}
+
+	var (
+		retired []string
+		errs    []error
+	)
+	for _, p := range candidates {
+		err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, `SELECT set_config('lock_timeout', $1, true)`,
+				fmt.Sprintf("%dms", s.retireLock.Milliseconds())); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, "DROP TABLE "+p.qualified)
+			return err
+		})
+		var pgErr *pgconn.PgError
+		switch {
+		case err == nil:
+			retired = append(retired, p.name)
+		case errors.As(err, &pgErr) && pgErr.Code == lockNotAvailable:
+			errs = append(errs, fmt.Errorf("retire %s: another transaction holds a lock on it, so it was skipped and the next call will find it again: %w", p.name, err))
+		default:
+			errs = append(errs, fmt.Errorf("retire %s: %w", p.name, err))
+		}
+	}
+	return retired, errors.Join(errs...)
 }
+
+// expireBroadcastsSQL deletes a batch of completed broadcasts that finished before the
+// cutoff. A broadcast that is pending is the work still to be done and is never touched,
+// whatever its age.
+const expireBroadcastsSQL = `
+WITH victims AS (
+    SELECT realm, tenant_kind, tenant_id, idem_key
+      FROM notification_broadcasts
+     WHERE status = 'completed' AND completed_at < $1
+     ORDER BY completed_at
+     LIMIT $2
+), gone AS (
+    DELETE FROM notification_broadcasts b
+     USING victims v
+     WHERE b.realm = v.realm AND b.tenant_kind = v.tenant_kind AND b.tenant_id = v.tenant_id
+       AND b.idem_key = v.idem_key
+    RETURNING 1
+)
+SELECT count(*) FROM gone`
 
 // ExpireBroadcasts implements ports.Maintenance.
-func (s *Store) ExpireBroadcasts(context.Context, time.Time, int) (int, error) {
-	return 0, errors.New("not implemented")
+func (s *Store) ExpireBroadcasts(ctx context.Context, olderThan time.Time, batch int) (int, error) {
+	var n int
+	if err := s.pool.QueryRow(ctx, expireBroadcastsSQL, olderThan, batch).Scan(&n); err != nil {
+		return 0, fmt.Errorf("expire broadcasts: %w", err)
+	}
+	return n, nil
 }
 
-// DatabaseConditions implements ports.Maintenance.
-func (s *Store) DatabaseConditions(context.Context) (domain.DatabaseConditions, error) {
-	return domain.DatabaseConditions{}, errors.New("not implemented")
+// conditionsSQL reads, in one statement, what the preflight judges. Settings come from
+// pg_settings, whose value is the session's own and in the setting's base unit (milliseconds
+// for the two timeouts), so a role or database override is what is read and not the server
+// default. The oldest transaction is the oldest one in this database that pins vacuum, a
+// snapshot or an assigned id, excluding this session and anything but a client backend, so
+// an autovacuum worker, which is brief and is what vacuum is, is not reported as a
+// transaction to end. xact_start is hidden from a role that cannot see other roles'
+// sessions, which is why SeesAllSessions is read beside it.
+const conditionsSQL = `
+SELECT clock_timestamp(),
+       pg_size_bytes(current_setting('max_wal_size')),
+       (SELECT setting::bigint FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'),
+       (SELECT setting::bigint FROM pg_settings WHERE name = 'statement_timeout'),
+       coalesce((SELECT extract(epoch FROM max(clock_timestamp() - a.xact_start))
+                   FROM pg_stat_activity a
+                  WHERE a.datname = current_database()
+                    AND a.backend_type = 'client backend'
+                    AND a.pid <> pg_backend_pid()
+                    AND a.xact_start IS NOT NULL
+                    AND (a.backend_xmin IS NOT NULL OR a.backend_xid IS NOT NULL)), 0)::float8,
+       (pg_has_role(current_user, 'pg_read_all_stats', 'member')
+         OR coalesce((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false)),
+       coalesce(w.wal_bytes, 0)::bigint,
+       w.stats_reset
+  FROM pg_stat_wal w`
+
+// The checkpoint counters moved in PostgreSQL 17, from pg_stat_bgwriter to
+// pg_stat_checkpointer, and the old columns were removed from the old view.
+const (
+	hasCheckpointerViewSQL = `SELECT to_regclass('pg_catalog.pg_stat_checkpointer') IS NOT NULL`
+	checkpointsSQL         = `SELECT checkpoints_timed, checkpoints_req FROM pg_stat_bgwriter`
+	checkpointsV17SQL      = `SELECT num_timed, num_requested FROM pg_stat_checkpointer`
+)
+
+// DatabaseConditions implements ports.Maintenance. It reads and changes nothing, and
+// judges nothing (domain.AssessDatabase does).
+func (s *Store) DatabaseConditions(ctx context.Context) (domain.DatabaseConditions, error) {
+	var (
+		c                          domain.DatabaseConditions
+		idleMillis, statementMilli int64
+		xminSeconds                float64
+		reset                      *time.Time
+	)
+	if err := s.pool.QueryRow(ctx, conditionsSQL).Scan(&c.At, &c.MaxWALSize, &idleMillis, &statementMilli,
+		&xminSeconds, &c.SeesAllSessions, &c.WALBytes, &reset); err != nil {
+		return domain.DatabaseConditions{}, fmt.Errorf("read the database's conditions: %w", err)
+	}
+	c.IdleInTransactionTimeout = time.Duration(idleMillis) * time.Millisecond
+	c.StatementTimeout = time.Duration(statementMilli) * time.Millisecond
+	c.OldestTransactionAge = time.Duration(xminSeconds * float64(time.Second))
+	if reset != nil {
+		c.WALStatsReset = *reset
+	}
+
+	var newer bool
+	if err := s.pool.QueryRow(ctx, hasCheckpointerViewSQL).Scan(&newer); err != nil {
+		return domain.DatabaseConditions{}, fmt.Errorf("read the database's conditions: %w", err)
+	}
+	checkpoints := checkpointsSQL
+	if newer {
+		checkpoints = checkpointsV17SQL
+	}
+	if err := s.pool.QueryRow(ctx, checkpoints).Scan(&c.CheckpointsTimed, &c.CheckpointsRequested); err != nil {
+		return domain.DatabaseConditions{}, fmt.Errorf("read the database's conditions: checkpoints: %w", err)
+	}
+	return c, nil
 }
