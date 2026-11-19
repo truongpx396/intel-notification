@@ -17,6 +17,8 @@ import (
 // a schedule and an address) is erased through Admin, and then
 //
 //   - no table the database catalog says can hold a recipient holds a row of theirs;
+//   - the pre-check no longer answers "replay" for any key of theirs (D51), and still does
+//     for another recipient's;
 //   - the erasure is recorded, by a hash, with nothing that says who it was;
 //   - a suppression recorded for one of their addresses still prevents delivery to it.
 //
@@ -125,7 +127,19 @@ func TestNS012AnErasedRecipientLeavesNothingAndTheirSuppressionStays(t *testing.
 		untouched[table] = rowsOf(t, e, table, other)
 	}
 
-	admin, err := app.NewAdmin(e.Config, app.Deps{Maintenance: e.Maintenance, Waker: e.Dispatcher})
+	// The pre-check remembers what the Notifier accepted, under each key, for the recipient and
+	// for the other one. The control: it does, so an entry gone afterwards was forgotten and not
+	// never written (D51).
+	for _, key := range []string{"k1", "k2", "k3"} {
+		if _, hit, err := e.PreCheck.Seen(t.Context(), domain.PreCheckKey(id, key)); err != nil || !hit {
+			t.Fatalf("the pre-check holds no entry for u1's %s (%v): the check below would prove nothing", key, err)
+		}
+	}
+	if _, hit, err := e.PreCheck.Seen(t.Context(), domain.PreCheckKey(other, "o1")); err != nil || !hit {
+		t.Fatalf("the pre-check holds no entry for u2's o1 (%v): the check below would prove nothing", err)
+	}
+
+	admin, err := app.NewAdmin(e.Config, app.Deps{Maintenance: e.Maintenance, Waker: e.Dispatcher, PreCheck: e.PreCheck})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,6 +158,18 @@ func TestNS012AnErasedRecipientLeavesNothingAndTheirSuppressionStays(t *testing.
 		if n := rowsOf(t, e, table, other); n != untouched[table] {
 			t.Errorf("%s: erasing u1 changed u2's rows from %d to %d", table, untouched[table], n)
 		}
+	}
+
+	// Nothing of theirs answers "replay" any more: an entry left for a key whose guard row was
+	// erased would tell a producer that a notification which no longer exists was delivered
+	// (D51). The other recipient's entry is untouched.
+	for _, key := range []string{"k1", "k2", "k3"} {
+		if nid, hit, _ := e.PreCheck.Seen(t.Context(), domain.PreCheckKey(id, key)); hit {
+			t.Errorf("the pre-check still answers %q for the erased recipient's key %s", nid, key)
+		}
+	}
+	if _, hit, _ := e.PreCheck.Seen(t.Context(), domain.PreCheckKey(other, "o1")); !hit {
+		t.Error("erasing u1 forgot u2's entry in the pre-check")
 	}
 
 	// The erasure is on record by a hash, and the record says nothing of who.

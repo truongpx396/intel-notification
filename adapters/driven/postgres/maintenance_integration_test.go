@@ -98,6 +98,60 @@ func TestTryLeaseJobRecordsEveryGrantAsTheJobsLastRun(t *testing.T) {
 	}
 }
 
+// D51. IdemKeys names the keys an erasure is about to remove, so the pre-check's entries for
+// them can be forgotten first. It lists one recipient's keys and no one else's, in ascending
+// bytewise order whatever the database's collation (the caller's loop compares them as bytes),
+// and a caller pages through them by passing back the last key it got. "B" sorts before "a" in
+// bytes and after it in most locales, which is why one of the keys is "B".
+func TestIdemKeys(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	u1 := ident("w1", "u1")
+	for _, k := range []string{"b", "a", "B", "invoice:42", "c"} {
+		e.notification(u1, k)
+	}
+	e.notification(ident("w1", "u2"), "of-another-recipient")
+	e.notification(ident("w2", "u1"), "of-another-tenant")
+	want := []string{"B", "a", "b", "c", "invoice:42"}
+
+	got, err := e.s.IdemKeys(ctx, u1, "", 100)
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("IdemKeys = %q, %v, want %q: the recipient's keys, in bytewise order, and no one else's", got, err, want)
+	}
+
+	// Paged: each ask begins after the last key of the page before, and the end is an empty page.
+	var paged []string
+	after := ""
+	for range 10 {
+		page, err := e.s.IdemKeys(ctx, u1, after, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		if len(page) > 2 {
+			t.Fatalf("a page of %d for a limit of 2", len(page))
+		}
+		paged = append(paged, page...)
+		after = page[len(page)-1]
+	}
+	if !slices.Equal(paged, want) {
+		t.Fatalf("paged through by two, got %q, want %q", paged, want)
+	}
+
+	if none, err := e.s.IdemKeys(ctx, ident("w1", "nobody"), "", 10); err != nil || len(none) != 0 {
+		t.Fatalf("IdemKeys for a recipient with none = %q, %v, want an empty list", none, err)
+	}
+	if _, err := e.s.IdemKeys(ctx, u1, "", 0); err == nil {
+		t.Fatal("IdemKeys with a limit of 0 succeeded: a page of nothing would never end a loop")
+	}
+	if _, err := e.s.IdemKeys(ctx, domain.Identity{}, "", 10); err == nil {
+		t.Fatal("IdemKeys for an identity with an empty component succeeded: it cannot be scoped")
+	}
+}
+
 // D11. Lowering the shard count folds rows from retired shards into live ones,
 // and the rows stay claimable.
 func TestRehomeShards(t *testing.T) {

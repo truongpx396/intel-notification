@@ -492,3 +492,8 @@ func (s *Store) DatabaseConditions(ctx context.Context) (domain.DatabaseConditio
 	}
 	return c, nil
 }
+
+// IdemKeys implements ports.Maintenance. STUB for the red run (T040b): it lists nothing.
+func (s *Store) IdemKeys(context.Context, domain.Identity, string, int) ([]string, error) {
+	return nil, nil
+}

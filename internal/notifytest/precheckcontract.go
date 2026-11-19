@@ -1,6 +1,7 @@
 package notifytest
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -15,8 +16,8 @@ type PreCheckFactory func(t *testing.T) ports.PreCheck
 // this package and the Redis adapter alike, so neither can drift from what the
 // other decided where the contract leaves room (T013a, T023). It asserts what the
 // port promises through the port: a remembered key is seen with its id, Seen only
-// reads, a key is the key it was given, and an entry that would never lapse is
-// refused. A lapse needs a clock the test can move, so it is the fake's own test;
+// reads, a key is the key it was given, an entry that would never lapse is
+// refused, and a forgotten key is gone and no other is. A lapse needs a clock the test can move, so it is the fake's own test;
 // Redis's is shown from the TTL it stores.
 //
 // Every case builds its own pre-check with newPreCheck.
@@ -84,6 +85,85 @@ func PreCheckContract(t *testing.T, newPreCheck PreCheckFactory) {
 		}
 		if id, ok, _ := p.Seen(t.Context(), "k2"); ok {
 			t.Fatalf("Seen(k2) = %q, true after remembering k1", id)
+		}
+	})
+
+	// Forget (T040b, D51): an erasure removes the guard rows the entries mirror, so the entries
+	// go too, or a producer retrying a key is told it is a replay of a notification that is gone.
+	t.Run("forget removes the entries it is given and no other", func(t *testing.T) {
+		t.Parallel()
+		p := newPreCheck(t)
+		for _, k := range []string{"k1", "k2", "k3"} {
+			if err := p.Remember(t.Context(), k, "n-"+k, time.Hour); err != nil {
+				t.Fatalf("Remember(%s): %v", k, err)
+			}
+		}
+		if err := p.Forget(t.Context(), []string{"k1", "k3"}); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		for _, k := range []string{"k1", "k3"} {
+			if id, ok, _ := p.Seen(t.Context(), k); ok {
+				t.Fatalf("Seen(%s) = %q, true after it was forgotten", k, id)
+			}
+		}
+		if id, ok, err := p.Seen(t.Context(), "k2"); err != nil || !ok || id != "n-k2" {
+			t.Fatalf("Seen(k2) = %q, %v, %v: forgetting two keys took a third with them", id, ok, err)
+		}
+	})
+
+	t.Run("forgetting a key that is not held, or nothing at all, is not an error", func(t *testing.T) {
+		t.Parallel()
+		p := newPreCheck(t)
+		if err := p.Remember(t.Context(), "k1", "n1", time.Hour); err != nil {
+			t.Fatalf("Remember: %v", err)
+		}
+		for name, keys := range map[string][]string{"an unknown key": {"never-remembered"}, "no keys": {}, "a nil list": nil} {
+			if err := p.Forget(t.Context(), keys); err != nil {
+				t.Fatalf("Forget(%s) = %v, want nil: a cache is forgotten for what it may not hold", name, err)
+			}
+		}
+		if _, ok, _ := p.Seen(t.Context(), "k1"); !ok {
+			t.Fatal("forgetting what was not held removed an entry that was")
+		}
+	})
+
+	t.Run("a forgotten key can be remembered again", func(t *testing.T) {
+		t.Parallel()
+		p := newPreCheck(t)
+		if err := p.Remember(t.Context(), "k1", "n1", time.Hour); err != nil {
+			t.Fatalf("Remember: %v", err)
+		}
+		if err := p.Forget(t.Context(), []string{"k1"}); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		if err := p.Remember(t.Context(), "k1", "n2", time.Hour); err != nil {
+			t.Fatalf("Remember after Forget: %v", err)
+		}
+		if id, ok, err := p.Seen(t.Context(), "k1"); err != nil || !ok || id != "n2" {
+			t.Fatalf("Seen = %q, %v, %v, want n2: the new notification under a reused key", id, ok, err)
+		}
+	})
+
+	t.Run("a list longer than any one batch is forgotten whole", func(t *testing.T) {
+		t.Parallel()
+		// Longer than the Redis adapter's pipeline chunk, so a Forget that stops after
+		// its first chunk leaves entries behind.
+		const n = 2500
+		p := newPreCheck(t)
+		keys := make([]string, n)
+		for i := range keys {
+			keys[i] = fmt.Sprintf("k%05d", i)
+			if err := p.Remember(t.Context(), keys[i], "n", time.Hour); err != nil {
+				t.Fatalf("Remember(%s): %v", keys[i], err)
+			}
+		}
+		if err := p.Forget(t.Context(), keys); err != nil {
+			t.Fatalf("Forget: %v", err)
+		}
+		for _, k := range []string{keys[0], keys[999], keys[1000], keys[n-1]} {
+			if id, ok, _ := p.Seen(t.Context(), k); ok {
+				t.Fatalf("Seen(%s) = %q, true: Forget left it behind", k, id)
+			}
 		}
 	})
 

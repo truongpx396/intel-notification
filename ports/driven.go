@@ -106,6 +106,13 @@ type Maintenance interface {
 	// someone who complained. Returns rows removed per table.
 	Erase(ctx context.Context, id domain.Identity) (map[string]int, error)
 
+	// IdemKeys lists up to limit of the identity's idempotency keys that sort after
+	// `after` (all of them when after is empty), in ascending bytewise order, so a
+	// caller pages through them by passing the last key it was given. It is what lets
+	// an erasure name the pre-check entries to forget before the guard rows they
+	// mirror are gone (D51). limit must be positive.
+	IdemKeys(ctx context.Context, id domain.Identity, after string, limit int) ([]string, error)
+
 	// EnsurePartitions creates each missing monthly partition of the
 	// range-partitioned tables, for months months from the one containing from,
 	// and scopes every new notifications partition (D17). Returns the partitions
@@ -311,6 +318,12 @@ type PreCheck interface {
 	Seen(ctx context.Context, key string) (notificationID string, ok bool, err error)
 	// Remember is called after commit only, and never for NotifyTx.
 	Remember(ctx context.Context, key, notificationID string, ttl time.Duration) error
+	// Forget removes the entries under keys, so a key whose guard row has been erased
+	// no longer answers "replay" for a notification that is gone (D51). A key it does
+	// not hold is not an error, and neither is an empty list. Like Seen and Remember it
+	// treats a fault in its store as nothing to do, and says so to whoever watches it:
+	// an entry it could not remove lapses with its ttl.
+	Forget(ctx context.Context, keys []string) error
 }
 
 // StreamPublisher carries the live nudge (D16): a notification id on the stream

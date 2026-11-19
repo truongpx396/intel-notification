@@ -88,3 +88,6 @@ func (p *PreCheck) Remember(ctx context.Context, key, notificationID string, ttl
 	}
 	return nil
 }
+
+// Forget implements ports.PreCheck. STUB for the red run (T040b): it removes nothing.
+func (p *PreCheck) Forget(context.Context, []string) error { return nil }
