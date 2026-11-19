@@ -3,11 +3,15 @@
 package postgres
 
 import (
+	"context"
+	"fmt"
+	"math/rand/v2"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/truongpx396/intel-notification/domain"
 )
@@ -39,6 +43,125 @@ func TestTryLeaseJob(t *testing.T) {
 		if err != nil || ok != st.wantOK {
 			t.Fatalf("%s: ok=%v err=%v", st.name, ok, err)
 		}
+	}
+}
+
+// D50. The stale-job alarm (operations.md) reads last_started_at, so it has to say when the
+// job last ran for the worker that keeps its lease as much as for one that has just taken it:
+// every grant moves it, the holder's renewal included, and a refusal moves nothing. Before
+// this, a renewal kept the column and the alarm fired for every healthy job. The age is made
+// by backdating the column, and the test never waits for it.
+func TestTryLeaseJobRecordsEveryGrantAsTheJobsLastRun(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	const job = "retention"
+	startedRecently := func() bool {
+		return e.count(`SELECT count(*) FROM notify_job_leases WHERE job = 'retention'
+                        AND last_started_at > now() - interval '1 minute'`) == 1
+	}
+	backdate := func() {
+		if _, err := e.db.Admin.Exec(ctx,
+			`UPDATE notify_job_leases SET last_started_at = now() - interval '1 hour' WHERE job = 'retention'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ask := func(owner string, want bool) {
+		t.Helper()
+		if ok, err := e.s.TryLeaseJob(ctx, job, owner, time.Minute); err != nil || ok != want {
+			t.Fatalf("TryLeaseJob(%s) = %v, %v, want %v", owner, ok, err, want)
+		}
+	}
+
+	// A sequence: each step starts from what the last left.
+	ask("worker-1", true)
+	if !startedRecently() {
+		t.Fatal("the first grant did not record the job's start")
+	}
+
+	backdate()
+	ask("worker-2", false) // the lease is live and worker-1's
+	if startedRecently() {
+		t.Fatal("a refused ask moved last_started_at: the job did not run")
+	}
+
+	ask("worker-1", true) // the holder renews, as every run of a job does
+	if !startedRecently() {
+		t.Fatal("the holder's renewal kept last_started_at, so the column shows the job last ran when worker-1 took it, and notify.job.stale fires for a healthy job (D50)")
+	}
+
+	backdate()
+	if _, err := e.db.Admin.Exec(ctx, `UPDATE notify_job_leases SET lease_expires_at = now() - interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	ask("worker-2", true) // the lease lapsed and passed on
+	if !startedRecently() {
+		t.Fatal("a grant that changed the owner did not record the job's start")
+	}
+}
+
+// D51. IdemKeys names the keys an erasure is about to remove, so the pre-check's entries for
+// them can be forgotten first. It lists one recipient's keys and no one else's, in ascending
+// bytewise order whatever the database's collation (the caller's loop compares them as bytes),
+// and a caller pages through them by passing back the last key it got. "B" sorts before "a" in
+// bytes and after it in most locales, which is why one of the keys is "B".
+func TestIdemKeys(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	u1 := ident("w1", "u1")
+	// The column is given a locale-aware collation, under which "a" sorts before "B", so that the
+	// order IdemKeys promises is not one the database would give anyway. The control below shows it.
+	e.admin(`ALTER TABLE notify_idem ALTER COLUMN idem_key TYPE text COLLATE "en-x-icu"`)
+	for _, k := range []string{"b", "a", "B", "invoice:42", "c"} {
+		e.notification(u1, k)
+	}
+	e.notification(ident("w1", "u2"), "of-another-recipient")
+	e.notification(ident("w2", "u1"), "of-another-tenant")
+	want := []string{"B", "a", "b", "c", "invoice:42"}
+	var localeOrder string
+	if err := e.db.Admin.QueryRow(ctx, `SELECT string_agg(idem_key, ',' ORDER BY idem_key) FROM notify_idem
+	                                    WHERE recipient_id = 'u1' AND tenant_id = 'w1'`).Scan(&localeOrder); err != nil {
+		t.Fatal(err)
+	}
+	if localeOrder == "B,a,b,c,invoice:42" {
+		t.Fatalf("the column's own collation already orders %q bytewise: the control has no teeth", localeOrder)
+	}
+
+	got, err := e.s.IdemKeys(ctx, u1, "", 100)
+	if err != nil || !slices.Equal(got, want) {
+		t.Fatalf("IdemKeys = %q, %v, want %q: the recipient's keys, in bytewise order, and no one else's", got, err, want)
+	}
+
+	// Paged: each ask begins after the last key of the page before, and the end is an empty page.
+	var paged []string
+	after := ""
+	for range 10 {
+		page, err := e.s.IdemKeys(ctx, u1, after, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		if len(page) > 2 {
+			t.Fatalf("a page of %d for a limit of 2", len(page))
+		}
+		paged = append(paged, page...)
+		after = page[len(page)-1]
+	}
+	if !slices.Equal(paged, want) {
+		t.Fatalf("paged through by two, got %q, want %q", paged, want)
+	}
+
+	if none, err := e.s.IdemKeys(ctx, ident("w1", "nobody"), "", 10); err != nil || len(none) != 0 {
+		t.Fatalf("IdemKeys for a recipient with none = %q, %v, want an empty list", none, err)
+	}
+	if _, err := e.s.IdemKeys(ctx, u1, "", 0); err == nil {
+		t.Fatal("IdemKeys with a limit of 0 succeeded: a page of nothing would never end a loop")
+	}
+	if _, err := e.s.IdemKeys(ctx, domain.Identity{}, "", 10); err == nil {
+		t.Fatal("IdemKeys for an identity with an empty component succeeded: it cannot be scoped")
 	}
 }
 
@@ -487,5 +610,293 @@ END $$`},
 				t.Errorf("unscoped %v, want %v", got.Unscoped, c.want.Unscoped)
 			}
 		})
+	}
+}
+
+// NR-022, D33. A completed broadcast is deleted once it finished before the cutoff, in
+// batches; one that is pending is never deleted, however old, and one inside the window
+// is kept. The broadcast table is not row-level scoped (it holds no recipient), so the
+// store runs this as the worker, with no scope.
+func TestExpireBroadcasts(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	insert := func(key, status string, completed *time.Time) {
+		t.Helper()
+		e.admin(`
+INSERT INTO notification_broadcasts (realm, tenant_kind, tenant_id, idem_key, audience, request, status, completed_at, created_at)
+VALUES ('aisat', 'workspace', 'w1', $1, 'everyone', '{}'::jsonb, $2, $3, '2026-06-01')`, key, status, completed)
+	}
+	old, recent := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	cutoff := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	for _, k := range []string{"old-1", "old-2", "old-3"} {
+		insert(k, "completed", &old)
+	}
+	insert("recent", "completed", &recent)
+	insert("at-the-cutoff", "completed", &cutoff) // not older than the cutoff, so it stays
+	insert("pending-and-ancient", "pending", nil)
+
+	batches := []struct{ batch, want int }{{2, 2}, {2, 1}, {2, 0}}
+	for i, b := range batches {
+		if n, err := e.s.ExpireBroadcasts(t.Context(), cutoff, b.batch); err != nil || n != b.want {
+			t.Fatalf("batch %d: expired %d (%v), want %d", i+1, n, err, b.want)
+		}
+	}
+	for key, want := range map[string]int{"old-1": 0, "old-2": 0, "old-3": 0, "recent": 1, "at-the-cutoff": 1, "pending-and-ancient": 1} {
+		if got := e.count(`SELECT count(*) FROM notification_broadcasts WHERE idem_key = $1`, key); got != want {
+			t.Errorf("broadcast %s: %d rows, want %d", key, got, want)
+		}
+	}
+}
+
+// storeWith is a store over a pool of its own, whose every session has been given the
+// settings, so a reading of "the connected role's" timeouts is of connections that have
+// them. ALTER ROLE ... IN DATABASE reaches only this test's database, which every test
+// has to itself, so no other test's role is touched.
+func (e *env) storeWith(settings ...string) *Store {
+	e.t.Helper()
+	role := e.db.Owner.Config().ConnConfig.User
+	for _, s := range settings {
+		e.admin(`ALTER ROLE ` + pgx.Identifier{role}.Sanitize() + ` IN DATABASE ` + pgx.Identifier{e.db.Name}.Sanitize() + ` SET ` + s)
+	}
+	pool, err := pgxpool.NewWithConfig(e.t.Context(), e.db.Owner.Config().Copy())
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.t.Cleanup(pool.Close)
+	return New(pool, WithClock(e.clock))
+}
+
+// The age that matters is the oldest transaction's, not the newest's or an average (D49). The
+// two transactions begin 250 ms apart by the database's own clock, which no fake clock can move
+// (pg_sleep is the wait, and nothing here sleeps in Go), so the reading is at least that old when
+// the oldest is read and about nothing when the youngest is.
+func TestDatabaseConditionsReadsTheOldestTransactionNotTheNewest(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	first, err := e.db.Owner.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Rollback(t.Context()) }()
+	if _, err := first.Exec(t.Context(), `SELECT count(*) FROM notification_outbox`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Exec(t.Context(), `SELECT pg_sleep(0.25)`); err != nil {
+		t.Fatal(err)
+	}
+	second, err := e.db.Owner.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Rollback(t.Context()) }()
+	if _, err := second.Exec(t.Context(), `SELECT count(*) FROM notification_outbox`); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := e.storeWith().DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OldestTransactionAge < 200*time.Millisecond {
+		t.Fatalf("OldestTransactionAge = %v with one transaction 250ms older than the other, want at least 200ms: the oldest is the one that pins vacuum longest", c.OldestTransactionAge)
+	}
+}
+
+// A role that is neither a superuser nor the owner can still see every session if it is a member of
+// pg_read_all_stats, and the reading must say so (D49). The role is made for the test and dropped
+// after it, because roles are cluster-wide and the shared owner must not be granted anything.
+func TestDatabaseConditionsSeesEverySessionThroughPgReadAllStats(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	role := fmt.Sprintf("stats_reader_%d", rand.Uint32())
+	quoted := pgx.Identifier{role}.Sanitize()
+	e.admin(`CREATE ROLE ` + quoted + ` LOGIN PASSWORD 'reader' NOSUPERUSER NOBYPASSRLS`)
+	t.Cleanup(func() { _, _ = e.db.Admin.Exec(context.Background(), `DROP ROLE IF EXISTS `+quoted) })
+	pool := func() *Store {
+		t.Helper()
+		cfg := e.db.Owner.Config().Copy()
+		cfg.ConnConfig.User, cfg.ConnConfig.Password = role, "reader"
+		p, err := pgxpool.NewWithConfig(t.Context(), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.Close)
+		return New(p, WithClock(e.clock))
+	}
+
+	before, err := pool().DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.SeesAllSessions {
+		t.Fatal("a role that is neither a superuser nor a member of pg_read_all_stats is reported as seeing every session")
+	}
+	e.admin(`GRANT pg_read_all_stats TO ` + quoted)
+	after, err := pool().DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.SeesAllSessions {
+		t.Fatal("a member of pg_read_all_stats is reported as not seeing every session, and the preflight would warn about a blindness it does not have")
+	}
+}
+
+// NR-037, D38. DatabaseConditions reads what the queue depends on and judges none of it.
+// The domain's AssessDatabase is the judge (TestAssessDatabase); this is that the
+// reading is true.
+func TestDatabaseConditionsReadsTheRolesTimeoutsAndTheServersSizing(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	plain := e.storeWith()
+	c, err := plain.DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.IdleInTransactionTimeout != 0 || c.StatementTimeout != 0 {
+		t.Fatalf("timeouts = %v and %v for a role with none, want off (zero)", c.IdleInTransactionTimeout, c.StatementTimeout)
+	}
+	if c.MaxWALSize < 32<<20 {
+		t.Fatalf("MaxWALSize = %d, want the server's max_wal_size in bytes (at least its 32 MiB minimum)", c.MaxWALSize)
+	}
+	if d := time.Since(c.At); d < -time.Minute || d > time.Minute {
+		t.Fatalf("At = %v, want the database's clock, which is now", c.At)
+	}
+
+	set := e.storeWith("idle_in_transaction_session_timeout = '30s'", "statement_timeout = '45s'")
+	c, err = set.DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.IdleInTransactionTimeout != 30*time.Second || c.StatementTimeout != 45*time.Second {
+		t.Fatalf("timeouts = %v and %v, want 30s and 45s as the role has them", c.IdleInTransactionTimeout, c.StatementTimeout)
+	}
+}
+
+// A transaction pins vacuum when it holds a snapshot or has an id, and not merely by
+// being open: a read-committed session idle in a transaction holds neither between
+// statements, so it is not what the alarm is for, and reporting it would cry wolf at every
+// host that keeps a connection in a transaction for a moment.
+func TestDatabaseConditionsReportsTheAgeOfATransactionThatPinsVacuum(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		open func(*testing.T, *env) pgx.Tx
+		pins bool
+	}{
+		{"no transaction is open", nil, false},
+		{"a repeatable-read transaction holds its snapshot", func(t *testing.T, e *env) pgx.Tx {
+			t.Helper()
+			tx, err := e.db.Owner.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(t.Context(), `SELECT count(*) FROM notification_outbox`); err != nil {
+				t.Fatal(err)
+			}
+			return tx
+		}, true},
+		{"a read-committed transaction with an id holds it", func(t *testing.T, e *env) pgx.Tx {
+			t.Helper()
+			tx, err := e.db.Owner.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(t.Context(), `SELECT txid_current()`); err != nil {
+				t.Fatal(err)
+			}
+			return tx
+		}, true},
+		{"a read-committed transaction idle between statements pins nothing", func(t *testing.T, e *env) pgx.Tx {
+			t.Helper()
+			tx, err := e.db.Owner.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(t.Context(), `SELECT 1`); err != nil {
+				t.Fatal(err)
+			}
+			return tx
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t).with(t)
+			if tc.open != nil {
+				tx := tc.open(t, e)
+				defer func() { _ = tx.Rollback(t.Context()) }()
+			}
+			c, err := e.storeWith().DatabaseConditions(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.pins && c.OldestTransactionAge <= 0 {
+				t.Fatalf("OldestTransactionAge = %v with a transaction pinning vacuum, want its age", c.OldestTransactionAge)
+			}
+			if !tc.pins && c.OldestTransactionAge != 0 {
+				t.Fatalf("OldestTransactionAge = %v, want zero: nothing here pins vacuum", c.OldestTransactionAge)
+			}
+		})
+	}
+}
+
+// The role that cannot see other roles' sessions says so, so a clean reading is not
+// taken for a clean database; one that can, does not.
+func TestDatabaseConditionsSaysWhetherTheRoleCanSeeOtherSessions(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	owner, err := e.storeWith().DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner.SeesAllSessions {
+		t.Fatal("the non-superuser owner is reported as seeing every session")
+	}
+	super, err := New(e.db.Admin, WithClock(e.clock)).DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !super.SeesAllSessions {
+		t.Fatal("a superuser is reported as not seeing every session")
+	}
+}
+
+// The WAL counter moves with writes, and a checkpoint the command asked for is counted
+// as requested, not as timed: the preflight alarms on requested checkpoints.
+func TestDatabaseConditionsCountsTheWALAndTheCheckpointsItsWritesCause(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	s := e.storeWith()
+	before, err := s.DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.WALBytes <= 0 {
+		t.Fatalf("WALBytes = %d, want the WAL the server has written", before.WALBytes)
+	}
+	for i := range 20 {
+		e.notification(ident("w1", "u"+string(rune('a'+i))), "wal")
+	}
+	e.admin(`CHECKPOINT`)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	for {
+		after, err := s.DatabaseConditions(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.WALBytes < before.WALBytes {
+			t.Fatalf("WALBytes went from %d to %d with writes between", before.WALBytes, after.WALBytes)
+		}
+		if after.CheckpointsRequested > before.CheckpointsRequested {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("CheckpointsRequested stayed at %d for 15s after a CHECKPOINT: the statistics read are not the checkpointer's requested count",
+				before.CheckpointsRequested)
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 }

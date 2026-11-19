@@ -800,11 +800,25 @@ rule above.
 
 ## Stage 8 — Maintenance
 
-- [ ] **T039** *red* Test: retention succeeds while a dead-lettered delivery references an aged
+- [x] **T039** *red* Test: retention succeeds while a dead-lettered delivery references an aged
       partition ([D6](design-decisions.md#d6)). Also the case moved from T020: retention with a pending
       delivery outstanding leaves that delivery drivable. Written against `RetirePartitions` before it
       exists
-- [ ] **T038** *red → green* `app/maintenance.go`: leased jobs for retention (inbox, history, dead
+      *Eight tests in `adapters/driven/postgres/retention_integration_test.go` and a control for the witness. Retirement
+      deletes no row: a `DELETE` trigger on the aged partitions writes to a witness table, which must stay empty
+      (`n_tup_del` is not used, because a partitioned parent keeps no statistics of its own, a dropped partition takes its
+      with it, and statistics reach the collector after the statement). Only a partition whose whole range the cutoff has
+      passed goes, with the boundary cases; one whose range has not ended is never retired whatever the cutoff; only the
+      three tables can be retired; the two T039 cases proper; and the bounded lock wait of
+      [D47](design-decisions.md#d47), which also requires the error to say the partition was *skipped*.
+      **Red, witnessed after the green:** Docker did not answer when these were written, so no red was seen first. With
+      `RetirePartitions` restored to return nothing, they fail on their assertions
+      (`RetirePartitions = [], <nil>, want the aged partition retired`; ledger row `retire-stub`), and with the code back they pass. **The witness:** the store's role has no recipient scope, so
+      forced row-level security shows it no row of the inbox, and a `DELETE` by it deletes nothing and leaves the witness
+      empty, so *delete, then drop* survives as a mutant and is equivalent for that role.
+      `TestTheRetirementWitnessRecordsADeletion` shows the witness records a deletion by a role that can reach the rows,
+      and fails when the witness is blinded, so an empty witness after a retirement means something.*
+- [x] **T038** *red → green* `app/maintenance.go`: leased jobs for retention (inbox, history, dead
       letters), partition provisioning and its check (T006), idempotency and digest expiry,
       completed-broadcast cleanup (NR-022, [D33](design-decisions.md#d33)). Make T039 pass.
       **Red first:** two workers contending for a job run it once; a re-run of each job changes nothing;
@@ -815,11 +829,46 @@ rule above.
       it, and a healthy report raises neither. Detecting the conditions is T006's, tested there against
       PostgreSQL; this task tests only that the job turns a report into the two alarms.
       **Mutate:** retire with `DELETE`; skip the lease; drop the `Unscoped` half of the report
-- [ ] **T040** *red → green* `app/erasure.go` + `Admin.Erase`; test NS-012.
+      *Built as `app.Maintenance` (`Pass`, `Run`, `Preflight`) over six jobs, `postgres.RetirePartitions` and
+      `ExpireBroadcasts`, and the choices of [D47](design-decisions.md#d47) and [D48](design-decisions.md#d48); the three
+      expiries are one function over three store methods. The use-case half is held by 19 tests over a recording
+      `Maintenance` that keeps real lease semantics over a clock (each job takes its lease first, two workers contending
+      run each job once, a lapsed lease passes the jobs on, a job runs no oftener than its interval, the partition job
+      turns a `PartitionHealth` into the two alarms, and the check still runs when provisioning failed), red witnessed
+      against stubs (with T040 and T040a's, all 28 new unit tests failed on an assertion). The PostgreSQL half and the end-to-end
+      suite (`app/maintenance_integration_test.go`, which runs two workers on one database and checks who holds each
+      lease) ran when Docker came back and are green; `make ci` is green. Mutations: 24 of the use-case code, and for the PostgreSQL side
+      *retire with `DELETE`* (the task's own, caught by `TestRetirePartitionsDropsWholePartitionsAndDeletesNoRow`), the
+      cutoff cap, the whole-range test at both its edges, the table check, the lock wait, and `ExpireBroadcasts`'s status,
+      boundary and batch (the boundary survived until a fixture at exactly the cutoff was added). **One difference from the
+      task text:** the metadata-operation witness is a `DELETE` trigger and not `n_tup_del`, for the reason given under T039.*
+- [x] **T038a** *red → green* `TryLeaseJob` records every grant, the holder's renewal included, as the job's last start
+      (`notify_job_leases.last_started_at`), so the `notify.job.stale` alarm of [operations.md](../../docs/operations.md)
+      has something to read ([D50](design-decisions.md#d50)). Found when Stage 8 was reviewed: a renewal kept the column,
+      so for a worker that keeps its jobs it never moved, and the alarm fired for every healthy job.
+      **Red first:** with `last_started_at` backdated, a renewal by the holder moves it, a refused ask does not, and a
+      take-over after a lapse does (`TestTryLeaseJobRecordsEveryGrantAsTheJobsLastRun`, no sleep).
+      **Mutate:** keep the column on a renewal; move it on a refused ask
+      *The test was committed before the fix, but Docker did not answer, so its red was witnessed afterwards: with the
+      old `CASE` restored it fails with `the holder's renewal kept last_started_at, so the column shows the job last ran
+      when worker-1 took it, and notify.job.stale fires for a healthy job (D50)`. Both mutations are killed (ledger).
+      The alarm thresholds are per job, in a table in [operations.md](../../docs/operations.md#maintenance-jobs-and-their-leases).
+      `last_finished_at` is still not written, and a job that takes its lease and fails every run is not stale: that is
+      the error handler's report. No refactor was needed: it is one expression.*
+- [x] **T040** *red → green* `app/erasure.go` + `Admin.Erase`; test NS-012.
       **Red first:** erase a recipient, then scan every table listed by the database catalog, not by the
       adapter, and find no row carrying the recipient; the erasure record keeps no identity; a suppression
       recorded for one of its addresses still blocks delivery to that address (NR-034).
       **Mutate:** skip a table; delete the suppression
+      *`Admin.Erase` is built (`app/erasure.go`): it refuses an identity with an empty component before the store is
+      asked, hands the identity to `Maintenance.Erase` once, and returns what was removed, and no counts on a failure.
+      Held by three unit tests, red witnessed (all three failed on an assertion) and four ledger rows. NS-012 itself,
+      `TestNS012AnErasedRecipientLeavesNothingAndTheirSuppressionStays`, ran green: it lists the tables from the catalog,
+      insists on a fixture row in every one (so a table never filled cannot pass for one emptied), checks that Erase's
+      counts equal the rows that were there and that a second recipient is untouched, that the record names no `u1`, `w1`
+      or address, and that a later notification to the suppressed address is recorded as suppressed with the channel
+      never asked. The task's mutations are killed by it and by `TestErase`: *skip a table* (`notify_idem` removed from
+      the list) and *delete the suppression* (`Erase` also deletes the realm's suppressions).*
 - [ ] **T040a** *red → green* `app/maintenance.go`: `Maintenance.Preflight`, at startup and on a
       schedule, reports as warnings and never failures the database conditions the queue depends on —
       `max_wal_size` against the observed WAL rate, the connected role's
@@ -830,7 +879,47 @@ rule above.
       warning; an undersized `max_wal_size` produces its warning; a healthy configuration produces none;
       and none of them stops the service starting.
       **Mutate:** return an error instead of a warning; read a stale `backend_xmin`
-
+      *Built in three parts: the judgement in `domain` (`AssessDatabase`, `WALRate`), the job in
+      `app.Maintenance.Preflight`, and the reading in `postgres.DatabaseConditions`, with the choices of
+      [D49](design-decisions.md#d49). The first two are done and held, red witnessed, with 12 ledger rows (two
+      survivors, both equivalent, so the redundant guards were removed) for the domain and kit and 7 for the job: *return
+      an error instead of a warning* is killed. The PostgreSQL reading ran when Docker came back and is green, including
+      the assumption the design rested on, that a read-committed session idle between statements holds no snapshot and no
+      id, so it pins nothing. Its mutations are in the ledger: *every open transaction counts*, *only a snapshot counts*,
+      *the preflight's own session counts*, *another database's transactions count*, *the youngest is read*, *a
+      `pg_read_all_stats` member is not seen as seeing all*, and the three readings. *The youngest is read* and *a member is not
+      seen* survived until the tests were given a second transaction, begun 250 ms after the first, and a role granted
+      `pg_read_all_stats`. The task asks for the oldest `backend_xmin`
+      and exports two names; the reading counts a transaction that holds a snapshot **or an assigned id**, in seconds,
+      because an id pins vacuum as a snapshot does, and it adds a warning the task does not list, for a role that cannot
+      see other roles' sessions, because a clean reading through one is a clean bill it has not earned. The gauges need a
+      `Metrics` that can hold a level, which `ports.Metrics` (`Inc` only) cannot, so there is an optional
+      `ports.GaugeMetrics`.
+      **Open, so the box stays open, for two reasons.** *Count backends that are not clients* survived and cannot be
+      killed from a test: the only such backend that holds a snapshot in this database is an autovacuum worker, which a
+      test cannot make appear on demand, and the definition of done wants a survivor fixed. And the PostgreSQL 17 branch
+      of the checkpoint read, where the counters moved to `pg_stat_checkpointer`, has no test, because the suite runs on 16.*
+- [x] **T040b** *red → green* `Admin.Erase` forgets the pre-check's entries for the recipient's idempotency keys, so a
+      producer retrying a key after an erasure is not told it is a replay of a notification that is gone (NR-034,
+      [D51](design-decisions.md#d51)). Found when Stage 8 was reviewed: `Erase` removed the `notify_idem` rows and left
+      the Redis entries, which live up to `PreCheckTTL`.
+      **Red first:** `PreCheck.Forget(keys)` and `Maintenance.IdemKeys(identity, after, limit)` join the ports. `Erase`
+      forgets the entry under `PreCheckKey(identity, key)` for each of the recipient's keys, in pages, **before** it
+      erases; with no pre-check it reads no keys; an unreadable key list or a refused `Forget` stops the erasure before it
+      begins; a page that does not advance is an error and not a loop. `PreCheckContract` gains `Forget`'s cases and runs
+      against the fake and Redis (a list longer than a chunk, an unknown key, a forgotten key remembered again); the
+      Redis adapter reports a fault once and returns nil; `IdemKeys` lists one recipient's keys, bytewise, a page at a
+      time; and NS-012 shows the entries of the erased recipient gone and another's kept.
+      **Mutate:** forget after the erasure; forget under the wrong key or identity; stop after the first page; skip the
+      guard against a page that does not advance; ignore a refused `Forget`; do not wire the pre-check into `NewAdmin`
+      *Unit red witnessed first (the failures are in the `test:` commit); the PostgreSQL and Redis tests were witnessed
+      afterwards, by their mutants, because Docker did not answer. 24 rows in the ledger, all killed; one of them
+      (`IdemKeys` ordering) survived first and died once the test gave the column a locale-aware collation. The first mutant to
+      drop `IdemKeys`'s identity predicate died of a raw SQL error and was rewritten, and the rewrite showed that
+      `notify_idem` has **no recipient policy**, so the predicate is the only bound on the read (a comment of mine that
+      claimed otherwise was wrong, and is fixed). `IdemKeys` orders `COLLATE "C"`, and its
+      test gives the column an ICU collation so the order is not one the database would give anyway. The refactor pass
+      made the three expiries of `app.Maintenance` one function and the page-size probe of the tests a helper.*
 ## Stage 9 — Broadcast
 
 - [ ] **T042** *red* Test: a crash mid-broadcast resumes at the next page; a retried broadcast
@@ -960,7 +1049,7 @@ that lists no red task has no test scheduled.
 | NS-009 builds with no host | no-host CI job | T054 (done) |
 | NS-010 capacity | load-test thresholds | T055 |
 | NS-011 non-Go producer | producer scenario against the service | T051 |
-| NS-012 erasure | catalog-wide scan after `Erase` | T040 |
+| NS-012 erasure | catalog-wide scan after `Erase`: `TestNS012AnErasedRecipientLeavesNothingAndTheirSuppressionStays`, which also shows the erased recipient's pre-check entries gone and another's kept ([D51](design-decisions.md#d51)), with the adapter's `TestErase` | T040, T040b |
 
 ## Requirements
 
@@ -991,7 +1080,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a (done), T026 (done), T048 |
 | NR-020 resumable paged broadcast | crash between pages and inside a page; deterministic member keys | T042 |
 | NR-021 stable shard, changeable count | shard vectors; `RehomeShards` integration test | T010 (done), T016 (done) |
-| NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding; `n_tup_del` unmoved | T006 (done), T038, T039 |
+| NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding and with a pending delivery; no row deleted on the way to a retirement (a `DELETE` witness, in place of `n_tup_del`); the jobs' cutoffs (`TestRetentionRetiresEachTableAtItsOwnWindow`, `TestTheExpiriesCutAtTheIdempotencyWindowInBatches`); that the `DELETE` witness can fire (`TestTheRetirementWitnessRecordsADeletion`) | T006 (done), T038, T039 |
 | NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; `QuotaContract` and the `channel_quotas` table; noisy-neighbour test | T016 (done), T036 (done), T037 (done) |
 | NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017 (done), T025 (done), T028 (done) |
 | NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
@@ -1003,10 +1092,10 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021 (done), T033 (done) |
 | NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020 (done), T022a (done), T024 (done), T047a |
 | NR-033 seen, read, archived | inbox table, independent flags | T017 (done) |
-| NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext | T019 (done), T040 |
+| NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext; `Admin.Erase`'s own table (`TestErase…` in `app`); the pre-check's entries for the recipient's keys forgotten before the erasure (`TestEraseForgets…`, the `Forget` cases of `PreCheckContract`, `TestIdemKeys`) | T019 (done), T040, T040b |
 | NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack | T020 (done), T052 |
 | NR-036 capacity envelope stated | stated in [plan.md § Capacity model](plan.md#capacity-model); the load-test thresholds | T055 |
-| NR-037 preflight warnings | preflight table | T040a |
+| NR-037 preflight warnings | `TestAssessDatabase` and `TestWALRate`; `TestPreflight…` in `app`; `TestDatabaseConditions…` against PostgreSQL (the PostgreSQL 17 branch of the checkpoint read has no test) | T040a |
 
 ---
 

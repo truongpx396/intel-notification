@@ -568,11 +568,12 @@ type Digests interface {
 }
 
 type Maintenance interface {
-	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error) // D22
+	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error) // D22; every grant, a renewal included, is the job's last start (D50)
 	RehomeShards(ctx context.Context, shards int) (int, error)                           // D11
 	ExpireIdem(ctx context.Context, olderThan time.Time, batch int) (int, error)         // D21
 	ExpireDigests(ctx context.Context, olderThan time.Time, batch int) (int, error)      // D4
 	Erase(ctx context.Context, id Identity) (map[string]int, error)                      // D35
+	IdemKeys(ctx context.Context, id Identity, after string, limit int) ([]string, error) // D51: bytewise, after the last key of the previous page
 	EnsurePartitions(ctx context.Context, from time.Time, months int) ([]string, error)  // scopes new partitions (D17)
 	// CheckPartitions reads the catalog and changes nothing. Missing: for notifications,
 	// notification_deliveries and dead_letters, the month containing at and the next, when no
@@ -589,7 +590,24 @@ type Maintenance interface {
 	// drops its fallback chain. ErrUnknownDeadLetter for none in the realm; ErrNotReplayable for one
 	// the bus parked.
 	ReplayDeadLetter(ctx context.Context, realm Realm, deadLetterID string) (replayed bool, err error)
-	// Still to come: RetirePartitions (T038).
+	// RetirePartitions (T039, D47) drops each partition of one of the three range-partitioned tables whose
+	// WHOLE range ended at or before `before`, oldest first, and returns their names: a catalog operation,
+	// never a row purge (NR-022, D33). `before` is capped at the database's now(), so a cutoff in the future
+	// cannot drop a range that has not ended; a table that is not one of the three is an error before anything
+	// is dropped; a default partition and one with no upper bound are never retired. Each drop is its own
+	// transaction under a lock_timeout, and a partition that cannot be locked in that time is skipped, named in
+	// the error and found again by the next call: the names retired are returned beside it. Nothing references
+	// an aged partition (D6), so a pending delivery or a dead letter that names a retired notification is no
+	// obstacle; Load reports such a delivery canceled and the dispatcher finishes it as that.
+	RetirePartitions(ctx context.Context, table string, before time.Time) ([]string, error)
+	// ExpireBroadcasts deletes up to batch completed broadcasts that finished before olderThan, and never a
+	// pending one (NR-022, D33).
+	ExpireBroadcasts(ctx context.Context, olderThan time.Time, batch int) (int, error)
+	// DatabaseConditions (T040a, D49) reads and changes nothing, and judges nothing: max_wal_size, the connected
+	// role's idle_in_transaction_session_timeout and statement_timeout, the age of the oldest transaction in
+	// this database that pins vacuum (a snapshot or an assigned id), whether the role can see other roles'
+	// sessions, the WAL written, and the checkpoints taken. domain.AssessDatabase judges it (NR-037).
+	DatabaseConditions(ctx context.Context) (DatabaseConditions, error)
 }
 
 // Store is the persist and read path: implemented by adapters/driven/postgres (T015),
@@ -735,6 +753,10 @@ type QuotaLimits interface {
 type PreCheck interface {
 	Seen(ctx context.Context, key string) (notificationID string, ok bool, err error)
 	Remember(ctx context.Context, key, notificationID string, ttl time.Duration) error // after commit ONLY
+	// Forget removes the entries under keys; a key it does not hold is not an error, and a fault in its store is
+	// reported to whoever watches it and is nil, as for Seen and Remember. Erase calls it, before it erases, with
+	// the entry for each of the recipient's idempotency keys (D51).
+	Forget(ctx context.Context, keys []string) error
 }
 
 // StreamPublisher carries the live nudge (D16): an id on hash(identity), nothing else. It is
@@ -766,6 +788,16 @@ type IDSource interface{ New() string } // UUIDv7
 // counted.
 type Metrics interface {
 	Inc(name string, labels map[string]string)
+}
+
+// GaugeMetrics is the optional second half of Metrics, for the levels that are not counts: the maintenance
+// preflight sets domain.MetricDBOldestXminAge ("notify.db.oldest_xmin_age", seconds) and
+// domain.MetricDBCheckpointsRequested through it, and the partition check raises
+// domain.MetricPartitionMissing (labels table, month) and domain.MetricPartitionUnscoped (label partition)
+// through Inc. A Metrics that does not implement it is simply not given the levels.
+type GaugeMetrics interface {
+	Metrics
+	Gauge(name string, value float64, labels map[string]string)
 }
 
 // StepHook is called as the dispatcher reaches each of its nine steps, before the step's work. A test

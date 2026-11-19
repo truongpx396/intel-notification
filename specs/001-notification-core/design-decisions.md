@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D46. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D51. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -796,7 +796,8 @@ but the primitive can be pinned.
 inbox, guard, queue, delivery log, dead letters, digests, preferences, schedules, addresses — in one
 transaction under the recipient's own scope, and records the erasure in `erasure_requests` by the hash
 of the identity. `channel_suppressions` is keyed by `address_hash`, never the address, and is kept. Redis
-holds only hashed keys.
+holds only hashed keys, and the pre-check's entries for the recipient's keys are forgotten with the rest
+([D51](#d51)).
 
 **Alternative.** The first version had no erasure path, kept dead-letter payloads with content, and
 stored suppressed addresses in plaintext indefinitely.
@@ -1166,6 +1167,215 @@ flushed twice, which is flushed once; the lease is what makes the job single-own
 Verified: `TestAWindowOverdueAfterACrashIsFlushedByTheNextRun`, `TestAFlusherWithoutTheLeaseFlushesNothing`,
 `TestTheFlushJobRenewsItsLeaseBetweenShardsAndStopsWhenItLosesIt`, `TestAPassThatCanFlushNothingDoesNotSpin`,
 `TestAWindowThatFailsToFlushDoesNotHoldBackTheOthers`, `TestAPassFlushesEveryShardAndEveryBatch`.
+
+## D47 — Retirement drops whole partitions, waits briefly for the lock, and never retires a range that has not ended · *built*
+
+**Decision.** `Maintenance.RetirePartitions(table, before)` drops each partition of the inbox, the delivery
+history or the dead letters whose **whole range ended at or before `before`**, oldest first. A partition's age is
+its upper bound, so a notification outlives `RetentionWindow` by up to a month, read or unread: this is
+[D33](#d33)'s "says so" made exact. Three guards:
+
+- **`before` is capped at the database's `now()`.** A cutoff in the future cannot drop a partition whose range
+  has not ended, whatever the caller computed.
+- **Each drop is its own transaction under a `lock_timeout`** (5 seconds, `postgres.WithRetireLockTimeout`). A
+  partition it cannot lock in that time is skipped, named in the error, and found again by the next call; the
+  names that were retired are returned beside it.
+- **Only the three range-partitioned tables**, and only direct partitions with a bounded range. Any other name
+  is refused before anything is dropped, and a default partition is never a candidate.
+
+**Alternative.** Three, none adopted:
+
+- **Delete the aged rows, then drop the empty partition.** It is the mass purge NR-022 rules out: the deletes
+  are WAL and dead tuples for vacuum to clear, which is the load the partitioning exists to avoid.
+- **`DROP TABLE` with no timeout.** What a plain `DROP` does when it cannot get the lock is wait for it.
+- **`DETACH PARTITION … CONCURRENTLY`.** It avoids the exclusive lock on the parent, but cannot run inside a
+  transaction and, if interrupted, leaves the partition half-detached for `FINALIZE`. Revisit it if drops are
+  seen waiting.
+
+**What goes wrong without it.** Dropping a partition asks for `ACCESS EXCLUSIVE` on the table. A request for it
+queues behind any transaction that holds a lock on the table, a report or a forgotten session, and every
+reader and writer of the inbox that arrives after the request queues behind *it*. A maintenance job that runs
+hourly in the background becomes an outage whose cause is three layers from its symptom, which is the same
+shape of failure as [D6](#d6). A cutoff computed in the wrong unit, or from a clock that is ahead, drops the
+months the inbox is serving, and a dropped partition does not come back.
+
+**Cost.** For up to the timeout the request for the lock is itself in the queue, so a drop that has to wait
+holds up the table for that long, bounded and not unbounded. Nothing is retired while a long transaction holds
+the partition; the next call, an hour later by default, tries again.
+
+Verified: `TestRetirePartitionsDropsWholePartitionsAndDeletesNoRow`,
+`TestRetirePartitionsRetiresOnlyWhatTheCutoffHasWhollyPassed`,
+`TestRetirePartitionsNeverRetiresAPartitionWhoseRangeHasNotEnded`,
+`TestRetirePartitionsRefusesATableItDoesNotRetire`,
+`TestRetirementWaitsOnlyBrieflyForALockAndSkipsThePartitionItCannotLock`,
+`TestRetentionSucceedsWhileADeadLetterReferencesAnAgedPartition` and
+`TestRetentionLeavesAPendingDeliveryDrivable`, in `adapters/driven/postgres`.
+
+## D48 — The maintenance jobs hold their lease for the gap between their runs · *built*
+
+**Decision.** `app.Maintenance` runs six jobs (`partition_provision`, `retention`, `idem_expiry`,
+`digest_expiry`, `broadcast_cleanup`, `preflight`), each under its own `notify_job_leases` row. The lease is
+taken before the job works, and **before every batch** of one that works in batches. Its ttl is **twice the
+job's interval**, so it outlives the gap between runs: the worker that holds it takes it again at each run and
+keeps the job, and every other worker is kept out until it lapses. A job runs no oftener than its interval
+counted from *this worker's* last run, and a lease that was refused is not a run. `Run` makes a pass at once, so a
+fresh deployment has its months before it takes traffic, and then one every tick. Provisioning is followed by the
+check **whether or not it succeeded**. The alarms are counters raised at each check.
+
+**Alternative.** Three, none adopted:
+
+- **A lease held only while the job runs** (ttl a few seconds). Between runs it lapses, so every worker takes
+  its turn at every interval: N times the work, and N times the alarm for one gap.
+- **A cadence recorded in the database**, so the whole fleet runs a job once per interval. `TryLeaseJob`
+  records `last_started_at` at every grant ([D50](#d50)), and a renewal before each batch is one, so it cannot say
+  when a *run* began; a cadence would need a second method and a second race for the same single-owner guarantee
+  the lease already gives.
+- **One lease for a whole pass.** A pass with a deep backlog outlives any ttl worth choosing, and a second worker
+  runs the same batch.
+
+**What goes wrong without it.** A lease that lapses between runs runs each job once per worker per interval and
+pages the operator once per worker for one missing partition. A check that is skipped when provisioning failed
+is silent in exactly the case it exists for: the role cannot create tables, the month is missing, and the alarm
+says nothing. A job that keeps a memory of what it meant to do, instead of deriving its cutoffs from the clock
+at each run, skips the work a dead worker left ([D46](#d46)'s failure, for retention).
+
+**Cost.** A worker that dies leaves its jobs unrun for up to twice their interval, two hours for the hourly
+ones. That is harmless for work measured in months, and the five-minute expiries and the one-minute preflight
+are late by ten minutes and two.
+
+Verified: `TestEveryJobTakesItsLeaseBeforeItWorks`, `TestAJobWhoseLeaseIsHeldElsewhereDoesNotRun`,
+`TestALeaseOutlivesTheGapBetweenRuns`, `TestTwoWorkersContendingForTheJobsRunEachOnce`,
+`TestALapsedLeasePassesTheJobsToAnotherWorker`, `TestAJobRunsNoOftenerThanItsInterval`,
+`TestARefusedLeaseIsNotARun`, `TestAnExpiryRenewsItsLeaseBeforeEachBatchAndStopsWhenItLosesIt`,
+`TestAProvisioningFailureIsReportedAndTheCheckStillAlarms`, `TestRunPassesAtOnceAndThenEveryTick`, and end to
+end `TestTwoWorkersOnOneDatabaseRunEachJobOnce`.
+
+## D49 — The preflight reports what pins vacuum, and says when it cannot see · *built*
+
+**Decision.** `Maintenance.Preflight` reads the database's conditions (`Maintenance.DatabaseConditions`) and
+`domain.AssessDatabase` judges them, as warnings and never as errors (NR-037, [D38](#d38)):
+
+- **The role's timeouts**: a warning for each of `idle_in_transaction_session_timeout` and `statement_timeout`
+  that is off, read as the connected role has them (`pg_settings`, which shows the session's value after any
+  role or database override).
+- **A transaction that pins vacuum**, older than 60 seconds: one that holds a snapshot or has been given an id,
+  in this database, on a client backend, not the preflight's own session. A read-committed session idle between
+  statements holds neither, and is not reported.
+- **A role that cannot see other roles' sessions** (neither a superuser nor a member of `pg_read_all_stats`) is
+  itself a warning, because `xact_start` is hidden from it and the age it reads covers its own sessions only.
+- **`max_wal_size` below fifteen minutes of the peak WAL rate** this process has seen: the greatest of the rates
+  over each interval between readings, and for a first reading the average since the counter began. With no
+  rate there is no judgement.
+
+A reading that cannot be taken is a fault the loop reports, and never a reason to stop. The two gauges
+(`notify.db.oldest_xmin_age` in seconds, `notify.db.checkpoints_requested`) are set through the optional
+`ports.GaugeMetrics`, because a counter cannot hold a level.
+
+**Alternative.** Report every open transaction, which cries wolf at every host that keeps a connection open a
+moment; judge `max_wal_size` by the average since the server began counting, which hides a burst; or return an
+error, which stops a service starting on a database it would run on.
+
+**What goes wrong without it.** The soak that measured [D38](#d38) held one transaction for two minutes and
+took the queue's heap from about 45 MB to 200 MB and its latency to 31 seconds. A preflight that reads through a
+blind role reports a clean database it has not looked at, and that is worse than no preflight. A `max_wal_size`
+sized to a quiet average stalls the queue the first time it is loaded.
+
+**Cost.** The WAL peak is the process's: a restart forgets it, and the first reading after one is the average
+since the server began counting, which understates a burst. The checkpoint counters read from
+`pg_stat_checkpointer` on PostgreSQL 17 and from `pg_stat_bgwriter` before it; the 17 branch has no test, because
+the suite runs on 16.
+
+Verified: `TestAssessDatabase`, `TestAssessDatabaseWarningsNameTheirNumbers`, `TestWALRate` and its two siblings in
+`domain`; `TestPreflightReportsEachConditionAsAWarningAndNeverAnError`,
+`TestPreflightJudgesMaxWALSizeAgainstTheRateItHasSeen`, `TestPreflightSetsItsGauges`,
+`TestPreflightThatCannotReadReturnsAFaultAndNoWarnings`, `TestRunReportsAFaultAndGoesOn` in `app`;
+`TestDatabaseConditionsReadsTheRolesTimeoutsAndTheServersSizing`,
+`TestDatabaseConditionsReportsTheAgeOfATransactionThatPinsVacuum`,
+`TestDatabaseConditionsSaysWhetherTheRoleCanSeeOtherSessions` and
+`TestDatabaseConditionsCountsTheWALAndTheCheckpointsItsWritesCause` in `adapters/driven/postgres`.
+
+## D50 — A lease grant is the job's last start, the holder's renewal included · *built*
+
+**Decision.** `TryLeaseJob` stamps `notify_job_leases.last_started_at` on **every grant**: the first take, a
+take-over after a lapse, and the holder's own renewal. A refused ask changes nothing. Jobs ask for their lease
+each time they run, and an expiry before every batch ([D48](#d48)), so the column says when any worker last
+started the job (for an expiry, its last batch). The stale-job alarm reads it, and its threshold is the job's
+lease plus a margin, so that a worker that dies is replaced before the alarm and not after it: an alarm at the
+lease's own length would fire for that gap on a fleet that is working as designed. For the jobs
+`app.Maintenance` runs the lease lasts twice the interval and the threshold is **three times the interval**; for
+`digest_flush`, whose lease has a floor of 30 s, it is one minute at the defaults. [operations.md](../../docs/operations.md)
+lists the seven at their defaults. The three-times rule assumes the tick is shorter than the interval, as the
+defaults are (30 s against the shortest, 1 min).
+
+**Alternative.** Two, neither adopted:
+
+- **Alarm on `lease_expires_at`.** It already moves with every renewal, so "lapsed more than one interval ago" is
+  the same condition with no change. But it needs each job's ttl to be known to whoever writes the alarm (the
+  ttl is `max(30 s, 2 × interval)` and is not stored), and it says when a lease lapses, not when anything ran. The
+  column that is named and documented for the second is the better home for it.
+- **Record a run's end in `last_finished_at`**, which no code writes. It would need a second port method called
+  when a job ends, and a decision about a job that ends in a fault. The alarm does not need it.
+
+**What goes wrong without it.** The renewal kept the column, so for a worker that keeps its jobs `last_started_at`
+stayed at the moment it first took them. The alarm in [operations.md](../../docs/operations.md) reads "older than
+its interval" and fired for every healthy job, permanently, until someone switched it off, and then nothing
+watched the case it was written for: no worker taking the lease.
+
+**Cost.** None in writes: the renewal already updates the row. A job that takes its lease and fails every run
+keeps the column fresh, so *stale* does not catch *failing*; that is the error handler's report
+(`WithMaintenanceErrorHandler`), not this alarm's. `last_finished_at` stays unwritten.
+
+Verified: `TestTryLeaseJobRecordsEveryGrantAsTheJobsLastRun` in `adapters/driven/postgres` (a grant by the
+holder, by a new owner after a lapse and the first one all move the column; a refusal does not).
+
+## D51 — Erasure forgets the pre-check's entries for the recipient's keys · *built*
+
+**Decision.** `Admin.Erase`, when it was given the pre-check (`Deps.PreCheck`, the one the `Notifier` was built
+with), first reads the recipient's idempotency keys from the store a page at a time
+(`Maintenance.IdemKeys`: ascending bytewise, after the last key of the previous page, 500 to a page), tells the
+pre-check to `Forget` the entry under `domain.PreCheckKey(identity, key)` for each, and **then** erases.
+
+- **`ports.PreCheck.Forget(keys)`.** Keys it does not hold are not an error. A fault in the store is the fast
+  path's, as for `Seen` and `Remember`: the Redis adapter reports it to its error handler, once for the call,
+  and returns nil, because an entry it could not remove lapses with its ttl and the erasure that asked must not
+  fail for it. The adapter deletes with a command per key in pipelines of 1,000, because the keys are hashes that
+  share no slot and a Redis Cluster refuses one multi-key `DEL` across slots.
+- **Forget first.** If the erasure then fails, the pre-check has lost entries for rows that are still there: a
+  miss, which is all a fast path may do wrong ([D18](#d18)). The other order fails the other way: a process that
+  dies between the erasure and the forget leaves entries for rows that are gone, and a retry finds no key left
+  to forget.
+- **A store that cannot name the keys, or a pre-check that refuses the call, stops the erasure before it
+  begins**, and a page that does not move past the last key is an error and not a loop.
+- With no pre-check the keys are not read.
+
+**Alternative.** Three, none adopted:
+
+- **Let the entries lapse**, which is what stood: up to `PreCheckTTL` (24 h by default).
+- **Index the entries by recipient** (a Redis set per recipient, written by `Remember`). That is a second write
+  on the hot path of every `Notify` to serve an operation that happens rarely.
+- **Scan Redis for the recipient's entries.** The key is a hash of the whole identity and the producer's key, with
+  no per-recipient prefix, so it would be a scan of the whole keyspace.
+
+**What goes wrong without it.** For up to the ttl after an erasure, a producer that retries a key it had sent is
+answered `Applied: false` with the id of a notification that no longer exists, and nothing is sent, while the
+durable guard, whose row is gone, would have accepted the key as new. Nor is the entry only a hazard of
+correctness: it is a hash of the identity and the key beside a notification id, kept after the erasure that was
+meant to take the recipient's data. [D35](#d35)'s "Redis holds only hashed keys" is minimization, which an
+erasure does not need to rely on.
+
+**Cost.** An erasure reads the recipient's keys through the primary key and sends one pipeline per thousand. An
+`Admin` built without the pre-check the `Notifier` has forgets nothing and does not know it; `Deps` is the one
+struct they are built from so that they share it. A notification sent for the recipient *while* the erasure runs
+is a new one, and its entry is the pre-check's own, bounded by its ttl. With Redis down the entries stay until
+their ttl, the fault is reported, and the erasure succeeds.
+
+Verified: `TestEraseForgetsThePreCheckEntryOfEachOfTheRecipientsKeysBeforeErasing`,
+`TestEraseForgetsEveryKeyWhateverThePageSize`, `TestEraseWithoutAPreCheckDoesNotReadTheKeys`,
+`TestEraseThatCannotReadTheKeysErasesNothing`, `TestEraseWhoseForgetIsRefusedErasesNothing` and
+`TestEraseStopsWhenTheStoreDoesNotAdvanceThroughItsKeys` in `app`; the `Forget` cases of `PreCheckContract`, run
+against the fake and against Redis; `TestPreCheckForgetWithRedisDownIsReportedOnceAndIsNotAnError` and
+`TestPreCheckForgetDeletesOnlyTheKeysItIsGiven` in `adapters/driven/redis`; `TestIdemKeys` in
+`adapters/driven/postgres`; and end to end `TestNS012AnErasedRecipientLeavesNothingAndTheirSuppressionStays`.
 
 ---
 

@@ -82,3 +82,14 @@ func (p *PreCheck) Writes() []PreCheckWrite {
 	defer p.mu.Unlock()
 	return slices.Clone(p.writes)
 }
+
+// Forget implements ports.PreCheck. It removes the entries under keys, and keys it does not
+// hold are skipped. The writes it kept stay: they are the record of what was stored.
+func (p *PreCheck) Forget(_ context.Context, keys []string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, k := range keys {
+		delete(p.entries, k)
+	}
+	return nil
+}

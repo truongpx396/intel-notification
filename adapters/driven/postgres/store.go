@@ -42,9 +42,10 @@ var (
 
 // settings are what every store in this package is built with.
 type settings struct {
-	clock  ports.Clock
-	ids    ports.IDSource
-	notify bool
+	clock      ports.Clock
+	ids        ports.IDSource
+	notify     bool
+	retireLock time.Duration
 }
 
 // Option configures a store of this package.
@@ -74,8 +75,19 @@ func WithNotify() Option {
 	return func(s *settings) { s.notify = true }
 }
 
+// defaultRetireLockTimeout is how long RetirePartitions waits for the lock a drop needs.
+const defaultRetireLockTimeout = 5 * time.Second
+
+// WithRetireLockTimeout sets how long RetirePartitions waits for the lock that dropping
+// a partition takes before it gives that partition up until its next call (D47). The
+// default is 5 seconds: long enough to queue behind a short transaction, short enough
+// that the requests queued behind the wait are not noticed.
+func WithRetireLockTimeout(d time.Duration) Option {
+	return func(s *settings) { s.retireLock = d }
+}
+
 func newSettings(opts []Option) settings {
-	s := settings{clock: systemClock{}}
+	s := settings{clock: systemClock{}, retireLock: defaultRetireLockTimeout}
 	for _, opt := range opts {
 		opt(&s)
 	}

@@ -4,6 +4,7 @@ package redis_test
 
 import (
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -129,6 +130,58 @@ func TestPreCheckRedisOutageIsAMissNotAnError(t *testing.T) {
 	defer mu.Unlock()
 	if len(ops) != 2 || ops[0] != "seen" || ops[1] != "remember" {
 		t.Fatalf("the handler heard %v, want [seen remember]", ops)
+	}
+}
+
+// Forgetting is the fast path's housekeeping like the rest of it: with Redis down the entries
+// cannot be removed, and the erasure that asked must not fail for it, because they lapse with
+// their ttl and the durable erasure is the one that counts (D51). The fault is reported once for
+// the call, not once for each chunk of keys, which would be a page of the same error.
+func TestPreCheckForgetWithRedisDownIsReportedOnceAndIsNotAnError(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	var ops []string
+	dead := goredis.NewClient(&goredis.Options{Addr: "127.0.0.1:1", MaxRetries: -1, DialTimeout: time.Second})
+	t.Cleanup(func() { _ = dead.Close() })
+	p := redis.NewPreCheck(dead, redis.WithErrorHandler(func(op string, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		ops = append(ops, op)
+		if err == nil {
+			t.Error("the error handler was called with a nil error")
+		}
+	}))
+
+	keys := make([]string, 2500) // more than one chunk
+	for i := range keys {
+		keys[i] = "k"
+	}
+	if err := p.Forget(t.Context(), keys); err != nil {
+		t.Fatalf("Forget with Redis down = %v, want nil: the entries lapse with their ttl", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(ops) != 1 || ops[0] != "forget" {
+		t.Fatalf("the handler heard %v, want [forget] once", ops)
+	}
+}
+
+// Forgetting deletes the entries and nothing else in the database, whatever the keys look like.
+func TestPreCheckForgetDeletesOnlyTheKeysItIsGiven(t *testing.T) {
+	t.Parallel()
+	p, rdb := newPreCheck(t)
+	for _, k := range []string{"a", "b", "c"} {
+		if err := p.Remember(t.Context(), k, "n", time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.Forget(t.Context(), []string{"b"}); err != nil {
+		t.Fatalf("Forget: %v", err)
+	}
+	keys, err := rdb.Keys(t.Context(), "*").Result()
+	slices.Sort(keys)
+	if err != nil || !slices.Equal(keys, []string{"a", "c"}) {
+		t.Fatalf("keys in Redis = %q, %v, want [a c]", keys, err)
 	}
 }
 

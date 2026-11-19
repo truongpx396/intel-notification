@@ -83,7 +83,10 @@ type Digests interface {
 // Maintenance holds the single-owner jobs' operations (D11, D21, D22, D35).
 type Maintenance interface {
 	// TryLeaseJob takes or renews the lease for a scheduled job. True when owner
-	// now holds it; false while another owner's lease is live.
+	// now holds it; false while another owner's lease is live. Every grant, the
+	// holder's renewal included, records the instant as the job's last start, and a
+	// refusal records nothing, so a stale-job alarm can read how long ago any worker
+	// last ran it (D50).
 	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error)
 
 	// RehomeShards folds rows in shards >= shards into live ones, after the
@@ -102,6 +105,13 @@ type Maintenance interface {
 	// kept: they hold address hashes, and dropping them would resume mailing
 	// someone who complained. Returns rows removed per table.
 	Erase(ctx context.Context, id domain.Identity) (map[string]int, error)
+
+	// IdemKeys lists up to limit of the identity's idempotency keys that sort after
+	// `after` (all of them when after is empty), in ascending bytewise order, so a
+	// caller pages through them by passing the last key it was given. It is what lets
+	// an erasure name the pre-check entries to forget before the guard rows they
+	// mirror are gone (D51). limit must be positive.
+	IdemKeys(ctx context.Context, id domain.Identity, after string, limit int) ([]string, error)
 
 	// EnsurePartitions creates each missing monthly partition of the
 	// range-partitioned tables, for months months from the one containing from,
@@ -126,6 +136,29 @@ type Maintenance interface {
 	// hold on. It changes nothing; the report is what the notify.partition.missing
 	// and notify.partition.unscoped alarms fire on.
 	CheckPartitions(ctx context.Context, at time.Time) (domain.PartitionHealth, error)
+
+	// RetirePartitions drops each partition of table whose whole range lies before
+	// before, oldest first, and returns their names; it retires a partition and never a
+	// row, so it is a catalog operation and not a purge (NR-022, D33). table is one of
+	// domain.TableNotifications, TableDeliveries and TableDeadLetters, and any other is
+	// an error. A partition that is still in range, a default partition and one with no
+	// upper bound are never retired. It waits only briefly for the lock a drop needs and
+	// skips a partition it cannot lock, which the next call finds again (D47), so a long
+	// transaction delays retention and never stalls the inbox. Nothing references an
+	// aged partition (D6), so a pending delivery or a dead letter that names a retired
+	// notification is not an obstacle: the dispatcher finishes the delivery as canceled.
+	RetirePartitions(ctx context.Context, table string, before time.Time) ([]string, error)
+
+	// ExpireBroadcasts deletes up to batch completed broadcasts that finished before
+	// olderThan. A broadcast still pending is never deleted, whatever its age.
+	ExpireBroadcasts(ctx context.Context, olderThan time.Time, batch int) (int, error)
+
+	// DatabaseConditions reads, in one round trip and changing nothing, the settings and
+	// the activity of the database the queue lives in that NR-037 asks to be reported:
+	// max_wal_size, the connected role's timeouts, the oldest transaction that pins
+	// vacuum, the WAL written and the checkpoints taken. It judges none of it
+	// (domain.AssessDatabase does), and a condition it cannot read is a fault to return.
+	DatabaseConditions(ctx context.Context) (domain.DatabaseConditions, error)
 }
 
 // Store is the persist and read path: what Notify writes and what a claim
@@ -285,6 +318,12 @@ type PreCheck interface {
 	Seen(ctx context.Context, key string) (notificationID string, ok bool, err error)
 	// Remember is called after commit only, and never for NotifyTx.
 	Remember(ctx context.Context, key, notificationID string, ttl time.Duration) error
+	// Forget removes the entries under keys, so a key whose guard row has been erased
+	// no longer answers "replay" for a notification that is gone (D51). A key it does
+	// not hold is not an error, and neither is an empty list. Like Seen and Remember it
+	// treats a fault in its store as nothing to do, and says so to whoever watches it:
+	// an entry it could not remove lapses with its ttl.
+	Forget(ctx context.Context, keys []string) error
 }
 
 // StreamPublisher carries the live nudge (D16): a notification id on the stream
@@ -381,6 +420,16 @@ type Metrics interface {
 	// small closed set (a channel kind, a reason), never a tenant or a recipient:
 	// they become a time series each.
 	Inc(name string, labels map[string]string)
+}
+
+// GaugeMetrics is the optional second half of Metrics: a Metrics that implements it is
+// also given the levels that are not counts, such as the age of the oldest open
+// transaction (domain.MetricDBOldestXminAge). A Metrics that does not is simply not
+// given them, and the engine does not say so: a counter cannot hold a level.
+type GaugeMetrics interface {
+	Metrics
+	// Gauge sets the gauge called name, for the given labels, to value.
+	Gauge(name string, value float64, labels map[string]string)
 }
 
 // StepHook is called as the dispatcher reaches each of its nine steps, before the

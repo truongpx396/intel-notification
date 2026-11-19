@@ -82,15 +82,17 @@ func (q *recQueue) Cancel(_ context.Context, id domain.Identity, idemKey string)
 	return q.receipt, nil
 }
 
-// recPreCheck records Seen and Remember, and answers as it is told to.
+// recPreCheck records Seen, Remember and Forget, and answers as it is told to.
 type recPreCheck struct {
 	ev          *events
 	hitID       string // "" is a miss
 	seenErr     error
 	rememberErr error
+	forgetErr   error
 
 	seen       []string
 	remembered []notifytest.PreCheckWrite
+	forgotten  []string
 }
 
 func (p *recPreCheck) Seen(_ context.Context, key string) (string, bool, error) {
@@ -106,6 +108,16 @@ func (p *recPreCheck) Remember(_ context.Context, key, id string, ttl time.Durat
 	p.ev.add("remember")
 	p.remembered = append(p.remembered, notifytest.PreCheckWrite{Key: key, NotificationID: id, TTL: ttl})
 	return p.rememberErr
+}
+
+// Forget logs one "forget:<key>" per key, in the order given, so a test can see what was
+// forgotten and what came before it.
+func (p *recPreCheck) Forget(_ context.Context, keys []string) error {
+	for _, k := range keys {
+		p.ev.add("forget:" + k)
+	}
+	p.forgotten = append(p.forgotten, keys...)
+	return p.forgetErr
 }
 
 // recWaker records Wake into the same ordered log as the ports.

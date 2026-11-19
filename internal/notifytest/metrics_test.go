@@ -69,3 +69,26 @@ func TestMetricsKeepsACopyOfTheLabels(t *testing.T) {
 		t.Fatalf("Events() names = %v", names)
 	}
 }
+
+// A gauge is a level and not a count: setting it again replaces the value, and a gauge
+// never set is absent, which a test must tell from one set to zero (the age of the
+// oldest transaction is zero when there is none, and that is a reading).
+func TestMetricsHoldsTheLastValueOfAGauge(t *testing.T) {
+	t.Parallel()
+	m := NewMetrics()
+	if _, ok := m.GaugeValue("notify.db.oldest_xmin_age"); ok {
+		t.Fatal("a gauge nobody set is present")
+	}
+	m.Gauge("notify.db.oldest_xmin_age", 95, nil)
+	m.Gauge("notify.db.oldest_xmin_age", 0, nil)
+	if v, ok := m.GaugeValue("notify.db.oldest_xmin_age"); !ok || v != 0 {
+		t.Fatalf("GaugeValue = %v, %v, want 0, true: the last setting wins, and zero is a reading", v, ok)
+	}
+	m.Gauge("notify.db.checkpoints_requested", 7, nil)
+	if v, _ := m.GaugeValue("notify.db.checkpoints_requested"); v != 7 {
+		t.Fatalf("GaugeValue of a second gauge = %v, want 7: gauges are kept by name", v)
+	}
+	if m.Count("notify.db.oldest_xmin_age") != 0 {
+		t.Fatal("setting a gauge counted as an increment")
+	}
+}
