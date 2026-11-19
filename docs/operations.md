@@ -15,11 +15,28 @@ Maintenance jobs: retention, partition provisioning, idempotency expiry, digest 
 broadcast cleanup and expansion, and the database preflight. `SELECT * FROM notify_job_leases` shows who holds
 each; the rows are `retention`, `partition_provision`, `idem_expiry`, `digest_expiry`, `broadcast_cleanup` and
 `preflight` (run by `app.Maintenance`, one `Run` loop per worker) and `digest_flush` (the `DigestFlusher`). A lease lasts twice its job's
-interval, so a worker that dies leaves its jobs unrun for up to that long, two hours for the hourly ones, and
+interval (`digest_flush`'s at least 30 s), so a worker that dies leaves its jobs unrun for up to that long, two hours for the hourly ones, and
 another worker then takes them ([D48](../specs/001-notification-core/design-decisions.md#d48)). There is no quota job: a budget's windows are in its Redis keys and
 lapse by themselves.
 
 There is no broker in the default deployment and nothing to scale for one.
+
+### Maintenance jobs and their leases
+
+`SELECT job, owner, lease_expires_at, now() - last_started_at AS idle FROM notify_job_leases ORDER BY idle DESC`
+shows who holds each job and how long ago a worker last started it. `last_started_at` moves at every grant of the
+lease, so it is the last time any worker ran the job (for an expiry, its last batch). The alarm threshold is the
+lease's life plus a margin, so that a worker that dies is replaced before it fires:
+
+| Job | Default interval | Lease | `notify.job.stale` when idle longer than |
+|---|---|---|---|
+| `retention`, `partition_provision`, `broadcast_cleanup` | 1 h | 2 h | 3 h |
+| `idem_expiry`, `digest_expiry` | 5 min | 10 min | 15 min |
+| `preflight` | 1 min | 2 min | 3 min |
+| `digest_flush` | 5 s | 30 s | 1 min |
+
+If you change a job's interval (`WithJobInterval`, `WithFlushInterval`), scale its row: three times the interval,
+or the lease's floor of 30 s plus the interval for `digest_flush`. `last_finished_at` is not written.
 
 ## Alarms worth having
 
@@ -33,7 +50,7 @@ There is no broker in the default deployment and nothing to scale for one.
 | `notify.quota.exhausted` | per tenant | A tenant hit its ceiling — abuse, a bug in its producer, or a limit that needs raising |
 | `notify.partition.missing` | this month or next absent from `notifications`, `notification_deliveries` or `dead_letters` (`CheckPartitions.Missing`, one per table and month) | Provisioning lapsed; inserts dated in that month fail. Run `EnsurePartitions` |
 | `notify.partition.unscoped` | any `notifications` partition, at any depth, where recipient scoping does not hold (`CheckPartitions.Unscoped`): row-level security not enabled and forced, the `recipient_scope` policy missing, for one command only or with a different predicate, or any other permissive policy | **Isolation incident.** A partition queried by name would show every recipient's rows. Apply `notify_apply_recipient_scope()` now |
-| `notify.job.stale` | a job's `last_started_at` older than twice its interval | No worker is taking the lease |
+| `notify.job.stale` | a job's `last_started_at` older than its threshold in the table under [Maintenance jobs](#maintenance-jobs-and-their-leases) | No worker is taking the job. Every lease grant moves `last_started_at`, a holder's renewal included ([D50](../specs/001-notification-core/design-decisions.md#d50)), so a healthy job is never stale. A job that takes its lease and fails every run is not stale either: that is the error handler's report |
 | `notify.db.oldest_xmin_age` | the oldest `backend_xmin` in `pg_stat_activity` older than 60 s (tune to your rate) | A transaction is pinning vacuum, so the queue table will bloat and latency will follow. Find it and end it ([D38](../specs/001-notification-core/design-decisions.md#d38)) |
 | `notify.db.checkpoints_requested` | `checkpoints_req` rising faster than `checkpoints_timed` | Checkpoints are being forced by WAL volume: `max_wal_size` is too small for this write rate |
 | `notify.outbox.dead_tuples` | still rising after the last autovacuum, or `last_autovacuum` older than 5 min | Vacuum is blocked or not keeping up. Tens to hundreds of thousands between runs is normal at 1,000 / s; what matters is that it comes back down |
@@ -181,7 +198,12 @@ average, which understates a burst; give it a few minutes.
 `POST /admin/erasure {tenant, recipient}` — or `Catalog.Erase` in service mode — removes the recipient
 from every table in one transaction and returns the rows removed per table. `erasure_requests` records it
 by the hash of the identity. Suppressions are kept by design: they hold address hashes, and removing them
-would resume sending to someone who complained. Redis holds nothing to erase — its keys are hashes.
+would resume sending to someone who complained. The pre-check's Redis entries for the recipient's idempotency
+keys are forgotten first, before the rows they mirror are erased, so a producer retrying a key is not told it
+is a replay of a notification that is gone ([D51](../specs/001-notification-core/design-decisions.md#d51)). This
+needs the `Admin` to be built with the same `Deps.PreCheck` as the `Notifier`. With Redis unreachable the
+erasure still succeeds, the pre-check reports the fault to its error handler, and the entries lapse with their
+ttl (`PreCheckTTL`, 24 h by default); they are hashes, so nothing in them names the recipient.
 
 ## Capacity notes
 

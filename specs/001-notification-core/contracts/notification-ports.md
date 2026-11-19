@@ -568,11 +568,12 @@ type Digests interface {
 }
 
 type Maintenance interface {
-	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error) // D22
+	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error) // D22; every grant, a renewal included, is the job's last start (D50)
 	RehomeShards(ctx context.Context, shards int) (int, error)                           // D11
 	ExpireIdem(ctx context.Context, olderThan time.Time, batch int) (int, error)         // D21
 	ExpireDigests(ctx context.Context, olderThan time.Time, batch int) (int, error)      // D4
 	Erase(ctx context.Context, id Identity) (map[string]int, error)                      // D35
+	IdemKeys(ctx context.Context, id Identity, after string, limit int) ([]string, error) // D51: bytewise, after the last key of the previous page
 	EnsurePartitions(ctx context.Context, from time.Time, months int) ([]string, error)  // scopes new partitions (D17)
 	// CheckPartitions reads the catalog and changes nothing. Missing: for notifications,
 	// notification_deliveries and dead_letters, the month containing at and the next, when no
@@ -752,6 +753,10 @@ type QuotaLimits interface {
 type PreCheck interface {
 	Seen(ctx context.Context, key string) (notificationID string, ok bool, err error)
 	Remember(ctx context.Context, key, notificationID string, ttl time.Duration) error // after commit ONLY
+	// Forget removes the entries under keys; a key it does not hold is not an error, and a fault in its store is
+	// reported to whoever watches it and is nil, as for Seen and Remember. Erase calls it, before it erases, with
+	// the entry for each of the recipient's idempotency keys (D51).
+	Forget(ctx context.Context, keys []string) error
 }
 
 // StreamPublisher carries the live nudge (D16): an id on hash(identity), nothing else. It is

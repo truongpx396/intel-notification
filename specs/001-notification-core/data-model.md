@@ -219,7 +219,8 @@ windows, hour and day, whose start is in the key, so there is nothing to roll ov
 ### `notify_job_leases` — single-owner jobs
 
 One row per job; `Maintenance.TryLeaseJob` grants it to one owner at a time
-([D22](design-decisions.md#d22)).
+([D22](design-decisions.md#d22)). Every grant, the holder's renewal included, sets `last_started_at`
+([D50](design-decisions.md#d50)), which is what the stale-job alarm reads; `last_finished_at` is not written.
 
 ---
 
@@ -243,8 +244,9 @@ runs every transition against PostgreSQL 16 as the table owner.
 | `Digests.AppendDigest` / `FlushDigest` | Join or open a window, sealing at max / flush once | `TestDigestWindows`, `TestDigestAppendUnderConcurrency` |
 | `Maintenance.RehomeShards(n)` | After lowering `Shards`, fold retired shards into live ones | `TestRehomeShards` |
 | `Maintenance.ExpireIdem` / `ExpireDigests` | Bounded, batched expiry | `TestExpireIdem`, `TestExpireDigests` |
-| `Maintenance.TryLeaseJob(job, owner, ttl)` | Single-owner lease | `TestTryLeaseJob` |
+| `Maintenance.TryLeaseJob(job, owner, ttl)` | Single-owner lease; every grant is the job's last start | `TestTryLeaseJob`, `TestTryLeaseJobRecordsEveryGrantAsTheJobsLastRun` |
 | `Maintenance.Erase(identity)` | Erase one recipient everywhere; record by hash | `TestErase` |
+| `Maintenance.IdemKeys(identity, after, limit)` | One recipient's idempotency keys, bytewise, a page at a time, so erasure can forget their pre-check entries first ([D51](design-decisions.md#d51)) | `TestIdemKeys` |
 | `Maintenance.EnsurePartitions(from, months)` | Create missing monthly partitions; scope every new `notifications` partition | `TestEnsurePartitions` |
 | `Maintenance.CheckPartitions(at)` | Read the catalog for the alarms: each table with no partition covering `at`'s month or the next, and each `notifications` partition the recipient scope does not hold on. Changes nothing | `TestCheckPartitions` |
 | `Store.PersistAndEnqueue(tx, identity, n, plan)` | Under the identity's transaction-local scope: the guard, then the inbox row, the queue rows, the dropped-channel records and the digest appends. One transaction, the store's own or the caller's, which it never commits or rolls back | `TestPersistAndEnqueue`, `TestPersistAndEnqueueReplay`, `TestPersistAndEnqueueIsAtomic`, `TestPersistAndEnqueueInCallersTransaction` |

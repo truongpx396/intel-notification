@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D49. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D51. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -796,7 +796,8 @@ but the primitive can be pinned.
 inbox, guard, queue, delivery log, dead letters, digests, preferences, schedules, addresses — in one
 transaction under the recipient's own scope, and records the erasure in `erasure_requests` by the hash
 of the identity. `channel_suppressions` is keyed by `address_hash`, never the address, and is kept. Redis
-holds only hashed keys.
+holds only hashed keys, and the pre-check's entries for the recipient's keys are forgotten with the rest
+([D51](#d51)).
 
 **Alternative.** The first version had no erasure path, kept dead-letter payloads with content, and
 stored suppressed addresses in plaintext indefinitely.
@@ -1225,9 +1226,10 @@ check **whether or not it succeeded**. The alarms are counters raised at each ch
 
 - **A lease held only while the job runs** (ttl a few seconds). Between runs it lapses, so every worker takes
   its turn at every interval: N times the work, and N times the alarm for one gap.
-- **A cadence recorded in the database**, so the whole fleet runs a job once per interval. The port's
-  `TryLeaseJob` records `last_started_at` only when the owner changes, and a cadence would need a second
-  method and a second race for the same single-owner guarantee the lease already gives.
+- **A cadence recorded in the database**, so the whole fleet runs a job once per interval. `TryLeaseJob`
+  records `last_started_at` at every grant ([D50](#d50)), and a renewal before each batch is one, so it cannot say
+  when a *run* began; a cadence would need a second method and a second race for the same single-owner guarantee
+  the lease already gives.
 - **One lease for a whole pass.** A pass with a deep backlog outlives any ttl worth choosing, and a second worker
   runs the same batch.
 
@@ -1291,6 +1293,89 @@ Verified: `TestAssessDatabase`, `TestAssessDatabaseWarningsNameTheirNumbers`, `T
 `TestDatabaseConditionsReportsTheAgeOfATransactionThatPinsVacuum`,
 `TestDatabaseConditionsSaysWhetherTheRoleCanSeeOtherSessions` and
 `TestDatabaseConditionsCountsTheWALAndTheCheckpointsItsWritesCause` in `adapters/driven/postgres`.
+
+## D50 — A lease grant is the job's last start, the holder's renewal included · *built*
+
+**Decision.** `TryLeaseJob` stamps `notify_job_leases.last_started_at` on **every grant**: the first take, a
+take-over after a lapse, and the holder's own renewal. A refused ask changes nothing. Jobs ask for their lease
+each time they run, and an expiry before every batch ([D48](#d48)), so the column says when any worker last
+started the job (for an expiry, its last batch). The stale-job alarm reads it, and its threshold is the job's
+lease plus a margin, so that a worker that dies is replaced before the alarm and not after it: an alarm at the
+lease's own length would fire for that gap on a fleet that is working as designed. For the jobs
+`app.Maintenance` runs the lease lasts twice the interval and the threshold is **three times the interval**; for
+`digest_flush`, whose lease has a floor of 30 s, it is one minute at the defaults. [operations.md](../../docs/operations.md)
+lists the seven at their defaults. The three-times rule assumes the tick is shorter than the interval, as the
+defaults are (30 s against the shortest, 1 min).
+
+**Alternative.** Two, neither adopted:
+
+- **Alarm on `lease_expires_at`.** It already moves with every renewal, so "lapsed more than one interval ago" is
+  the same condition with no change. But it needs each job's ttl to be known to whoever writes the alarm (the
+  ttl is `max(30 s, 2 × interval)` and is not stored), and it says when a lease lapses, not when anything ran. The
+  column that is named and documented for the second is the better home for it.
+- **Record a run's end in `last_finished_at`**, which no code writes. It would need a second port method called
+  when a job ends, and a decision about a job that ends in a fault. The alarm does not need it.
+
+**What goes wrong without it.** The renewal kept the column, so for a worker that keeps its jobs `last_started_at`
+stayed at the moment it first took them. The alarm in [operations.md](../../docs/operations.md) reads "older than
+its interval" and fired for every healthy job, permanently, until someone switched it off, and then nothing
+watched the case it was written for: no worker taking the lease.
+
+**Cost.** None in writes: the renewal already updates the row. A job that takes its lease and fails every run
+keeps the column fresh, so *stale* does not catch *failing*; that is the error handler's report
+(`WithMaintenanceErrorHandler`), not this alarm's. `last_finished_at` stays unwritten.
+
+Verified: `TestTryLeaseJobRecordsEveryGrantAsTheJobsLastRun` in `adapters/driven/postgres` (a grant by the
+holder, by a new owner after a lapse and the first one all move the column; a refusal does not).
+
+## D51 — Erasure forgets the pre-check's entries for the recipient's keys · *built*
+
+**Decision.** `Admin.Erase`, when it was given the pre-check (`Deps.PreCheck`, the one the `Notifier` was built
+with), first reads the recipient's idempotency keys from the store a page at a time
+(`Maintenance.IdemKeys`: ascending bytewise, after the last key of the previous page, 500 to a page), tells the
+pre-check to `Forget` the entry under `domain.PreCheckKey(identity, key)` for each, and **then** erases.
+
+- **`ports.PreCheck.Forget(keys)`.** Keys it does not hold are not an error. A fault in the store is the fast
+  path's, as for `Seen` and `Remember`: the Redis adapter reports it to its error handler, once for the call,
+  and returns nil, because an entry it could not remove lapses with its ttl and the erasure that asked must not
+  fail for it. The adapter deletes with a command per key in pipelines of 1,000, because the keys are hashes that
+  share no slot and a Redis Cluster refuses one multi-key `DEL` across slots.
+- **Forget first.** If the erasure then fails, the pre-check has lost entries for rows that are still there: a
+  miss, which is all a fast path may do wrong ([D18](#d18)). The other order fails the other way: a process that
+  dies between the erasure and the forget leaves entries for rows that are gone, and a retry finds no key left
+  to forget.
+- **A store that cannot name the keys, or a pre-check that refuses the call, stops the erasure before it
+  begins**, and a page that does not move past the last key is an error and not a loop.
+- With no pre-check the keys are not read.
+
+**Alternative.** Three, none adopted:
+
+- **Let the entries lapse**, which is what stood: up to `PreCheckTTL` (24 h by default).
+- **Index the entries by recipient** (a Redis set per recipient, written by `Remember`). That is a second write
+  on the hot path of every `Notify` to serve an operation that happens rarely.
+- **Scan Redis for the recipient's entries.** The key is a hash of the whole identity and the producer's key, with
+  no per-recipient prefix, so it would be a scan of the whole keyspace.
+
+**What goes wrong without it.** For up to the ttl after an erasure, a producer that retries a key it had sent is
+answered `Applied: false` with the id of a notification that no longer exists, and nothing is sent, while the
+durable guard, whose row is gone, would have accepted the key as new. Nor is the entry only a hazard of
+correctness: it is a hash of the identity and the key beside a notification id, kept after the erasure that was
+meant to take the recipient's data. [D35](#d35)'s "Redis holds only hashed keys" is minimization, which an
+erasure does not need to rely on.
+
+**Cost.** An erasure reads the recipient's keys through the primary key and sends one pipeline per thousand. An
+`Admin` built without the pre-check the `Notifier` has forgets nothing and does not know it; `Deps` is the one
+struct they are built from so that they share it. A notification sent for the recipient *while* the erasure runs
+is a new one, and its entry is the pre-check's own, bounded by its ttl. With Redis down the entries stay until
+their ttl, the fault is reported, and the erasure succeeds.
+
+Verified: `TestEraseForgetsThePreCheckEntryOfEachOfTheRecipientsKeysBeforeErasing`,
+`TestEraseForgetsEveryKeyWhateverThePageSize`, `TestEraseWithoutAPreCheckDoesNotReadTheKeys`,
+`TestEraseThatCannotReadTheKeysErasesNothing`, `TestEraseWhoseForgetIsRefusedErasesNothing` and
+`TestEraseStopsWhenTheStoreDoesNotAdvanceThroughItsKeys` in `app`; the `Forget` cases of `PreCheckContract`, run
+against the fake and against Redis; `TestPreCheckForgetWithRedisDownIsReportedOnceAndIsNotAnError` and
+`TestPreCheckForgetDeletesOnlyTheKeysItIsGiven` in `adapters/driven/redis`; `TestIdemKeys` in
+`adapters/driven/postgres`; and end to end `TestNS012AnErasedRecipientLeavesNothingAndTheirSuppressionStays`.
 
 ---
 
