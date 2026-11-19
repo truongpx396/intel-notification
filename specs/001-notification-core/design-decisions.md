@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D46. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D49. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -1166,6 +1166,131 @@ flushed twice, which is flushed once; the lease is what makes the job single-own
 Verified: `TestAWindowOverdueAfterACrashIsFlushedByTheNextRun`, `TestAFlusherWithoutTheLeaseFlushesNothing`,
 `TestTheFlushJobRenewsItsLeaseBetweenShardsAndStopsWhenItLosesIt`, `TestAPassThatCanFlushNothingDoesNotSpin`,
 `TestAWindowThatFailsToFlushDoesNotHoldBackTheOthers`, `TestAPassFlushesEveryShardAndEveryBatch`.
+
+## D47 — Retirement drops whole partitions, waits briefly for the lock, and never retires a range that has not ended · *built*
+
+**Decision.** `Maintenance.RetirePartitions(table, before)` drops each partition of the inbox, the delivery
+history or the dead letters whose **whole range ended at or before `before`**, oldest first. A partition's age is
+its upper bound, so a notification outlives `RetentionWindow` by up to a month, read or unread: this is
+[D33](#d33)'s "says so" made exact. Three guards:
+
+- **`before` is capped at the database's `now()`.** A cutoff in the future cannot drop a partition whose range
+  has not ended, whatever the caller computed.
+- **Each drop is its own transaction under a `lock_timeout`** (5 seconds, `postgres.WithRetireLockTimeout`). A
+  partition it cannot lock in that time is skipped, named in the error, and found again by the next call; the
+  names that were retired are returned beside it.
+- **Only the three range-partitioned tables**, and only direct partitions with a bounded range. Any other name
+  is refused before anything is dropped, and a default partition is never a candidate.
+
+**Alternative.** Three, none adopted:
+
+- **Delete the aged rows, then drop the empty partition.** It is the mass purge NR-022 rules out: the deletes
+  are WAL and dead tuples for vacuum to clear, which is the load the partitioning exists to avoid.
+- **`DROP TABLE` with no timeout.** What a plain `DROP` does when it cannot get the lock is wait for it.
+- **`DETACH PARTITION … CONCURRENTLY`.** It avoids the exclusive lock on the parent, but cannot run inside a
+  transaction and, if interrupted, leaves the partition half-detached for `FINALIZE`. Revisit it if drops are
+  seen waiting.
+
+**What goes wrong without it.** Dropping a partition asks for `ACCESS EXCLUSIVE` on the table. A request for it
+queues behind any transaction that holds a lock on the table, a report or a forgotten session, and every
+reader and writer of the inbox that arrives after the request queues behind *it*. A maintenance job that runs
+hourly in the background becomes an outage whose cause is three layers from its symptom, which is the same
+shape of failure as [D6](#d6). A cutoff computed in the wrong unit, or from a clock that is ahead, drops the
+months the inbox is serving, and a dropped partition does not come back.
+
+**Cost.** For up to the timeout the request for the lock is itself in the queue, so a drop that has to wait
+holds up the table for that long, bounded and not unbounded. Nothing is retired while a long transaction holds
+the partition; the next call, an hour later by default, tries again.
+
+Verified: `TestRetirePartitionsDropsWholePartitionsAndDeletesNoRow`,
+`TestRetirePartitionsRetiresOnlyWhatTheCutoffHasWhollyPassed`,
+`TestRetirePartitionsNeverRetiresAPartitionWhoseRangeHasNotEnded`,
+`TestRetirePartitionsRefusesATableItDoesNotRetire`,
+`TestRetirementWaitsOnlyBrieflyForALockAndSkipsThePartitionItCannotLock`,
+`TestRetentionSucceedsWhileADeadLetterReferencesAnAgedPartition` and
+`TestRetentionLeavesAPendingDeliveryDrivable`, in `adapters/driven/postgres`.
+
+## D48 — The maintenance jobs hold their lease for the gap between their runs · *built*
+
+**Decision.** `app.Maintenance` runs six jobs (`partition_provision`, `retention`, `idem_expiry`,
+`digest_expiry`, `broadcast_cleanup`, `preflight`), each under its own `notify_job_leases` row. The lease is
+taken before the job works, and **before every batch** of one that works in batches. Its ttl is **twice the
+job's interval**, so it outlives the gap between runs: the worker that holds it takes it again at each run and
+keeps the job, and every other worker is kept out until it lapses. A job runs no oftener than its interval
+counted from *this worker's* last run, and a lease that was refused is not a run. `Run` makes a pass at once, so a
+fresh deployment has its months before it takes traffic, and then one every tick. Provisioning is followed by the
+check **whether or not it succeeded**. The alarms are counters raised at each check.
+
+**Alternative.** Three, none adopted:
+
+- **A lease held only while the job runs** (ttl a few seconds). Between runs it lapses, so every worker takes
+  its turn at every interval: N times the work, and N times the alarm for one gap.
+- **A cadence recorded in the database**, so the whole fleet runs a job once per interval. The port's
+  `TryLeaseJob` records `last_started_at` only when the owner changes, and a cadence would need a second
+  method and a second race for the same single-owner guarantee the lease already gives.
+- **One lease for a whole pass.** A pass with a deep backlog outlives any ttl worth choosing, and a second worker
+  runs the same batch.
+
+**What goes wrong without it.** A lease that lapses between runs runs each job once per worker per interval and
+pages the operator once per worker for one missing partition. A check that is skipped when provisioning failed
+is silent in exactly the case it exists for: the role cannot create tables, the month is missing, and the alarm
+says nothing. A job that keeps a memory of what it meant to do, instead of deriving its cutoffs from the clock
+at each run, skips the work a dead worker left ([D46](#d46)'s failure, for retention).
+
+**Cost.** A worker that dies leaves its jobs unrun for up to twice their interval, two hours for the hourly
+ones. That is harmless for work measured in months, and the five-minute expiries and the one-minute preflight
+are late by ten minutes and two.
+
+Verified: `TestEveryJobTakesItsLeaseBeforeItWorks`, `TestAJobWhoseLeaseIsHeldElsewhereDoesNotRun`,
+`TestALeaseOutlivesTheGapBetweenRuns`, `TestTwoWorkersContendingForTheJobsRunEachOnce`,
+`TestALapsedLeasePassesTheJobsToAnotherWorker`, `TestAJobRunsNoOftenerThanItsInterval`,
+`TestARefusedLeaseIsNotARun`, `TestAnExpiryRenewsItsLeaseBeforeEachBatchAndStopsWhenItLosesIt`,
+`TestAProvisioningFailureIsReportedAndTheCheckStillAlarms`, `TestRunPassesAtOnceAndThenEveryTick`, and end to
+end `TestTwoWorkersOnOneDatabaseRunEachJobOnce`.
+
+## D49 — The preflight reports what pins vacuum, and says when it cannot see · *built*
+
+**Decision.** `Maintenance.Preflight` reads the database's conditions (`Maintenance.DatabaseConditions`) and
+`domain.AssessDatabase` judges them, as warnings and never as errors (NR-037, [D38](#d38)):
+
+- **The role's timeouts**: a warning for each of `idle_in_transaction_session_timeout` and `statement_timeout`
+  that is off, read as the connected role has them (`pg_settings`, which shows the session's value after any
+  role or database override).
+- **A transaction that pins vacuum**, older than 60 seconds: one that holds a snapshot or has been given an id,
+  in this database, on a client backend, not the preflight's own session. A read-committed session idle between
+  statements holds neither, and is not reported.
+- **A role that cannot see other roles' sessions** (neither a superuser nor a member of `pg_read_all_stats`) is
+  itself a warning, because `xact_start` is hidden from it and the age it reads covers its own sessions only.
+- **`max_wal_size` below fifteen minutes of the peak WAL rate** this process has seen: the greatest of the rates
+  over each interval between readings, and for a first reading the average since the counter began. With no
+  rate there is no judgement.
+
+A reading that cannot be taken is a fault the loop reports, and never a reason to stop. The two gauges
+(`notify.db.oldest_xmin_age` in seconds, `notify.db.checkpoints_requested`) are set through the optional
+`ports.GaugeMetrics`, because a counter cannot hold a level.
+
+**Alternative.** Report every open transaction, which cries wolf at every host that keeps a connection open a
+moment; judge `max_wal_size` by the average since the server began counting, which hides a burst; or return an
+error, which stops a service starting on a database it would run on.
+
+**What goes wrong without it.** The soak that measured [D38](#d38) held one transaction for two minutes and
+took the queue's heap from about 45 MB to 200 MB and its latency to 31 seconds. A preflight that reads through a
+blind role reports a clean database it has not looked at, and that is worse than no preflight. A `max_wal_size`
+sized to a quiet average stalls the queue the first time it is loaded.
+
+**Cost.** The WAL peak is the process's: a restart forgets it, and the first reading after one is the average
+since the server began counting, which understates a burst. The checkpoint counters read from
+`pg_stat_checkpointer` on PostgreSQL 17 and from `pg_stat_bgwriter` before it; the 17 branch has no test, because
+the suite runs on 16.
+
+Verified: `TestAssessDatabase`, `TestAssessDatabaseWarningsNameTheirNumbers`, `TestWALRate` and its two siblings in
+`domain`; `TestPreflightReportsEachConditionAsAWarningAndNeverAnError`,
+`TestPreflightJudgesMaxWALSizeAgainstTheRateItHasSeen`, `TestPreflightSetsItsGauges`,
+`TestPreflightThatCannotReadReturnsAFaultAndNoWarnings`, `TestRunReportsAFaultAndGoesOn` in `app`;
+`TestDatabaseConditionsReadsTheRolesTimeoutsAndTheServersSizing`,
+`TestDatabaseConditionsReportsTheAgeOfATransactionThatPinsVacuum`,
+`TestDatabaseConditionsSaysWhetherTheRoleCanSeeOtherSessions` and
+`TestDatabaseConditionsCountsTheWALAndTheCheckpointsItsWritesCause` in `adapters/driven/postgres`.
 
 ---
 

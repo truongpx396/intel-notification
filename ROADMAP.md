@@ -72,9 +72,13 @@ transports'. And the dispatcher (Stage 6): the nine steps, adaptive polling with
 optional `LISTEN/NOTIFY`, suppression before every delivery, the dead-letter alarm and the replay of a dead letter,
 and a third channel, `channel/webhook`, added with no change to fan-out, persistence or preferences (NS-008).
 And the digest and quota layers (Stage 7): the leased digest flush job, the Redis quota counter with the
-`channel_quotas` reader behind it, and a noisy-neighbour test that holds NS-007 in dispatcher passes. Not built:
-maintenance, the transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics, templates and
-addresses).
+`channel_quotas` reader behind it, and a noisy-neighbour test that holds NS-007 in dispatcher passes. And, written
+but not yet proven, the maintenance layer (Stage 8): the leased jobs that retire aged partitions, provision the
+months ahead and alarm on a missing or unscoped one, and expire idempotency keys, digest windows and completed
+broadcasts; `Admin.Erase`; and the preflight that warns on the role's timeouts, a transaction pinning vacuum and an
+undersized `max_wal_size`. Their use-case tests pass against fakes, and the PostgreSQL suites behind them have not
+been run. Not built: the transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics,
+templates and addresses).
 Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
 → [specs/001-notification-core](specs/001-notification-core/)

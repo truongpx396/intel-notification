@@ -12,8 +12,11 @@ Running the engine. Written for the person on call, so each section leads with t
 | Maintenance | runs in every worker; each job single-owner through a `notify_job_leases` lease | nothing — the lease picks one runner |
 
 Maintenance jobs: retention, partition provisioning, idempotency expiry, digest flush and expiry,
-broadcast expansion. `SELECT * FROM notify_job_leases` shows who holds each and when it last ran; the
-digest flush is the row `digest_flush`. There is no quota job: a budget's windows are in its Redis keys and
+broadcast cleanup and expansion, and the database preflight. `SELECT * FROM notify_job_leases` shows who holds
+each; the rows are `retention`, `partition_provision`, `idem_expiry`, `digest_expiry`, `broadcast_cleanup` and
+`preflight` (run by `app.Maintenance`, one `Run` loop per worker) and `digest_flush` (the `DigestFlusher`). A lease lasts twice its job's
+interval, so a worker that dies leaves its jobs unrun for up to that long, two hours for the hourly ones, and
+another worker then takes them ([D48](../specs/001-notification-core/design-decisions.md#d48)). There is no quota job: a budget's windows are in its Redis keys and
 lapse by themselves.
 
 There is no broker in the default deployment and nothing to scale for one.
@@ -137,16 +140,41 @@ an insert dated outside every partition is refused.
 reads the catalog and reports each table with no partition covering `at`'s UTC month or the next, and
 each `notifications` partition whose scope has come loose. Its answer is the catalog's, not the
 provisioning job's: a partition detached by hand is missing even though its table still exists.
-`TestCheckPartitions` asserts each condition. The detection is implemented; **raising the alarms from it
-is not yet** — the maintenance job (T038) does that — so until then nothing emits them. A host that
-wants them earlier can call `CheckPartitions` on its own schedule.
+`TestCheckPartitions` asserts each condition. The `partition_provision` job raises the two alarms from it: it
+provisions this month and the two after, **then** reads the catalog, and counts `notify.partition.missing`
+(labels `table` and `month`) for each gap and `notify.partition.unscoped` (label `partition`) for each
+partition, once per check, hourly. The check runs even when provisioning failed, which is when a month is
+missing and the alarm is wanted: a role that cannot create tables shows up here as an error from the job and a
+gap from the check. Run `Maintenance.Pass` before serving traffic, as well as `Run`, if a fresh deployment must have
+its months before its first notification.
 
 ### Retention
 
 Retiring an aged partition is a metadata operation, safe with pending deliveries outstanding — nothing
 references a partition by foreign key ([D6](../specs/001-notification-core/design-decisions.md#d6)).
-Inbox retention drops read and unread notifications alike. `notify_idem`, digest windows and completed
-broadcasts expire in batches, so expiry never holds a long lock.
+Inbox retention drops read and unread notifications alike, and a partition goes only when its **whole month**
+is older than the window, so a notification outlives `RetentionWindow` by up to a month. The history and the
+dead letters follow `DeliveryLogRetention` and `DeadLetterRetention` the same way. `notify_idem`, digest
+windows and completed broadcasts expire in batches, at `IdempotencyWindow`, so expiry never holds a long lock.
+
+**A retirement that never happens.** Dropping a partition needs a lock a long transaction can hold up, and the
+job waits at most 5 seconds for it, then skips the partition and reports it in the job's error
+(`retire notifications_2026m06: another transaction holds a lock on it …`) so the next hourly run tries again
+([D47](../specs/001-notification-core/design-decisions.md#d47)). The same line every hour means something holds
+that partition for good: find it in `pg_locks` and end it. It never stalls the inbox, which is the point of the
+timeout, and it never retires a partition whose range has not ended, whatever the clock says.
+
+### The preflight
+
+`Maintenance.Preflight` runs at startup and every minute, on one worker at a time, and **warns, and never
+fails**: it reports the role's missing `idle_in_transaction_session_timeout` or `statement_timeout`, a
+transaction that has pinned vacuum for over 60 seconds, `max_wal_size` under fifteen minutes of the peak WAL
+rate it has seen, and a role that cannot see other roles' sessions (grant it `pg_read_all_stats`, or the age it
+reports covers its own sessions only). It sets `notify.db.oldest_xmin_age` (seconds) and
+`notify.db.checkpoints_requested` when the `Metrics` can hold a gauge. A preflight that cannot read the database
+is a fault in the job's error and nothing more ([D49](../specs/001-notification-core/design-decisions.md#d49)).
+The WAL rate is the peak this process has seen, so a worker that has just started judges `max_wal_size` on an
+average, which understates a burst; give it a few minutes.
 
 ### An erasure request
 
