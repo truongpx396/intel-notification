@@ -44,6 +44,60 @@ func TestTryLeaseJob(t *testing.T) {
 	}
 }
 
+// D50. The stale-job alarm (operations.md) reads last_started_at, so it has to say when the
+// job last ran for the worker that keeps its lease as much as for one that has just taken it:
+// every grant moves it, the holder's renewal included, and a refusal moves nothing. Before
+// this, a renewal kept the column and the alarm fired for every healthy job. The age is made
+// by backdating the column, and the test never waits for it.
+func TestTryLeaseJobRecordsEveryGrantAsTheJobsLastRun(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	const job = "retention"
+	startedRecently := func() bool {
+		return e.count(`SELECT count(*) FROM notify_job_leases WHERE job = 'retention'
+                        AND last_started_at > now() - interval '1 minute'`) == 1
+	}
+	backdate := func() {
+		if _, err := e.db.Admin.Exec(ctx,
+			`UPDATE notify_job_leases SET last_started_at = now() - interval '1 hour' WHERE job = 'retention'`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ask := func(owner string, want bool) {
+		t.Helper()
+		if ok, err := e.s.TryLeaseJob(ctx, job, owner, time.Minute); err != nil || ok != want {
+			t.Fatalf("TryLeaseJob(%s) = %v, %v, want %v", owner, ok, err, want)
+		}
+	}
+
+	// A sequence: each step starts from what the last left.
+	ask("worker-1", true)
+	if !startedRecently() {
+		t.Fatal("the first grant did not record the job's start")
+	}
+
+	backdate()
+	ask("worker-2", false) // the lease is live and worker-1's
+	if startedRecently() {
+		t.Fatal("a refused ask moved last_started_at: the job did not run")
+	}
+
+	ask("worker-1", true) // the holder renews, as every run of a job does
+	if !startedRecently() {
+		t.Fatal("the holder's renewal kept last_started_at, so the column shows the job last ran when worker-1 took it, and notify.job.stale fires for a healthy job (D50)")
+	}
+
+	backdate()
+	if _, err := e.db.Admin.Exec(ctx, `UPDATE notify_job_leases SET lease_expires_at = now() - interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	ask("worker-2", true) // the lease lapsed and passed on
+	if !startedRecently() {
+		t.Fatal("a grant that changed the owner did not record the job's start")
+	}
+}
+
 // D11. Lowering the shard count folds rows from retired shards into live ones,
 // and the rows stay claimable.
 func TestRehomeShards(t *testing.T) {
