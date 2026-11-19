@@ -200,9 +200,9 @@ func (s *Store) LeaseBroadcast(ctx context.Context, ttl time.Duration) (*domain.
 // A page is refused, before anything is written, when it could not be right: a
 // notification for a tenant other than the broadcast's (the page would write into an inbox
 // the broadcast was not sent to), one keyed any way but by the broadcast's member key for
-// its recipient (a retry would notify them again), or a page that is not the last and says
-// not where the next begins (an empty cursor is where a broadcast starts, so it would not
-// end).
+// its recipient (a retry would notify them again), one the planner's output could not be
+// persisted for, or a page that is not the last and says not where the next begins (an
+// empty cursor is where a broadcast starts, so it would not end).
 func (s *Store) CommitBroadcastPage(ctx context.Context, job domain.BroadcastJob, page []domain.PageItem, nextCursor string, done bool) error {
 	if !done && nextCursor == "" {
 		return errors.New("commit broadcast page: a page that is not the last needs the cursor of the next, and an empty one is where a broadcast starts")
@@ -210,13 +210,12 @@ func (s *Store) CommitBroadcastPage(ctx context.Context, job domain.BroadcastJob
 	tenant, memberOf := job.Request.Tenant, job.Request.IdemKey
 	for i, it := range page {
 		id := domain.Identity{Realm: job.Realm, Tenant: tenant, Recipient: it.Notification.Recipient}
-		switch {
-		case it.Notification.Tenant != tenant:
-			return fmt.Errorf("commit broadcast page: item %d is for tenant %s/%s, the broadcast's is %s/%s",
-				i, it.Notification.Tenant.Kind, it.Notification.Tenant.ID, tenant.Kind, tenant.ID)
-		case it.Notification.IdemKey != domain.BroadcastMemberKey(memberOf, it.Notification.Recipient):
+		if it.Notification.IdemKey != domain.BroadcastMemberKey(memberOf, it.Notification.Recipient) {
 			return fmt.Errorf("commit broadcast page: item %d is not keyed by the broadcast's member key for its recipient", i)
 		}
+		// The identity is the broadcast's tenant's and the job's realm, so an item for any
+		// other tenant fails here: validatePersist holds the identity and the notification
+		// to one tenant and recipient.
 		if err := validatePersist(id, it.Notification, it.Plan); err != nil {
 			return fmt.Errorf("commit broadcast page: item %d: %w", i, err)
 		}

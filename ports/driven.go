@@ -194,16 +194,22 @@ type Store interface {
 	// the idempotency window.
 	Status(ctx context.Context, id domain.Identity, idemKey string) (domain.NotificationStatus, error)
 
-	// CreateBroadcast records a broadcast, idempotently on its key (NR-020).
+	// CreateBroadcast records a broadcast, idempotently on (realm, tenant, key): a replay is
+	// Applied=false with the first call's id, and changes nothing (NR-020).
 	CreateBroadcast(ctx context.Context, realm domain.Realm, b domain.BroadcastRequest) (domain.BroadcastReceipt, error)
 
-	// LeaseBroadcast takes the next broadcast with pages left, or nil when there
-	// is none.
+	// LeaseBroadcast takes the oldest pending broadcast no live lease holds, at its cursor, or
+	// nil when there is none. The lease covers ONE page: the page's commit releases it, and one
+	// that is never committed lapses (D53).
 	LeaseBroadcast(ctx context.Context, lease time.Duration) (*domain.BroadcastJob, error)
 
-	// CommitBroadcastPage persists a page's notifications together with the
-	// cursor advance, in one transaction, so a crash resumes at the next page and
-	// notifies nobody twice (D7).
+	// CommitBroadcastPage persists a page's notifications together with the cursor advance, in
+	// one transaction, so a crash resumes at the next page and notifies nobody twice (D7). The
+	// fence comes first: it returns domain.ErrBroadcastLeaseLost, having written nothing, when
+	// the job's lease token is not the broadcast's or the broadcast is not pending. It refuses
+	// the whole page when an item is not keyed by domain.BroadcastMemberKey(job.Request.IdemKey,
+	// its recipient), when an item is not for the broadcast's tenant, and when the page is not
+	// the last and nextCursor is empty, because an empty cursor is where a broadcast starts.
 	CommitBroadcastPage(ctx context.Context, job domain.BroadcastJob, page []domain.PageItem, nextCursor string, done bool) error
 
 	// RecordProviderStatus records a provider's delivery callback against the
