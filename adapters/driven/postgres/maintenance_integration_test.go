@@ -741,6 +741,65 @@ func TestDatabaseConditionsSeesEverySessionThroughPgReadAllStats(t *testing.T) {
 	}
 }
 
+// Only a client backend is a transaction for an operator to end (D49): the other backends that
+// hold a snapshot are the server's own, and an autovacuum worker, which is vacuum doing its job,
+// must not be reported as the transaction that is pinning it. No test can make an autovacuum
+// worker appear and stay on demand, so the query is run, unchanged, against rows made for it:
+// a table named pg_stat_activity in a schema that this test database's owner searches before
+// pg_catalog (the role's own default, set for this database alone, which is dropped with it).
+// The first case is the control: a client backend in the same table is read, so a reading of
+// zero for a worker is the filter at work and not a table the query never looked at.
+func TestDatabaseConditionsCountsOnlyClientBackends(t *testing.T) {
+	t.Parallel()
+	const (
+		hour   = time.Hour
+		tenMin = 10 * time.Minute
+	)
+	type backend struct {
+		kind string
+		age  time.Duration
+	}
+	for _, tc := range []struct {
+		name string
+		rows []backend
+		want time.Duration // the age read, to within a minute: the rows are made a moment before they are read
+	}{
+		{"a client backend is counted (the control)", []backend{{"client backend", tenMin}}, tenMin},
+		{"an autovacuum worker is not", []backend{{"autovacuum worker", hour}}, 0},
+		{"a walsender is not", []backend{{"walsender", hour}}, 0},
+		{"a background worker is not", []backend{{"background worker", hour}}, 0},
+		{"a worker older than a client does not hide the client", []backend{{"autovacuum worker", hour}, {"client backend", tenMin}}, tenMin},
+		{"of two clients the older is read", []backend{{"client backend", tenMin}, {"client backend", 2 * tenMin}}, 2 * tenMin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			owner := pgx.Identifier{e.db.Owner.Config().ConnConfig.User}.Sanitize()
+			e.admin(`CREATE SCHEMA shadow_catalog`)
+			e.admin(`CREATE TABLE shadow_catalog.pg_stat_activity (
+			             datname name, pid int, backend_type text,
+			             xact_start timestamptz, backend_xmin xid, backend_xid xid)`)
+			e.admin(`GRANT USAGE ON SCHEMA shadow_catalog TO ` + owner)
+			e.admin(`GRANT SELECT ON shadow_catalog.pg_stat_activity TO ` + owner)
+			for i, b := range tc.rows {
+				// A snapshot, so that only the kind of backend can keep a row out of the count.
+				e.admin(`INSERT INTO shadow_catalog.pg_stat_activity
+				         VALUES (current_database(), $1, $2, clock_timestamp() - $3::bigint * interval '1 microsecond', '700'::xid, NULL)`,
+					900000+i, b.kind, b.age.Microseconds())
+			}
+
+			c, err := e.storeWith(`search_path = shadow_catalog, pg_catalog, public`).DatabaseConditions(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := c.OldestTransactionAge - tc.want; d < 0 || d > time.Minute {
+				t.Fatalf("OldestTransactionAge = %v, want %v (to within a minute) for backends %+v: only a client backend is a transaction to end",
+					c.OldestTransactionAge, tc.want, tc.rows)
+			}
+		})
+	}
+}
+
 // NR-037, D38. DatabaseConditions reads what the queue depends on and judges none of it.
 // The domain's AssessDatabase is the judge (TestAssessDatabase); this is that the
 // reading is true.
