@@ -44,6 +44,11 @@ func (s *Store) TryLeaseJob(ctx context.Context, job, owner string, ttl time.Dur
 	return tag.RowsAffected() == 1, nil
 }
 
+// FinishJob implements ports.Maintenance.
+func (s *Store) FinishJob(ctx context.Context, job, owner string) error {
+	return nil
+}
+
 // RehomeShards implements ports.Maintenance. It does not touch leases, and the
 // claim never depended on shard ownership, so it is safe while claimers run
 // (D11).

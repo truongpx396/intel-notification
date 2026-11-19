@@ -88,10 +88,13 @@ func (d *flushDigests) shardsRead() []domain.Shard {
 type flushLeases struct {
 	ports.Maintenance
 
-	mu    sync.Mutex
-	asks  []leaseAsk
-	grant func(ask int) bool
-	err   error
+	mu        sync.Mutex
+	asks      []leaseAsk
+	grant     func(ask int) bool
+	err       error
+	finishes  []leaseAsk // FinishJob's asks, the ttl unused
+	finishErr error
+	onFinish  func() // called, with no lock held, as the end of a pass is recorded
 }
 
 type leaseAsk struct {
@@ -107,6 +110,23 @@ func (l *flushLeases) TryLeaseJob(_ context.Context, job, owner string, ttl time
 		return false, l.err
 	}
 	return l.grant == nil || l.grant(len(l.asks)), nil
+}
+
+func (l *flushLeases) FinishJob(_ context.Context, job, owner string) error {
+	l.mu.Lock()
+	l.finishes = append(l.finishes, leaseAsk{job: job, owner: owner})
+	err, hook := l.finishErr, l.onFinish
+	l.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return err
+}
+
+func (l *flushLeases) finished() []leaseAsk {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.finishes)
 }
 
 func (l *flushLeases) count() int {
@@ -210,6 +230,98 @@ func TestTheFlushJobRenewsItsLeaseBetweenShardsAndStopsWhenItLosesIt(t *testing.
 	}
 	if got := f.leases.count(); got != 3 {
 		t.Fatalf("%d lease asks, want 3: one before each shard read, the third refused", got)
+	}
+}
+
+// ------------------------------------------------------ the end of a pass --
+
+// A pass that held the lease and flushed what was due without a fault records its end, once,
+// under the job's name and the flusher's own, and after the windows were flushed and not before
+// (D52): the last finish is the last time the job worked.
+func TestACleanFlushPassRecordsItsEndOnceAndAfterItsWork(t *testing.T) {
+	t.Parallel()
+	f := newFlushFx(2)
+	f.digests.due[0] = []string{"w1", "w2"}
+	f.digests.due[1] = []string{"w3"}
+	var flushedAtTheEnd int
+	f.leases.onFinish = func() { flushedAtTheEnd = len(f.digests.flushed) }
+
+	flushed, err := f.build(t).Flush(t.Context())
+	if err != nil || flushed != 3 {
+		t.Fatalf("Flush = %d, %v, want 3 windows and no error", flushed, err)
+	}
+	if got, want := f.leases.finished(), []leaseAsk{{job: app.JobDigestFlush, owner: "me"}}; !slices.Equal(got, want) {
+		t.Fatalf("recorded the end of %+v, want exactly %+v", got, want)
+	}
+	if flushedAtTheEnd != 3 {
+		t.Fatalf("%d windows flushed when the end was recorded, want 3: the end comes after the work", flushedAtTheEnd)
+	}
+}
+
+// A pass that ended in a fault, was refused, or was cut short has not finished, and the job's
+// last finish is what says a job that keeps taking its lease is not working.
+func TestAFlushPassThatDidNotCompleteIsNotFinished(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(f *flushFx, cancel context.CancelFunc)
+	}{
+		{"a window will not flush", func(f *flushFx, _ context.CancelFunc) {
+			f.digests.due[0] = []string{"w1", "w2"}
+			f.digests.flushErr["w2"] = errors.New("will not flush")
+		}},
+		{"the lease is another worker's", func(f *flushFx, _ context.CancelFunc) {
+			f.digests.due[0] = []string{"w1"}
+			f.leases.grant = func(int) bool { return false }
+		}},
+		{"the lease cannot be asked for", func(f *flushFx, _ context.CancelFunc) {
+			f.digests.due[0] = []string{"w1"}
+			f.leases.err = errors.New("the database is away")
+		}},
+		{"the lease is lost after the first shard", func(f *flushFx, _ context.CancelFunc) {
+			f.digests.due[0], f.digests.due[1] = []string{"w1"}, []string{"w2"}
+			f.leases.grant = func(ask int) bool { return ask < 2 }
+		}},
+		{"the worker is told to stop", func(f *flushFx, cancel context.CancelFunc) {
+			f.digests.due[0], f.digests.due[1] = []string{"w1"}, []string{"w2"}
+			f.leases.grant = func(ask int) bool {
+				if ask == 2 {
+					cancel()
+				}
+				return true
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFlushFx(2)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			tc.setup(f, cancel)
+
+			_, _ = f.build(t).Flush(ctx)
+			if got := f.leases.finished(); len(got) != 0 {
+				t.Fatalf("recorded the end of %+v, want none: this pass did not run to its end", got)
+			}
+		})
+	}
+}
+
+// A finish that cannot be recorded is a fault of the pass, reported with the rest, and the
+// windows it flushed still count and still wake the dispatcher: the deliveries are there.
+func TestAFlushFinishThatCannotBeRecordedIsReportedAndTheWindowsStillCount(t *testing.T) {
+	t.Parallel()
+	f := newFlushFx(1)
+	f.digests.due[0] = []string{"w1", "w2"}
+	boom := errors.New("the database is away")
+	f.leases.finishErr = boom
+
+	flushed, err := f.build(t).Flush(t.Context())
+	if flushed != 2 || !errors.Is(err, boom) {
+		t.Fatalf("Flush = %d, %v, want 2 windows flushed and the fault returned", flushed, err)
+	}
+	if got := f.wakes.n.Load(); got != 1 {
+		t.Fatalf("%d wakes, want 1: the flushed windows have deliveries whether or not the end was recorded", got)
 	}
 }
 

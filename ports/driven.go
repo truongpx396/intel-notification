@@ -89,6 +89,14 @@ type Maintenance interface {
 	// last ran it (D50).
 	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error)
 
+	// FinishJob records the instant as the job's last finish, but only when owner is the
+	// job's current owner: a worker whose lease went to another does not claim the run of the
+	// one that has it, and the ask is then a no-op and not an error. A worker calls it when
+	// its run ended without a fault and without losing the lease, so a job that takes its
+	// lease and fails every run keeps a last finish that ages, which is what tells it from a
+	// healthy one (D52). It does not release the lease.
+	FinishJob(ctx context.Context, job, owner string) error
+
 	// RehomeShards folds rows in shards >= shards into live ones, after the
 	// shard count is lowered. Safe while claimers run.
 	RehomeShards(ctx context.Context, shards int) (int, error)

@@ -45,10 +45,10 @@ var maintOps = map[string][]string{
 }
 
 type maintCall struct {
-	op    string // "lease", "retire", "ensure", "check", "expire_idem", "expire_digests", "expire_broadcasts", "conditions"
+	op    string // "lease", "finish", "retire", "ensure", "check", "expire_idem", "expire_digests", "expire_broadcasts", "conditions"
 	when  time.Time
-	job   string        // lease: the job asked for
-	owner string        // lease
+	job   string        // lease, finish: the job asked for
+	owner string        // lease, finish
 	ttl   time.Duration // lease
 	table string        // retire
 	at    time.Time     // retire: the cutoff; expire: olderThan; ensure, check: the instant
@@ -71,12 +71,14 @@ type maintStore struct {
 	grants    map[string]int
 	loseAfter map[string]int // a job's lease is refused once it has been granted this many times
 
-	retireErr map[string]error // by table
-	ensureErr error
-	health    domain.PartitionHealth
-	expire    map[string][]int // op → rows deleted by each call, in order; once spent, 0
-	expireErr map[string]int   // op → the call (1-based) that fails
-	expired   map[string]int
+	finishErr   map[string]error // by job: recording the end of its run fails
+	retireErr   map[string]error // by table
+	ensureErr   error
+	afterExpire func(op string) // called, with no lock held, once an expiry batch has run
+	health      domain.PartitionHealth
+	expire      map[string][]int // op → rows deleted by each call, in order; once spent, 0
+	expireErr   map[string]int   // op → the call (1-based) that fails
+	expired     map[string]int
 
 	conditions []domain.DatabaseConditions // read in order, the last one again and again
 	reads      int
@@ -86,7 +88,7 @@ type maintStore struct {
 func newMaintStore(now func() time.Time) *maintStore {
 	return &maintStore{
 		now: now, leases: map[string]maintLease{}, denied: map[string]bool{}, grants: map[string]int{},
-		loseAfter: map[string]int{}, retireErr: map[string]error{}, expire: map[string][]int{},
+		loseAfter: map[string]int{}, finishErr: map[string]error{}, retireErr: map[string]error{}, expire: map[string][]int{},
 		expireErr: map[string]int{}, expired: map[string]int{},
 	}
 }
@@ -114,6 +116,13 @@ func (s *maintStore) TryLeaseJob(_ context.Context, job, owner string, ttl time.
 	return true, nil
 }
 
+func (s *maintStore) FinishJob(_ context.Context, job, owner string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.record(maintCall{op: "finish", job: job, owner: owner})
+	return s.finishErr[job]
+}
+
 func (s *maintStore) RetirePartitions(_ context.Context, table string, before time.Time) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -136,6 +145,14 @@ func (s *maintStore) CheckPartitions(_ context.Context, at time.Time) (domain.Pa
 }
 
 func (s *maintStore) expireOp(op string, olderThan time.Time, batch int) (int, error) {
+	n, err := s.expireBatch(op, olderThan, batch)
+	if s.afterExpire != nil {
+		s.afterExpire(op)
+	}
+	return n, err
+}
+
+func (s *maintStore) expireBatch(op string, olderThan time.Time, batch int) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.record(maintCall{op: op, at: olderThan, n: batch})
@@ -480,6 +497,145 @@ func TestARefusedLeaseIsNotARun(t *testing.T) {
 	f.clock.Advance(30 * time.Second)
 	if ran := f.pass(t, m); !slices.Equal(ran, []string{app.JobRetention}) {
 		t.Fatalf("the next pass ran %v, want retention, which never ran: an hour has not passed, but it has not run either", ran)
+	}
+}
+
+// ------------------------------------------------------------ the end of a run --
+
+// finishedJobs lists the jobs whose end was recorded, in the order it was, and fails the test
+// if one was recorded under another worker's name.
+func (f *maintFx) finishedJobs(t *testing.T, owner string) []string {
+	t.Helper()
+	var out []string
+	for _, c := range f.store.ops("finish") {
+		if c.owner != owner {
+			t.Errorf("the end of %s was recorded under %q, want the worker's own name %q", c.job, c.owner, owner)
+		}
+		out = append(out, c.job)
+	}
+	return out
+}
+
+func without(jobs []string, gone ...string) []string {
+	return slices.DeleteFunc(slices.Clone(jobs), func(j string) bool { return slices.Contains(gone, j) })
+}
+
+// A job that ran without a fault records its end, after its work and not before, so the last
+// finish is the last time it worked and not the last time it began (D52).
+func TestAJobThatRunsCleanlyRecordsItsEndAfterItsWork(t *testing.T) {
+	t.Parallel()
+	f := newMaintFx()
+	f.pass(t, f.build(t, "me"))
+
+	if got := f.finishedJobs(t, "me"); !slices.Equal(got, maintJobs) {
+		t.Fatalf("recorded the end of %v, want every job once, in the order they ran: %v", got, maintJobs)
+	}
+	log := f.store.log()
+	for job, ops := range maintOps {
+		finish := indexOf(log, func(c maintCall) bool { return c.op == "finish" && c.job == job })
+		for _, op := range ops {
+			if at := indexOf(log, func(c maintCall) bool { return c.op == op }); at > finish {
+				t.Errorf("%s: its end was recorded at call %d, before its %s at %d", job, finish, op, at)
+			}
+		}
+	}
+}
+
+// A job that took its lease and failed is the case the last finish exists to show: it keeps
+// the last start fresh at every run, so only a finish that does not move says it is failing.
+func TestAJobThatFailsIsNotFinished(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		job   string
+		fault func(*maintStore)
+	}{
+		{"retention, one table's retirement", app.JobRetention, func(s *maintStore) { s.retireErr[domain.TableDeadLetters] = errors.New("locked") }},
+		{"an expiry, in its second batch", app.JobIdemExpiry, func(s *maintStore) {
+			s.expire["expire_idem"] = []int{10, 10, 10}
+			s.expireErr["expire_idem"] = 2
+		}},
+		{"provisioning, though the check after it ran", app.JobPartitions, func(s *maintStore) { s.ensureErr = errors.New("no create privilege") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newMaintFx()
+			tc.fault(f.store)
+			if _, err := f.build(t, "me", app.WithMaintenanceBatch(10)).Pass(t.Context()); err == nil {
+				t.Fatal("Pass = nil, want the fault of the job that failed")
+			}
+			if got, want := f.finishedJobs(t, "me"), without(maintJobs, tc.job); !slices.Equal(got, want) {
+				t.Fatalf("recorded the end of %v, want %v: %s failed, and the others did not", got, want, tc.job)
+			}
+		})
+	}
+}
+
+// A job whose lease is another worker's did not run, so it did not finish.
+func TestAJobWhoseLeaseIsHeldElsewhereIsNotFinished(t *testing.T) {
+	t.Parallel()
+	for _, held := range maintJobs {
+		t.Run(held, func(t *testing.T) {
+			t.Parallel()
+			f := newMaintFx()
+			f.store.setDenied(held, true)
+			f.pass(t, f.build(t, "me"))
+			if got, want := f.finishedJobs(t, "me"), without(maintJobs, held); !slices.Equal(got, want) {
+				t.Fatalf("recorded the end of %v, want %v: the worker never ran %s", got, want, held)
+			}
+		})
+	}
+}
+
+// A job that begins and then loses its lease stops where it is and leaves the rest to the
+// worker that holds it, so it has not finished what it began.
+func TestAnExpiryThatLosesItsLeaseMidRunIsNotFinished(t *testing.T) {
+	t.Parallel()
+	f := newMaintFx()
+	f.store.expire["expire_idem"] = []int{10, 10, 10, 10}
+	f.store.loseAfter[app.JobIdemExpiry] = 2
+	f.pass(t, f.build(t, "me", app.WithMaintenanceBatch(10)))
+
+	if got, want := f.finishedJobs(t, "me"), without(maintJobs, app.JobIdemExpiry); !slices.Equal(got, want) {
+		t.Fatalf("recorded the end of %v, want %v: the expiry lost its lease before its last batch", got, want)
+	}
+}
+
+// A worker that is told to stop mid-run has not finished the run it was in, whatever the job
+// did on the way out.
+func TestAJobStoppedMidRunIsNotFinished(t *testing.T) {
+	t.Parallel()
+	f := newMaintFx()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	f.store.expire["expire_idem"] = []int{10, 10, 10}
+	f.store.afterExpire = func(string) { cancel() }
+
+	if _, err := f.build(t, "me", app.WithMaintenanceBatch(10)).Pass(ctx); err != nil {
+		t.Fatalf("Pass = %v, want no error: a worker that is stopping is not failing", err)
+	}
+	if got, want := f.finishedJobs(t, "me"), []string{app.JobPartitions, app.JobRetention}; !slices.Equal(got, want) {
+		t.Fatalf("recorded the end of %v, want %v: the expiry was cut short by the stop, and nothing ran after it", got, want)
+	}
+}
+
+// A finish that cannot be recorded is a fault of that job, reported with the others and not
+// stopping them. The job did run, so it is not run again at the next tick for it.
+func TestAFinishThatCannotBeRecordedIsReportedAndDoesNotStopTheOtherJobs(t *testing.T) {
+	t.Parallel()
+	f := newMaintFx()
+	boom := errors.New("the database is away")
+	f.store.finishErr[app.JobRetention] = boom
+
+	ran, err := f.build(t, "me").Pass(t.Context())
+	if !errors.Is(err, boom) || !strings.Contains(err.Error(), app.JobRetention) {
+		t.Fatalf("Pass = %v, want the fault returned and naming %s", err, app.JobRetention)
+	}
+	if !slices.Equal(ran, maintJobs) {
+		t.Fatalf("Pass ran %v, want every job: a finish that was not recorded does not undo the run", ran)
+	}
+	if got := f.finishedJobs(t, "me"); !slices.Equal(got, maintJobs) {
+		t.Fatalf("recorded the end of %v, want an ask for every job: one that failed does not stop the rest", got)
 	}
 }
 
