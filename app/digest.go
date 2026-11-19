@@ -141,10 +141,16 @@ func (f *DigestFlusher) leaseTTL() time.Duration { return max(minFlushLease, 3*f
 // error and does not stop the others; a batch in which nothing could be flushed is not
 // read again, so a fault that repeats ends the pass and does not spin it. A pass that
 // flushed anything wakes the dispatcher of this process.
+//
+// A pass that held the lease to its end, without a fault and without being told to stop,
+// records it (Maintenance.FinishJob, D52), so a flush job that takes its lease at every pass
+// and fails at every one is not mistaken for one that works. A finish that cannot be recorded
+// is a fault of the pass, and does not take back the windows it flushed.
 func (f *DigestFlusher) Flush(ctx context.Context) (int, error) {
 	var (
 		flushed int
 		errs    []error
+		refused bool
 	)
 pass:
 	for shard := range f.shards {
@@ -155,6 +161,7 @@ pass:
 				break pass
 			}
 			if !held {
+				refused = true // never granted, or lost: the worker that holds it owns the rest
 				break pass
 			}
 			n, more, err := f.flushBatch(ctx, domain.Shard(shard))
@@ -165,6 +172,11 @@ pass:
 			if !more {
 				break
 			}
+		}
+	}
+	if !refused && len(errs) == 0 && ctx.Err() == nil {
+		if err := f.jobs.FinishJob(ctx, JobDigestFlush, f.owner); err != nil {
+			errs = append(errs, fmt.Errorf("finish the %s job: %w", JobDigestFlush, err))
 		}
 	}
 	if flushed > 0 && f.waker != nil {

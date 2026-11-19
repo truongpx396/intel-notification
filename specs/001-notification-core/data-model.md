@@ -220,7 +220,10 @@ windows, hour and day, whose start is in the key, so there is nothing to roll ov
 
 One row per job; `Maintenance.TryLeaseJob` grants it to one owner at a time
 ([D22](design-decisions.md#d22)). Every grant, the holder's renewal included, sets `last_started_at`
-([D50](design-decisions.md#d50)), which is what the stale-job alarm reads; `last_finished_at` is not written.
+([D50](design-decisions.md#d50)), which is what the stale-job alarm reads. `Maintenance.FinishJob` sets
+`last_finished_at`, for the job's current owner only, when a run ended without a fault, without losing the lease and
+without being told to stop ([D52](design-decisions.md#d52)); nothing else writes it, and a take-over leaves it. A job
+whose start is recent and whose finish is old or null is taken and does not finish.
 
 ---
 

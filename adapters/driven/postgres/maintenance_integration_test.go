@@ -100,6 +100,94 @@ func TestTryLeaseJobRecordsEveryGrantAsTheJobsLastRun(t *testing.T) {
 	}
 }
 
+// D52. last_started_at says a worker is taking a job, and cannot say it is getting anywhere: a job
+// that takes its lease and fails at every run keeps it fresh. last_finished_at says the other
+// half, so FinishJob records a clean end, for the owner of the job and no one else, and nothing
+// else writes it: not a grant (which begins a run) and not a take-over (the finish that was there
+// is still the last time any worker finished the job). Ages are made by backdating the column.
+func TestFinishJobRecordsTheCleanEndOfTheJobsOwnerAndOfNoOneElse(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	const job = "retention"
+	finishedRecently := func() bool {
+		return e.count(`SELECT count(*) FROM notify_job_leases WHERE job = 'retention'
+                        AND last_finished_at > now() - interval '1 minute'`) == 1
+	}
+	neverFinished := func() bool {
+		return e.count(`SELECT count(*) FROM notify_job_leases WHERE job = 'retention' AND last_finished_at IS NULL`) == 1
+	}
+	backdate := func() {
+		e.admin(`UPDATE notify_job_leases SET last_finished_at = now() - interval '1 hour' WHERE job = 'retention'`)
+	}
+	finish := func(owner string) {
+		t.Helper()
+		if err := e.s.FinishJob(ctx, job, owner); err != nil {
+			t.Fatalf("FinishJob(%s) = %v, want nil", owner, err)
+		}
+	}
+	lease := func(owner string, want bool) {
+		t.Helper()
+		if ok, err := e.s.TryLeaseJob(ctx, job, owner, time.Minute); err != nil || ok != want {
+			t.Fatalf("TryLeaseJob(%s) = %v, %v, want %v", owner, ok, err, want)
+		}
+	}
+
+	// A sequence: each step starts from what the last left.
+	finish("worker-1") // nobody has taken the job, so there is no run to have finished
+	if n := e.count(`SELECT count(*) FROM notify_job_leases`); n != 0 {
+		t.Fatalf("FinishJob made %d lease rows for a job no one had taken, want none", n)
+	}
+
+	lease("worker-1", true)
+	if !neverFinished() {
+		t.Fatal("taking a lease recorded a finish: a grant begins a run")
+	}
+	finish("worker-2") // the lease is worker-1's
+	if !neverFinished() {
+		t.Fatal("worker-2 recorded the end of a run that was worker-1's")
+	}
+	finish("worker-1")
+	if !finishedRecently() {
+		t.Fatal("the owner's finish was not recorded, so a job that works is indistinguishable from one that fails every run (D52)")
+	}
+	if n := e.count(`SELECT count(*) FROM notify_job_leases WHERE last_finished_at >= last_started_at`); n != 1 {
+		t.Fatal("last_finished_at is before last_started_at for a run that began and then finished")
+	}
+
+	backdate()
+	finish("worker-1") // the next run ends
+	if !finishedRecently() {
+		t.Fatal("a later finish did not move last_finished_at: it would say the job last worked at its first run")
+	}
+
+	backdate()
+	lease("worker-1", true) // the next run begins
+	if finishedRecently() || neverFinished() {
+		t.Fatal("a renewal changed last_finished_at: only a finish writes it")
+	}
+
+	e.admin(`UPDATE notify_job_leases SET lease_expires_at = now() - interval '1 second'`)
+	lease("worker-2", true) // the lease lapsed and passed on
+	if finishedRecently() || neverFinished() {
+		t.Fatal("a take-over changed last_finished_at: the last finish is still the last time any worker finished the job")
+	}
+	finish("worker-1") // the former owner, whose run was cut short
+	if finishedRecently() {
+		t.Fatal("the former owner recorded the end of a run after the job went to worker-2")
+	}
+	finish("worker-2")
+	if !finishedRecently() {
+		t.Fatal("the new owner's finish was not recorded")
+	}
+
+	for _, bad := range [][2]string{{"", "worker-1"}, {job, ""}} {
+		if err := e.s.FinishJob(ctx, bad[0], bad[1]); err == nil {
+			t.Fatalf("FinishJob(%q, %q) = nil, want an error: a job and an owner are both required", bad[0], bad[1])
+		}
+	}
+}
+
 // D51. IdemKeys names the keys an erasure is about to remove, so the pre-check's entries for
 // them can be forgotten first. It lists one recipient's keys and no one else's, in ascending
 // bytewise order whatever the database's collation (the caller's loop compares them as bytes),
@@ -738,6 +826,65 @@ func TestDatabaseConditionsSeesEverySessionThroughPgReadAllStats(t *testing.T) {
 	}
 	if !after.SeesAllSessions {
 		t.Fatal("a member of pg_read_all_stats is reported as not seeing every session, and the preflight would warn about a blindness it does not have")
+	}
+}
+
+// Only a client backend is a transaction for an operator to end (D49): the other backends that
+// hold a snapshot are the server's own, and an autovacuum worker, which is vacuum doing its job,
+// must not be reported as the transaction that is pinning it. No test can make an autovacuum
+// worker appear and stay on demand, so the query is run, unchanged, against rows made for it:
+// a table named pg_stat_activity in a schema that this test database's owner searches before
+// pg_catalog (the role's own default, set for this database alone, which is dropped with it).
+// The first case is the control: a client backend in the same table is read, so a reading of
+// zero for a worker is the filter at work and not a table the query never looked at.
+func TestDatabaseConditionsCountsOnlyClientBackends(t *testing.T) {
+	t.Parallel()
+	const (
+		hour   = time.Hour
+		tenMin = 10 * time.Minute
+	)
+	type backend struct {
+		kind string
+		age  time.Duration
+	}
+	for _, tc := range []struct {
+		name string
+		rows []backend
+		want time.Duration // the age read, to within a minute: the rows are made a moment before they are read
+	}{
+		{"a client backend is counted (the control)", []backend{{"client backend", tenMin}}, tenMin},
+		{"an autovacuum worker is not", []backend{{"autovacuum worker", hour}}, 0},
+		{"a walsender is not", []backend{{"walsender", hour}}, 0},
+		{"a background worker is not", []backend{{"background worker", hour}}, 0},
+		{"a worker older than a client does not hide the client", []backend{{"autovacuum worker", hour}, {"client backend", tenMin}}, tenMin},
+		{"of two clients the older is read", []backend{{"client backend", tenMin}, {"client backend", 2 * tenMin}}, 2 * tenMin},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			owner := pgx.Identifier{e.db.Owner.Config().ConnConfig.User}.Sanitize()
+			e.admin(`CREATE SCHEMA shadow_catalog`)
+			e.admin(`CREATE TABLE shadow_catalog.pg_stat_activity (
+			             datname name, pid int, backend_type text,
+			             xact_start timestamptz, backend_xmin xid, backend_xid xid)`)
+			e.admin(`GRANT USAGE ON SCHEMA shadow_catalog TO ` + owner)
+			e.admin(`GRANT SELECT ON shadow_catalog.pg_stat_activity TO ` + owner)
+			for i, b := range tc.rows {
+				// A snapshot, so that only the kind of backend can keep a row out of the count.
+				e.admin(`INSERT INTO shadow_catalog.pg_stat_activity
+				         VALUES (current_database(), $1, $2, clock_timestamp() - $3::bigint * interval '1 microsecond', '700'::xid, NULL)`,
+					900000+i, b.kind, b.age.Microseconds())
+			}
+
+			c, err := e.storeWith(`search_path = shadow_catalog, pg_catalog, public`).DatabaseConditions(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := c.OldestTransactionAge - tc.want; d < 0 || d > time.Minute {
+				t.Fatalf("OldestTransactionAge = %v, want %v (to within a minute) for backends %+v: only a client backend is a transaction to end",
+					c.OldestTransactionAge, tc.want, tc.rows)
+			}
+		})
 	}
 }
 

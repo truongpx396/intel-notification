@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D51. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D52. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -1282,8 +1282,13 @@ sized to a quiet average stalls the queue the first time it is loaded.
 
 **Cost.** The WAL peak is the process's: a restart forgets it, and the first reading after one is the average
 since the server began counting, which understates a burst. The checkpoint counters read from
-`pg_stat_checkpointer` on PostgreSQL 17 and from `pg_stat_bgwriter` before it; the 17 branch has no test, because
-the suite runs on 16.
+`pg_stat_checkpointer` on PostgreSQL 17 and from `pg_stat_bgwriter` before it, chosen by whether the view exists
+and not by a version number. Each branch is held only by a run on its own major, so CI runs the schema and the
+integration suites on 16 and on 17 (`make test-pg-next` is the second by hand), and `PGTEST_EXPECT_MAJOR` makes
+a leg that did not start the major it names fail and not pass. The filter that leaves out vacuum's own workers
+cannot be tested against a live autovacuum worker, which no test can make appear and stay, so the query is run,
+unchanged, against rows made for it: a table named `pg_stat_activity` in a schema the test database's owner
+searches before `pg_catalog`.
 
 Verified: `TestAssessDatabase`, `TestAssessDatabaseWarningsNameTheirNumbers`, `TestWALRate` and its two siblings in
 `domain`; `TestPreflightReportsEachConditionAsAWarningAndNeverAnError`,
@@ -1291,8 +1296,10 @@ Verified: `TestAssessDatabase`, `TestAssessDatabaseWarningsNameTheirNumbers`, `T
 `TestPreflightThatCannotReadReturnsAFaultAndNoWarnings`, `TestRunReportsAFaultAndGoesOn` in `app`;
 `TestDatabaseConditionsReadsTheRolesTimeoutsAndTheServersSizing`,
 `TestDatabaseConditionsReportsTheAgeOfATransactionThatPinsVacuum`,
-`TestDatabaseConditionsSaysWhetherTheRoleCanSeeOtherSessions` and
-`TestDatabaseConditionsCountsTheWALAndTheCheckpointsItsWritesCause` in `adapters/driven/postgres`.
+`TestDatabaseConditionsSaysWhetherTheRoleCanSeeOtherSessions`,
+`TestDatabaseConditionsCountsOnlyClientBackends` and
+`TestDatabaseConditionsCountsTheWALAndTheCheckpointsItsWritesCause` in `adapters/driven/postgres`, the last on both
+majors; `TestImageFrom` and `TestCheckMajor` in `internal/pgtest`.
 
 ## D50 — A lease grant is the job's last start, the holder's renewal included · *built*
 
@@ -1313,8 +1320,10 @@ defaults are (30 s against the shortest, 1 min).
   the same condition with no change. But it needs each job's ttl to be known to whoever writes the alarm (the
   ttl is `max(30 s, 2 × interval)` and is not stored), and it says when a lease lapses, not when anything ran. The
   column that is named and documented for the second is the better home for it.
-- **Record a run's end in `last_finished_at`**, which no code writes. It would need a second port method called
-  when a job ends, and a decision about a job that ends in a fault. The alarm does not need it.
+- **Record a run's end in `last_finished_at`**, which nothing wrote. It needs a second port method called when a
+  job ends, and a decision about a job that ends in a fault. The alarm on a worker that is not taking the job does
+  not need it, and it was left out for that reason; the job that takes its lease and fails every run does, and
+  [D52](#d52) adds it.
 
 **What goes wrong without it.** The renewal kept the column, so for a worker that keeps its jobs `last_started_at`
 stayed at the moment it first took them. The alarm in [operations.md](../../docs/operations.md) reads "older than
@@ -1322,8 +1331,8 @@ its interval" and fired for every healthy job, permanently, until someone switch
 watched the case it was written for: no worker taking the lease.
 
 **Cost.** None in writes: the renewal already updates the row. A job that takes its lease and fails every run
-keeps the column fresh, so *stale* does not catch *failing*; that is the error handler's report
-(`WithMaintenanceErrorHandler`), not this alarm's. `last_finished_at` stays unwritten.
+keeps the column fresh, so *stale* does not catch *failing*; [D52](#d52) records the other half, and the error
+handler (`WithMaintenanceErrorHandler`) still reports each fault as it happens.
 
 Verified: `TestTryLeaseJobRecordsEveryGrantAsTheJobsLastRun` in `adapters/driven/postgres` (a grant by the
 holder, by a new owner after a lapse and the first one all move the column; a refusal does not).
@@ -1376,6 +1385,62 @@ Verified: `TestEraseForgetsThePreCheckEntryOfEachOfTheRecipientsKeysBeforeErasin
 against the fake and against Redis; `TestPreCheckForgetWithRedisDownIsReportedOnceAndIsNotAnError` and
 `TestPreCheckForgetDeletesOnlyTheKeysItIsGiven` in `adapters/driven/redis`; `TestIdemKeys` in
 `adapters/driven/postgres`; and end to end `TestNS012AnErasedRecipientLeavesNothingAndTheirSuppressionStays`.
+
+## D52 — A run that ends cleanly is recorded, so a job that only ever fails is visible · *built*
+
+**Decision.** `Maintenance.FinishJob(job, owner)` stamps `notify_job_leases.last_finished_at` with the database's
+`now()`, and only for the job's **current owner**: a worker whose lease went to another does not claim the other's
+run, and the ask is then a no-op and not an error. `app.Maintenance.Pass` and `DigestFlusher.Flush` call it when
+a run **ended cleanly**:
+
+- it did not fail (a fault in any batch, table or window is a fault of the run);
+- it did not lose its lease on the way (a refusal at any batch means the worker that holds the lease owns the
+  rest, and this one did not finish what it began);
+- the worker was not told to stop (a context that ended cuts a run short, and the code leaves quietly).
+
+Nothing else writes the column: a grant begins a run ([D50](#d50)) and does not end one, and a take-over leaves
+the finish that was there, because the last finish is the last time **any** worker finished the job. A finish that
+cannot be recorded is a fault of the job, reported with the others and not stopping them, and the windows a flush
+pass queued still count and still wake the dispatcher. The job and the owner are both required.
+
+The two columns then tell three cases apart, and the alarms in [operations.md](../../docs/operations.md) read them:
+
+| `last_started_at` | `last_finished_at` | The job |
+|---|---|---|
+| recent | recent | works |
+| old | (any) | is not being taken: `notify.job.stale` ([D50](#d50)) |
+| recent | old, or never | is taken and does not finish, because it fails at every run or runs longer than its threshold: `notify.job.failing` |
+
+**Alternative.** Three, none adopted:
+
+- **Leave it to the error handler** (`WithMaintenanceErrorHandler`, `WithFlushErrorHandler`). It reports each
+  fault as it happens, to whatever the host wired, and nothing in the database says a job has not worked for a
+  day; a host that wires no handler, or whose alerting drops a repeated message, has no alarm at all.
+- **Store the last error** (`last_error text`). A second column and a retention question (how long is an error
+  kept, and what does a run that works do to it) to answer what the first two answer without them; the error
+  itself is in the handler and the log.
+- **Stamp the end of every run, failed ones too.** Then `last_finished_at` is *last ended*, and a job that
+  fails at every run looks as healthy as one that works, which is the case this exists for.
+
+**What goes wrong without it.** A job that takes its lease and fails at every run, for instance a role that
+cannot create partitions, a table that cannot be dropped for a lock that never clears, or a `DELETE` the database
+refuses, keeps `last_started_at` fresh at every attempt, so the stale alarm stays quiet, and what it was for
+(retention, expiry, provisioning) is not done and nothing in the database says so until the disk fills.
+
+**Cost.** One more `UPDATE` of a one-row-per-job table per run, by the worker that holds the lease, beside the
+renewal it already makes: one per flush pass, five seconds apart at the defaults. A run that is long, a flush
+pass draining a backlog for longer than its threshold, shows as `failing` until it ends; that is a thing to look
+at, and the alarm says it as *taken and not finishing*. The column does not say *why*, only that a run has not
+ended cleanly since; the error handler and the log do. A deployment that does not run the jobs has no rows
+and no alarm, as before.
+
+Verified: `TestFinishJobRecordsTheCleanEndOfTheJobsOwnerAndOfNoOneElse` in `adapters/driven/postgres`;
+`TestAJobThatRunsCleanlyRecordsItsEndAfterItsWork`, `TestAJobThatFailsIsNotFinished`,
+`TestAJobWhoseLeaseIsHeldElsewhereIsNotFinished`, `TestAnExpiryThatLosesItsLeaseMidRunIsNotFinished`,
+`TestAJobStoppedMidRunIsNotFinished`, `TestAFinishThatCannotBeRecordedIsReportedAndDoesNotStopTheOtherJobs`,
+`TestACleanFlushPassRecordsItsEndOnceAndAfterItsWork`, `TestAFlushPassThatDidNotCompleteIsNotFinished` and
+`TestAFlushFinishThatCannotBeRecordedIsReportedAndTheWindowsStillCount` in `app`; and end to end
+`TestTheJobsClearWhatIsAgedAndLeaveTheRest` and `TestAJobThatFailsEveryRunIsStartedAndNeverFinished`.
 
 ---
 

@@ -23,12 +23,23 @@ There is no broker in the default deployment and nothing to scale for one.
 
 ### Maintenance jobs and their leases
 
-`SELECT job, owner, lease_expires_at, now() - last_started_at AS idle FROM notify_job_leases ORDER BY idle DESC`
-shows who holds each job and how long ago a worker last started it. `last_started_at` moves at every grant of the
-lease, so it is the last time any worker ran the job (for an expiry, its last batch). The alarm threshold is the
-lease's life plus a margin, so that a worker that dies is replaced before it fires:
+```sql
+SELECT job, owner, lease_expires_at,
+       now() - last_started_at  AS since_started,
+       now() - last_finished_at AS since_finished
+  FROM notify_job_leases ORDER BY since_started DESC;
+```
 
-| Job | Default interval | Lease | `notify.job.stale` when idle longer than |
+shows who holds each job, how long ago a worker last started it and how long ago one last finished it.
+`last_started_at` moves at every grant of the lease, so it is the last time any worker ran the job (for an
+expiry, its last batch). `last_finished_at` moves only when a run ended cleanly: it did not fail, did not lose
+its lease and was not cut short by a stop ([D52](../specs/001-notification-core/design-decisions.md#d52)). Read
+together they tell three cases apart: both recent, the job works; `since_started` old, no worker is taking it;
+`since_started` recent and `since_finished` old or null, it is taken at every run and does not finish, which is a
+job that fails at every run. The alarm threshold is the lease's life plus a margin, so that a worker that dies is
+replaced before it fires:
+
+| Job | Default interval | Lease | `notify.job.stale` and `notify.job.failing` threshold |
 |---|---|---|---|
 | `retention`, `partition_provision`, `broadcast_cleanup` | 1 h | 2 h | 3 h |
 | `idem_expiry`, `digest_expiry` | 5 min | 10 min | 15 min |
@@ -36,7 +47,8 @@ lease's life plus a margin, so that a worker that dies is replaced before it fir
 | `digest_flush` | 5 s | 30 s | 1 min |
 
 If you change a job's interval (`WithJobInterval`, `WithFlushInterval`), scale its row: three times the interval,
-or the lease's floor of 30 s plus the interval for `digest_flush`. `last_finished_at` is not written.
+or the lease's floor of 30 s plus the interval for `digest_flush`. The same threshold serves both alarms. A job
+that has never finished has a null `last_finished_at`, which the failing alarm counts as old.
 
 ## Alarms worth having
 
@@ -50,7 +62,8 @@ or the lease's floor of 30 s plus the interval for `digest_flush`. `last_finishe
 | `notify.quota.exhausted` | per tenant | A tenant hit its ceiling — abuse, a bug in its producer, or a limit that needs raising |
 | `notify.partition.missing` | this month or next absent from `notifications`, `notification_deliveries` or `dead_letters` (`CheckPartitions.Missing`, one per table and month) | Provisioning lapsed; inserts dated in that month fail. Run `EnsurePartitions` |
 | `notify.partition.unscoped` | any `notifications` partition, at any depth, where recipient scoping does not hold (`CheckPartitions.Unscoped`): row-level security not enabled and forced, the `recipient_scope` policy missing, for one command only or with a different predicate, or any other permissive policy | **Isolation incident.** A partition queried by name would show every recipient's rows. Apply `notify_apply_recipient_scope()` now |
-| `notify.job.stale` | a job's `last_started_at` older than its threshold in the table under [Maintenance jobs](#maintenance-jobs-and-their-leases) | No worker is taking the job. Every lease grant moves `last_started_at`, a holder's renewal included ([D50](../specs/001-notification-core/design-decisions.md#d50)), so a healthy job is never stale. A job that takes its lease and fails every run is not stale either: that is the error handler's report |
+| `notify.job.stale` | a job's `last_started_at` older than its threshold in the table under [Maintenance jobs](#maintenance-jobs-and-their-leases) | No worker is taking the job. Every lease grant moves `last_started_at`, a holder's renewal included ([D50](../specs/001-notification-core/design-decisions.md#d50)), so a healthy job is never stale |
+| `notify.job.failing` | a job's `last_started_at` within its threshold, and its `last_finished_at` null or older than it: `last_started_at > now() - threshold AND (last_finished_at IS NULL OR last_finished_at < now() - threshold)` | The job is taken and does not finish: every run fails (a role that cannot create partitions, a drop that waits on a lock that never clears, a `DELETE` the database refuses) or one run takes longer than the threshold. Find the cause in the error handler's reports and the log; the column says only that no run has ended cleanly since. Evaluate it over a few minutes, not an instant: a job's first run has started and not yet finished ([D52](../specs/001-notification-core/design-decisions.md#d52)) |
 | `notify.db.oldest_xmin_age` | the oldest `backend_xmin` in `pg_stat_activity` older than 60 s (tune to your rate) | A transaction is pinning vacuum, so the queue table will bloat and latency will follow. Find it and end it ([D38](../specs/001-notification-core/design-decisions.md#d38)) |
 | `notify.db.checkpoints_requested` | `checkpoints_req` rising faster than `checkpoints_timed` | Checkpoints are being forced by WAL volume: `max_wal_size` is too small for this write rate |
 | `notify.outbox.dead_tuples` | still rising after the last autovacuum, or `last_autovacuum` older than 5 min | Vacuum is blocked or not keeping up. Tens to hundreds of thousands between runs is normal at 1,000 / s; what matters is that it comes back down |

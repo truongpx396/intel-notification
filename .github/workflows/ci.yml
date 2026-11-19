@@ -14,19 +14,25 @@ concurrency:
 
 jobs:
   schema:
-    name: schema (PostgreSQL 16)
+    name: schema (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    # Two majors, because the code has a branch for each where PostgreSQL moved something
+    # (the checkpoint counters, in 17), and only a run on each holds both (D49).
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
     steps:
       - uses: actions/checkout@v7
       - name: Migration hygiene
         run: make lint-sql
-      # Applies every migration to a throwaway PG16, runs the schema tests as
+      # Applies every migration to a throwaway PostgreSQL, runs the schema tests as
       # the table owner (each raises on failure), and asserts the inherited
       # constraint still cannot be built. If that last one ever passes, D2's
       # premise changed and the build fails loudly rather than carrying a stale
       # decision.
       - name: Verify schema guarantees
-        run: make verify-schema
+        run: make verify-schema PG_IMAGE=postgres:${{ matrix.postgres }}-alpine
 
   unit:
     name: unit tests (no host present)
@@ -45,8 +51,16 @@ jobs:
         run: make test
 
   integration:
-    name: integration tests (Testcontainers)
+    name: integration tests (PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [16, 17]
+    env:
+      # Stated apart from the image below, so a leg whose image never reached the suite
+      # fails instead of passing as a run on a server it did not use (internal/pgtest).
+      PGTEST_EXPECT_MAJOR: ${{ matrix.postgres }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -54,8 +68,8 @@ jobs:
           go-version-file: go.mod
       # Starts PostgreSQL with Testcontainers; every test gets its own database
       # cloned from a migrated template, and runs as the non-superuser owner.
-      - name: Test against PostgreSQL 16
-        run: make test-integration
+      - name: Test against PostgreSQL ${{ matrix.postgres }}
+        run: make test-integration PG_IMAGE=postgres:${{ matrix.postgres }}-alpine
 
   lint:
     name: lint

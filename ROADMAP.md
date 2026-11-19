@@ -75,10 +75,10 @@ And the digest and quota layers (Stage 7): the leased digest flush job, the Redi
 `channel_quotas` reader behind it, and a noisy-neighbour test that holds NS-007 in dispatcher passes. And the maintenance layer (Stage 8), proven against PostgreSQL: the leased jobs that retire aged
 partitions (by dropping them, with a witness that no row is deleted on the way), provision the months ahead and alarm
 on a missing or unscoped one, and expire idempotency keys, digest windows and completed broadcasts; a lease that
-records each job's last run so a stale job can be alarmed on; and `Admin.Erase`, which also forgets the pre-check's
-entries for the recipient's keys. The startup preflight that warns on the role's timeouts, a transaction pinning vacuum
-and an undersized `max_wal_size` is built with two untested corners (the PostgreSQL 17 checkpoint read, and the filter
-that leaves out vacuum's own workers). Not built: the transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics,
+records each job's last start and last clean finish, so a job that is not taken and one that is taken and fails at every
+run can each be alarmed on; and `Admin.Erase`, which also forgets the pre-check's entries for the recipient's keys. The
+startup preflight warns on the role's timeouts, a transaction pinning vacuum and an undersized `max_wal_size`, and is held
+on PostgreSQL 16 and 17. Not built: the transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics,
 templates and addresses).
 Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
@@ -92,7 +92,7 @@ addresses).
 **Required infrastructure: PostgreSQL + Redis.** No message broker: a notification is accepted when
 PostgreSQL commits, workers claim from the queue table, and scheduled jobs are single-owner through row
 leases. NATS JetStream is supported as an optional ingest path for producers that prefer to publish.
-The schema's guarantees are verified against PostgreSQL 16 by `make verify-schema`.
+The schema's guarantees are verified against PostgreSQL 16 and 17 by `make verify-schema` (CI runs both).
 
 The design went through an architecture review after the extraction, recorded as decisions D16–D37.
 It fixed a cross-tenant leak on the live stream, a worker that could not read what it delivered under
