@@ -44,8 +44,21 @@ func (s *Store) TryLeaseJob(ctx context.Context, job, owner string, ttl time.Dur
 	return tag.RowsAffected() == 1, nil
 }
 
+// finishJobSQL records a clean end, for the job's owner only. A row that is another worker's, or
+// that does not exist, is not touched, so the ask is a no-op for a worker that lost the job (D52).
+// The instant is the database's, as last_started_at's is, so the two can be compared.
+const finishJobSQL = `
+UPDATE notify_job_leases SET last_finished_at = now()
+ WHERE job = $1 AND owner = $2`
+
 // FinishJob implements ports.Maintenance.
 func (s *Store) FinishJob(ctx context.Context, job, owner string) error {
+	if job == "" || owner == "" {
+		return fmt.Errorf("finish job: job and owner are required")
+	}
+	if _, err := s.pool.Exec(ctx, finishJobSQL, job, owner); err != nil {
+		return fmt.Errorf("finish job %s: %w", job, err)
+	}
 	return nil
 }
 

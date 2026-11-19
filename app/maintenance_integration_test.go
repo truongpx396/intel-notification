@@ -4,7 +4,9 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +31,7 @@ type countingMaintenance struct {
 	mu          sync.Mutex
 	calls       map[string]int
 	noProvision bool
+	idemErr     error // when set, the idempotency expiry fails, as a database that refuses its DELETE would
 }
 
 func newCounting(m ports.Maintenance) *countingMaintenance {
@@ -54,6 +57,9 @@ func (c *countingMaintenance) RetirePartitions(ctx context.Context, table string
 
 func (c *countingMaintenance) ExpireIdem(ctx context.Context, olderThan time.Time, batch int) (int, error) {
 	c.note("expire_idem")
+	if c.idemErr != nil {
+		return 0, c.idemErr
+	}
 	return c.Maintenance.ExpireIdem(ctx, olderThan, batch)
 }
 
@@ -218,11 +224,55 @@ func TestTheJobsClearWhatIsAgedAndLeaveTheRest(t *testing.T) {
 			t.Errorf("the lease row of %s names %q (%v), want worker-a: notify_job_leases is how an operator sees who runs what", job, owner, err)
 		}
 	}
+	// Each job that ran cleanly says so (D52), and says it after it began.
+	if n := count(t, e, `SELECT count(*) FROM notify_job_leases
+	                      WHERE last_finished_at IS NOT NULL AND last_finished_at >= last_started_at`); n != 6 {
+		t.Errorf("%d of the 6 jobs recorded a clean end after their start, want all 6: the stale-and-failing alarms read it", n)
+	}
 	if n := e.Metrics.Count(domain.MetricPartitionMissing) + e.Metrics.Count(domain.MetricPartitionUnscoped); n != 0 {
 		t.Errorf("%d partition alarms on a healthy catalog, want none", n)
 	}
 	if _, ok := e.Metrics.GaugeValue(domain.MetricDBOldestXminAge); !ok {
 		t.Error("the preflight set no notify.db.oldest_xmin_age gauge")
+	}
+}
+
+// A job that takes its lease and fails at every run is the case the last start cannot show: it
+// moves at every run, so the job looks alive. The last finish does not move, and the table says
+// so. Two passes, an interval apart, on a database whose idempotency expiry always fails: the
+// failing job's start is recent and its end is nothing, and every other job's end is recorded
+// (D52). The age is the database's own clock, which a test does not move: the start is "recent"
+// and the end is absent, and nothing needs to wait for either.
+func TestAJobThatFailsEveryRunIsStartedAndNeverFinished(t *testing.T) {
+	t.Parallel()
+	e, _ := emailEnv(t)
+	store := newCounting(e.Maintenance)
+	store.idemErr = errors.New("the database refuses the delete")
+	m := maintainer(t, e, store, "worker-a")
+
+	for pass := 1; pass <= 2; pass++ {
+		ran, err := m.Pass(t.Context())
+		if err == nil || !strings.Contains(err.Error(), app.JobIdemExpiry) {
+			t.Fatalf("pass %d: Pass = %v, want the expiry's fault", pass, err)
+		}
+		if len(ran) != 6 {
+			t.Fatalf("pass %d ran %v, want every job: a job that failed still ran", pass, ran)
+		}
+		e.Clock.Advance(2 * time.Hour) // every job is due again
+	}
+
+	var started bool
+	var finished *time.Time
+	if err := e.DB.Admin.QueryRow(t.Context(), `
+		SELECT last_started_at > now() - interval '1 minute', last_finished_at
+		  FROM notify_job_leases WHERE job = $1`, app.JobIdemExpiry).Scan(&started, &finished); err != nil {
+		t.Fatal(err)
+	}
+	if !started || finished != nil {
+		t.Fatalf("the failing job: started recently = %v, last finish = %v, want recent and never: it takes its lease at every run and finishes none", started, finished)
+	}
+	if n := count(t, e, `SELECT count(*) FROM notify_job_leases WHERE job <> $1 AND last_finished_at IS NOT NULL`, app.JobIdemExpiry); n != 5 {
+		t.Fatalf("%d of the 5 jobs that worked recorded their end, want all 5: one job's fault is not another's", n)
 	}
 }
 

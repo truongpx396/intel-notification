@@ -206,6 +206,11 @@ func defaultMaintenanceOwner() string {
 // skipped without error and is not in the list. A job that fails is reported in the error,
 // joined with the others' and does not stop them, and still counts as having run: it is
 // tried again at its next interval, and not at every tick until it works.
+//
+// A job that ran to its end records it (Maintenance.FinishJob, D52): it held the lease
+// throughout, it did not fail and the worker was not told to stop. That is what separates a
+// job that works from one that takes its lease at every run and fails at every one, which the
+// last start (D50) cannot tell apart. A finish that cannot be recorded is a fault of the job.
 func (m *Maintenance) Pass(ctx context.Context) ([]string, error) {
 	var (
 		ran  []string
@@ -219,13 +224,13 @@ func (m *Maintenance) Pass(ctx context.Context) ([]string, error) {
 		if !m.due(j.name, now) {
 			continue
 		}
-		held := false
+		held, refused := false, false
 		lease := func() (bool, error) {
 			ok, err := m.store.TryLeaseJob(ctx, j.name, m.owner, m.leaseTTL(j.name))
 			if err != nil {
 				return false, fmt.Errorf("lease the %s job: %w", j.name, err)
 			}
-			held = held || ok
+			held, refused = held || ok, refused || !ok
 			return ok, nil
 		}
 		err := j.run(ctx, now, lease)
@@ -234,6 +239,13 @@ func (m *Maintenance) Pass(ctx context.Context) ([]string, error) {
 			m.lastRun[j.name] = now
 			m.mu.Unlock()
 			ran = append(ran, j.name)
+		}
+		// Every job asks for its lease before it works, so a job that never held it was refused,
+		// and one refused at any point lost it to a worker that owns the rest.
+		if err == nil && !refused && ctx.Err() == nil {
+			if ferr := m.store.FinishJob(ctx, j.name, m.owner); ferr != nil {
+				errs = append(errs, fmt.Errorf("finish the %s job: %w", j.name, ferr))
+			}
 		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", j.name, err))
