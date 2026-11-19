@@ -2,6 +2,15 @@ package domain
 
 import "time"
 
+// The range-partitioned tables, which provisioning keeps ahead of the clock and
+// retention retires by age (NR-022, D33). Maintenance names them in these words, so a
+// gap, an alarm and a retirement all say the table the same way.
+const (
+	TableNotifications = "notifications"
+	TableDeliveries    = "notification_deliveries"
+	TableDeadLetters   = "dead_letters"
+)
+
 // PartitionGap is a month a range-partitioned table has no partition for. An
 // insert dated inside it fails, because there is no default partition to catch
 // it (D33).

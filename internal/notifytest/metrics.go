@@ -19,9 +19,13 @@ type MetricEvent struct {
 type Metrics struct {
 	mu     sync.Mutex
 	events []MetricEvent
+	gauges map[string]float64
 }
 
-var _ ports.Metrics = (*Metrics)(nil)
+var (
+	_ ports.Metrics      = (*Metrics)(nil)
+	_ ports.GaugeMetrics = (*Metrics)(nil)
+)
 
 // NewMetrics returns a Metrics that has counted nothing.
 func NewMetrics() *Metrics { return &Metrics{} }
@@ -69,4 +73,24 @@ func (m *Metrics) Events() []MetricEvent {
 		out[i] = MetricEvent{Name: e.Name, Labels: maps.Clone(e.Labels)}
 	}
 	return out
+}
+
+// Gauge implements ports.GaugeMetrics. A gauge is kept by name, whatever its labels, and
+// is not an increment: Count does not see it.
+func (m *Metrics) Gauge(name string, value float64, _ map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gauges == nil {
+		m.gauges = map[string]float64{}
+	}
+	m.gauges[name] = value
+}
+
+// GaugeValue is the last value the gauge called name was set to, and whether it was
+// ever set.
+func (m *Metrics) GaugeValue(name string) (float64, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.gauges[name]
+	return v, ok
 }

@@ -383,6 +383,16 @@ type Metrics interface {
 	Inc(name string, labels map[string]string)
 }
 
+// GaugeMetrics is the optional second half of Metrics: a Metrics that implements it is
+// also given the levels that are not counts, such as the age of the oldest open
+// transaction (domain.MetricDBOldestXminAge). A Metrics that does not is simply not
+// given them, and the engine does not say so: a counter cannot hold a level.
+type GaugeMetrics interface {
+	Metrics
+	// Gauge sets the gauge called name, for the given labels, to value.
+	Gauge(name string, value float64, labels map[string]string)
+}
+
 // StepHook is called as the dispatcher reaches each of its nine steps, before the
 // step does its work (domain.DispatchStep). It exists so a test can stand in for a
 // worker that is held at a step, or that dies there: an implementation may block,
