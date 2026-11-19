@@ -23,7 +23,10 @@ import (
 // witnessSQL records, in a table of its own, every row a DELETE removes from a partition
 // it is attached to. A partition retired by DROP removes no row, so the witness stays
 // empty; a retirement that deleted first and dropped after would be a mass purge (NR-022)
-// and fills it. The function runs with its creator's rights, so the owner role the engine
+// and fills it, if it runs as a role that can reach the rows. The store's own role cannot:
+// without a recipient scope its forced row-level security shows it no row of the inbox, so a
+// DELETE by it deletes nothing and leaves the witness empty. That a DELETE which does reach rows is
+// recorded is shown by TestTheRetirementWitnessRecordsADeletion, so an empty witness means something. The function runs with its creator's rights, so the owner role the engine
 // runs as needs no privilege on the witness. n_tup_del is not used for this: a partitioned
 // parent keeps no statistics of its own, a dropped partition takes its with it, and the
 // statistics are reported to the collector after the statement and not with it.
@@ -78,6 +81,29 @@ func utc(y int, m time.Month, d int) time.Time { return time.Date(y, m, d, 0, 0,
 
 // NR-022, D33. Retiring is dropping whole partitions: no row is deleted, whatever the
 // partition held, and what is not retired is not touched.
+func TestTheRetirementWitnessRecordsADeletion(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.notification(ident("w1", "u1"), "sept-a")
+	e.watch("notifications_2026m09")
+
+	// The store's role, with no recipient scope, sees no row of the inbox: its DELETE deletes
+	// nothing, and so records nothing. That is why a witness that stays empty is not enough by
+	// itself, and why the control below is needed.
+	tag, err := e.db.Owner.Exec(t.Context(), `DELETE FROM notifications_2026m09`)
+	if err != nil || tag.RowsAffected() != 0 {
+		t.Fatalf("the store's role deleted %d rows of the inbox (%v) with no recipient scope: row-level security is not holding", tag.RowsAffected(), err)
+	}
+	if n := e.count(`SELECT count(*) FROM retire_witness`); n != 0 {
+		t.Fatalf("the witness holds %d rows before any row was deleted", n)
+	}
+
+	e.admin(`DELETE FROM notifications_2026m09`) // a superuser reaches the row
+	if n := e.count(`SELECT count(*) FROM retire_witness WHERE tbl = 'notifications_2026m09'`); n != 1 {
+		t.Fatalf("the witness holds %d rows after a row was deleted, want 1: an empty witness after a retirement would prove nothing", n)
+	}
+}
+
 func TestRetirePartitionsDropsWholePartitionsAndDeletesNoRow(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -324,8 +350,8 @@ func TestRetirementWaitsOnlyBrieflyForALockAndSkipsThePartitionItCannotLock(t *t
 	if !slices.Equal(retired, []string{"notifications_2026m10"}) {
 		t.Fatalf("retired %v, want only notifications_2026m10: the locked partition is skipped and the next is not held up by it", retired)
 	}
-	if err == nil || !strings.Contains(err.Error(), "notifications_2026m09") {
-		t.Fatalf("err = %v, want it to name the partition that was skipped", err)
+	if err == nil || !strings.Contains(err.Error(), "notifications_2026m09") || !strings.Contains(err.Error(), "skipped") {
+		t.Fatalf("err = %v, want it to name the partition and say it was skipped: a lock that ran out is not a failure, and the operator is told the next call finds it again", err)
 	}
 	if !slices.Contains(e.partitions(domain.TableNotifications), "notifications_2026m09") {
 		t.Fatal("the locked partition was dropped")

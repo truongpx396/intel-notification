@@ -504,8 +504,10 @@ SELECT idem_key FROM notify_idem
  ORDER BY idem_key COLLATE "C"
  LIMIT $7`
 
-// IdemKeys implements ports.Maintenance. It runs under the recipient's own scope, as Erase
-// does, so the policy bounds what it can read to that recipient.
+// IdemKeys implements ports.Maintenance. notify_idem is a worker-only table with no
+// recipient policy, so nothing but the identity predicate bounds the read to one recipient
+// (TestIdemKeys fails without it). The scope is set all the same, as Erase sets it, so the
+// read is made under the identity it is for.
 func (s *Store) IdemKeys(ctx context.Context, id domain.Identity, after string, limit int) ([]string, error) {
 	if limit < 1 {
 		return nil, fmt.Errorf("idempotency keys: limit must be >= 1, got %d", limit)

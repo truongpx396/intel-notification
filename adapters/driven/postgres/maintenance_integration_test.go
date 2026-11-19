@@ -4,6 +4,8 @@ package postgres
 
 import (
 	"context"
+	"fmt"
+	"math/rand/v2"
 	"slices"
 	"testing"
 	"time"
@@ -108,12 +110,23 @@ func TestIdemKeys(t *testing.T) {
 	e := newEnv(t)
 	ctx := t.Context()
 	u1 := ident("w1", "u1")
+	// The column is given a locale-aware collation, under which "a" sorts before "B", so that the
+	// order IdemKeys promises is not one the database would give anyway. The control below shows it.
+	e.admin(`ALTER TABLE notify_idem ALTER COLUMN idem_key TYPE text COLLATE "en-x-icu"`)
 	for _, k := range []string{"b", "a", "B", "invoice:42", "c"} {
 		e.notification(u1, k)
 	}
 	e.notification(ident("w1", "u2"), "of-another-recipient")
 	e.notification(ident("w2", "u1"), "of-another-tenant")
 	want := []string{"B", "a", "b", "c", "invoice:42"}
+	var localeOrder string
+	if err := e.db.Admin.QueryRow(ctx, `SELECT string_agg(idem_key, ',' ORDER BY idem_key) FROM notify_idem
+	                                    WHERE recipient_id = 'u1' AND tenant_id = 'w1'`).Scan(&localeOrder); err != nil {
+		t.Fatal(err)
+	}
+	if localeOrder == "B,a,b,c,invoice:42" {
+		t.Fatalf("the column's own collation already orders %q bytewise: the control has no teeth", localeOrder)
+	}
 
 	got, err := e.s.IdemKeys(ctx, u1, "", 100)
 	if err != nil || !slices.Equal(got, want) {
@@ -614,20 +627,21 @@ INSERT INTO notification_broadcasts (realm, tenant_kind, tenant_id, idem_key, au
 VALUES ('aisat', 'workspace', 'w1', $1, 'everyone', '{}'::jsonb, $2, $3, '2026-06-01')`, key, status, completed)
 	}
 	old, recent := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	cutoff := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	for _, k := range []string{"old-1", "old-2", "old-3"} {
 		insert(k, "completed", &old)
 	}
 	insert("recent", "completed", &recent)
+	insert("at-the-cutoff", "completed", &cutoff) // not older than the cutoff, so it stays
 	insert("pending-and-ancient", "pending", nil)
 
-	cutoff := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 	batches := []struct{ batch, want int }{{2, 2}, {2, 1}, {2, 0}}
 	for i, b := range batches {
 		if n, err := e.s.ExpireBroadcasts(t.Context(), cutoff, b.batch); err != nil || n != b.want {
 			t.Fatalf("batch %d: expired %d (%v), want %d", i+1, n, err, b.want)
 		}
 	}
-	for key, want := range map[string]int{"old-1": 0, "old-2": 0, "old-3": 0, "recent": 1, "pending-and-ancient": 1} {
+	for key, want := range map[string]int{"old-1": 0, "old-2": 0, "old-3": 0, "recent": 1, "at-the-cutoff": 1, "pending-and-ancient": 1} {
 		if got := e.count(`SELECT count(*) FROM notification_broadcasts WHERE idem_key = $1`, key); got != want {
 			t.Errorf("broadcast %s: %d rows, want %d", key, got, want)
 		}
@@ -650,6 +664,81 @@ func (e *env) storeWith(settings ...string) *Store {
 	}
 	e.t.Cleanup(pool.Close)
 	return New(pool, WithClock(e.clock))
+}
+
+// The age that matters is the oldest transaction's, not the newest's or an average (D49). The
+// two transactions begin 250 ms apart by the database's own clock, which no fake clock can move
+// (pg_sleep is the wait, and nothing here sleeps in Go), so the reading is at least that old when
+// the oldest is read and about nothing when the youngest is.
+func TestDatabaseConditionsReadsTheOldestTransactionNotTheNewest(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	first, err := e.db.Owner.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Rollback(t.Context()) }()
+	if _, err := first.Exec(t.Context(), `SELECT count(*) FROM notification_outbox`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := first.Exec(t.Context(), `SELECT pg_sleep(0.25)`); err != nil {
+		t.Fatal(err)
+	}
+	second, err := e.db.Owner.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Rollback(t.Context()) }()
+	if _, err := second.Exec(t.Context(), `SELECT count(*) FROM notification_outbox`); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := e.storeWith().DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OldestTransactionAge < 200*time.Millisecond {
+		t.Fatalf("OldestTransactionAge = %v with one transaction 250ms older than the other, want at least 200ms: the oldest is the one that pins vacuum longest", c.OldestTransactionAge)
+	}
+}
+
+// A role that is neither a superuser nor the owner can still see every session if it is a member of
+// pg_read_all_stats, and the reading must say so (D49). The role is made for the test and dropped
+// after it, because roles are cluster-wide and the shared owner must not be granted anything.
+func TestDatabaseConditionsSeesEverySessionThroughPgReadAllStats(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	role := fmt.Sprintf("stats_reader_%d", rand.Uint32())
+	quoted := pgx.Identifier{role}.Sanitize()
+	e.admin(`CREATE ROLE ` + quoted + ` LOGIN PASSWORD 'reader' NOSUPERUSER NOBYPASSRLS`)
+	t.Cleanup(func() { _, _ = e.db.Admin.Exec(context.Background(), `DROP ROLE IF EXISTS `+quoted) })
+	pool := func() *Store {
+		t.Helper()
+		cfg := e.db.Owner.Config().Copy()
+		cfg.ConnConfig.User, cfg.ConnConfig.Password = role, "reader"
+		p, err := pgxpool.NewWithConfig(t.Context(), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.Close)
+		return New(p, WithClock(e.clock))
+	}
+
+	before, err := pool().DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.SeesAllSessions {
+		t.Fatal("a role that is neither a superuser nor a member of pg_read_all_stats is reported as seeing every session")
+	}
+	e.admin(`GRANT pg_read_all_stats TO ` + quoted)
+	after, err := pool().DatabaseConditions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.SeesAllSessions {
+		t.Fatal("a member of pg_read_all_stats is reported as not seeing every session, and the preflight would warn about a blindness it does not have")
+	}
 }
 
 // NR-037, D38. DatabaseConditions reads what the queue depends on and judges none of it.
