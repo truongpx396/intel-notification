@@ -1,6 +1,9 @@
 package domain
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // Problem is one rule a value breaks, named by the field at fault.
 type Problem struct {
@@ -43,6 +46,18 @@ func (e *ValidationError) Unwrap() []error {
 
 func (e *ValidationError) add(field, message string, sentinel error) {
 	e.Problems = append(e.Problems, Problem{Field: field, Message: message, Err: sentinel})
+}
+
+// idemKey checks a producer's idempotency key: present, and within the bound the schema
+// holds. whose is the possessive that says what the key is the exactly-once identity of
+// ("the broadcast's"), for the message.
+func (e *ValidationError) idemKey(whose, key string) {
+	switch {
+	case key == "":
+		e.add("IdemKey", fmt.Sprintf("is required: it is %s exactly-once identity", whose), ErrMissingIdem)
+	case len(key) > MaxIdemKeyBytes:
+		e.add("IdemKey", fmt.Sprintf("is %d bytes, the limit is %d", len(key), MaxIdemKeyBytes), nil)
+	}
 }
 
 // err returns e, or nil when no problem was found.

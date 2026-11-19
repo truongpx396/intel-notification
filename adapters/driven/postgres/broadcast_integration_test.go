@@ -419,7 +419,13 @@ func TestCommitBroadcastPageIsFencedByTheLeaseToken(t *testing.T) {
 			held := e.leaseBroadcast()
 			stale := tc.job(e, held)
 
-			err := e.s.CommitBroadcastPage(t.Context(), stale, pageOf("launch", "u1", "u2"), "c2", false)
+			// The page is consistent with the job it is committed under, so it is the fence
+			// that refuses it and not the check that a page is its broadcast's tenant's.
+			page := pageOf("launch", "u1", "u2")
+			for i := range page {
+				page[i].Notification.Tenant = stale.Request.Tenant
+			}
+			err := e.s.CommitBroadcastPage(t.Context(), stale, page, "c2", false)
 			if !errors.Is(err, domain.ErrBroadcastLeaseLost) {
 				t.Fatalf("CommitBroadcastPage = %v, want ErrBroadcastLeaseLost: %s", err, tc.why)
 			}
