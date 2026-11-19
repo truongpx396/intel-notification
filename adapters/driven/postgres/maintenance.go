@@ -17,14 +17,19 @@ import (
 // leaseJobSQL takes or renews a job's single-owner lease (D22). The conflict
 // update applies only when the lease has lapsed or the caller already holds it;
 // otherwise it affects no row.
+//
+// last_started_at moves with every grant, the holder's renewal included, because a job
+// asks for its lease each time it runs, and a worker that keeps its jobs is the case the
+// column has to describe: kept on a renewal it would say when the worker first took the job,
+// and the stale-job alarm would fire for every healthy one (D50). A refused ask changes
+// nothing.
 const leaseJobSQL = `
 INSERT INTO notify_job_leases AS l (job, owner, lease_expires_at, last_started_at)
 VALUES ($1, $2, now() + $3::bigint * interval '1 microsecond', now())
 ON CONFLICT (job) DO UPDATE
    SET owner            = EXCLUDED.owner,
        lease_expires_at = EXCLUDED.lease_expires_at,
-       last_started_at  = CASE WHEN l.owner = EXCLUDED.owner
-                               THEN l.last_started_at ELSE EXCLUDED.last_started_at END
+       last_started_at  = EXCLUDED.last_started_at
  WHERE l.lease_expires_at < now() OR l.owner = EXCLUDED.owner`
 
 // TryLeaseJob implements ports.Maintenance.

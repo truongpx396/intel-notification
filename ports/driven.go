@@ -83,7 +83,10 @@ type Digests interface {
 // Maintenance holds the single-owner jobs' operations (D11, D21, D22, D35).
 type Maintenance interface {
 	// TryLeaseJob takes or renews the lease for a scheduled job. True when owner
-	// now holds it; false while another owner's lease is live.
+	// now holds it; false while another owner's lease is live. Every grant, the
+	// holder's renewal included, records the instant as the job's last start, and a
+	// refusal records nothing, so a stale-job alarm can read how long ago any worker
+	// last ran it (D50).
 	TryLeaseJob(ctx context.Context, job, owner string, ttl time.Duration) (bool, error)
 
 	// RehomeShards folds rows in shards >= shards into live ones, after the
