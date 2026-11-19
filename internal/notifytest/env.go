@@ -118,6 +118,9 @@ type Env struct {
 	Quotas    *QuotaCounter
 	Addresses *AddressBook
 	Templates *Templates
+	// Audiences resolves the host selectors a broadcast names, two members a page so a
+	// small audience still spans pages (D7). The Notifier is built over it.
+	Audiences *Audiences
 
 	Queue       ports.Queue
 	Digests     ports.Digests
@@ -170,6 +173,7 @@ func NewEnv(tb testing.TB, opts ...Option) *Env {
 		Quotas:       NewQuotaCounter(),
 		Addresses:    NewAddressBook(),
 		Templates:    NewTemplates("en"),
+		Audiences:    NewAudiences(2),
 		Queue:        store,
 		Digests:      store,
 		Maintenance:  store,
@@ -196,6 +200,7 @@ func NewEnv(tb testing.TB, opts ...Option) *Env {
 		Prefs:         e.Prefs,
 		Quotas:        e.Quotas,
 		QuotaPolicies: e.Quotas,
+		Audience:      e.Audiences,
 		Store:         e.Store,
 		Queue:         e.Queue,
 		PreCheck:      e.PreCheck,
@@ -228,6 +233,22 @@ func (e *Env) DispatcherDeps() app.Deps {
 		QuotaPolicies: e.Quotas,
 		Metrics:       e.Metrics,
 		Steps:         e.Faults,
+		Clock:         e.Clock,
+	}
+}
+
+// BroadcastDeps is what a BroadcastExpander over the Env is built from: the planner's
+// ports, the Env's real Store and its Audiences. A case builds its own expander, with the
+// page size and lease it needs, and wraps the Store to cut a run short where it wants to.
+func (e *Env) BroadcastDeps() app.Deps {
+	return app.Deps{
+		Channels:      e.Channels,
+		Topics:        e.Topics,
+		Prefs:         e.Prefs,
+		Quotas:        e.Quotas,
+		QuotaPolicies: e.Quotas,
+		Audience:      e.Audiences,
+		Store:         e.Store,
 		Clock:         e.Clock,
 	}
 }
