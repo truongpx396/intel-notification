@@ -38,9 +38,6 @@ import (
 )
 
 const (
-	// Image is the PostgreSQL the schema is verified against.
-	Image = "postgres:16-alpine"
-
 	ownerRole     = "notify_owner"
 	ownerPassword = "owner"
 	templateDB    = "notify_template"
@@ -94,7 +91,10 @@ func start(ctx context.Context, prepare Prepare) (*cluster, error) {
 	for _, setting := range strings.Fields(os.Getenv("PGTEST_SETTINGS")) {
 		args = append(args, "-c", setting)
 	}
-	ctr, err := tcpostgres.Run(ctx, Image,
+	// PGTEST_IMAGE runs the suite against another PostgreSQL, `make test-integration
+	// PG_IMAGE=postgres:17-alpine` for one. The default is the version the project supports.
+	image := imageFrom(os.Getenv("PGTEST_IMAGE"))
+	ctr, err := tcpostgres.Run(ctx, image,
 		tcpostgres.WithDatabase("postgres"),
 		tcpostgres.WithUsername("postgres"),
 		tcpostgres.WithPassword("postgres"),
@@ -103,7 +103,7 @@ func start(ctx context.Context, prepare Prepare) (*cluster, error) {
 	)
 	c := &cluster{container: ctr}
 	if err != nil {
-		return c, fmt.Errorf("start %s: %w", Image, err)
+		return c, fmt.Errorf("start %s: %w", image, err)
 	}
 	dsn, err := ctr.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
@@ -114,6 +114,9 @@ func start(ctx context.Context, prepare Prepare) (*cluster, error) {
 	}
 	c.super.MaxConns = 4
 	if c.admin, err = pgxpool.NewWithConfig(ctx, c.super); err != nil {
+		return c, err
+	}
+	if err := c.checkServer(ctx, image); err != nil {
 		return c, err
 	}
 	for _, stmt := range []string{
@@ -139,6 +142,19 @@ func start(ctx context.Context, prepare Prepare) (*cluster, error) {
 		}
 	}
 	return c, nil
+}
+
+// checkServer says which PostgreSQL the run is on, once, and refuses one that is not the major
+// PGTEST_EXPECT_MAJOR names (checkMajor): a CI leg for another major must not pass on this one.
+func (c *cluster) checkServer(ctx context.Context, image string) error {
+	var num int
+	var version string
+	if err := c.admin.QueryRow(ctx,
+		`SELECT current_setting('server_version_num')::int, current_setting('server_version')`).Scan(&num, &version); err != nil {
+		return fmt.Errorf("read the server's version: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "pgtest: PostgreSQL %s (%s)\n", version, image)
+	return checkMajor(os.Getenv("PGTEST_EXPECT_MAJOR"), num)
 }
 
 // buildTemplate applies every migration as the superuser, then hands every

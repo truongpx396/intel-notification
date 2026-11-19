@@ -83,8 +83,17 @@ build: ## Build every package
 test: ## Unit tests: no Docker, no network
 	$(GOTEST) ./...
 
-test-integration: ## Integration tests against PostgreSQL via Testcontainers (needs Docker)
-	$(GOTEST) -tags integration ./...
+test-integration: ## Integration tests against PostgreSQL via Testcontainers (needs Docker; PG_IMAGE= picks the major)
+	PGTEST_IMAGE=$(PG_IMAGE) $(GOTEST) -tags integration ./...
+
+# The checkpoint counters moved views in PostgreSQL 17, so the code has a branch for each major
+# and only a run on each holds both. CI runs both; this is the second one, by hand. The expected
+# major is stated apart from the image, so a run that did not start 17 fails instead of passing.
+PG_NEXT_IMAGE ?= postgres:17-alpine
+PG_NEXT_MAJOR ?= 17
+.PHONY: test-pg-next
+test-pg-next: ## verify-schema and the integration tests on PostgreSQL 17 (needs Docker)
+	$(MAKE) verify-schema test-integration PG_IMAGE=$(PG_NEXT_IMAGE) PGTEST_EXPECT_MAJOR=$(PG_NEXT_MAJOR)
 
 # Not in `make ci`: it spends a real provider's sending quota and needs credentials
 # (NOTIFY_PROVIDER_RESEND_API_KEY). It is the only way to show a provider dedupes.
