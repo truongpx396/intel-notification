@@ -36,6 +36,19 @@ var (
 	// ErrNotReplayable is returned for a dead letter that holds no queue row to re-drive: one
 	// parked by the bus ingest (reason poison), which the producer must resend (NR-007).
 	ErrNotReplayable = errors.New("notify: this dead letter has no delivery to replay")
+	// ErrTooManyRecipients is returned for a broadcast whose inline recipient list is
+	// longer than Config.MaxInlineRecipients: a bigger audience is a selector the host
+	// resolves in pages, not a list the request carries (NR-020, D31).
+	ErrTooManyRecipients = errors.New("notify: an inline recipient list is over the limit; use an audience selector")
+	// ErrAudienceUnsupported is returned for a broadcast that names an audience selector
+	// when the engine was built with no AudienceResolver, so it can only expand an inline
+	// recipient list (D7, D31).
+	ErrAudienceUnsupported = errors.New("notify: no AudienceResolver is configured, so a broadcast takes an inline recipient list")
+	// ErrBroadcastLeaseLost is returned by CommitBroadcastPage when the lease the page was
+	// expanded under is no longer the broadcast's: it lapsed and another worker took the
+	// page, or the broadcast is done. Nothing was written. The worker that meets it does
+	// not retry the page, because the one that holds the lease will (NR-020, D7).
+	ErrBroadcastLeaseLost = errors.New("notify: the broadcast's lease was lost; the page was not committed")
 	// ErrPermanent is wrapped by a driven port to say a fault is one no retry can fix:
 	// a Redis that refuses the command for this user, or does not have it. A channel
 	// that meets it reports Rejected rather than Retry, so the delivery is dead-lettered

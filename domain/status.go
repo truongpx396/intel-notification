@@ -26,6 +26,12 @@ type BroadcastRequest struct {
 	IdemKey string
 }
 
+// Validate reports every rule b breaks, as a *ValidationError, or nil. maxInline is
+// Config.MaxInlineRecipients. T042's stub: it accepts everything until T041.
+func (b BroadcastRequest) Validate(maxInline int) error {
+	return nil
+}
+
 // BroadcastReceipt is the outcome of Broadcast.
 type BroadcastReceipt struct {
 	BroadcastID string
