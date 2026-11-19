@@ -78,8 +78,11 @@ on a missing or unscoped one, and expire idempotency keys, digest windows and co
 records each job's last start and last clean finish, so a job that is not taken and one that is taken and fails at every
 run can each be alarmed on; and `Admin.Erase`, which also forgets the pre-check's entries for the recipient's keys. The
 startup preflight warns on the role's timeouts, a transaction pinning vacuum and an undersized `max_wal_size`, and is held
-on PostgreSQL 16 and 17. Not built: the transports, `Notifier.Broadcast`, and the adapters behind them (broadcast, topics,
-templates and addresses).
+on PostgreSQL 16 and 17. And broadcast (Stage 9): `Notifier.Broadcast` records a durable row and returns, and the
+leased `BroadcastExpander` notifies the audience a page at a time, committing each page with the cursor's advance in one
+transaction fenced by the lease token, so a crash between pages resumes at the next, a crash inside one rolls the page back
+as a whole, and a retried broadcast notifies nobody twice; the same expansion respects each recipient's preferences, quiet
+hours and tenant quota. Not built: the transports, and the adapters behind them (topics, templates and addresses).
 Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
 → [specs/001-notification-core](specs/001-notification-core/)

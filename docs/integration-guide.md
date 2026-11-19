@@ -5,8 +5,8 @@ templates, addresses and an identity binding — as Go code in library mode, or 
 service mode — and you touch nothing in the delivery core.
 
 > The transports and the one-call `New` are not built yet, so the code here describes the intended API.
-> The notifier, the channels (in-app, email, webhook, failover) and the dispatcher are built, and are wired
-> by hand from their constructors for now. The **checklist** and the **reasoning** are usable today — they
+> The notifier, the channels (in-app, email, webhook, failover), the dispatcher and the broadcast
+> expander are built, and are wired by hand from their constructors for now. The **checklist** and the **reasoning** are usable today — they
 > are what the design is for.
 
 ## 0. Pick a mode
@@ -168,6 +168,13 @@ the service directly.
 Any number of worker replicas may run the dispatcher and maintenance: claims are leased row by row and
 jobs are single-owner through leases. See [operations.md](operations.md).
 
+`Notifier.Broadcast` only records the broadcast; something has to expand it. Until the one-call `New`
+composes it into `Jobs`, that is its own loop, built from the same `Deps`: `expander, _ :=
+app.NewBroadcastExpander(cfg, deps)` and `go expander.Run(ctx)`. Run it in every worker: a page has one
+holder at a time, and a worker that dies mid-broadcast leaves it to the next
+([D53](../specs/001-notification-core/design-decisions.md#d53)). Give `Deps.Audience` if you broadcast to
+selectors; without it only an inline list of at most `MaxInlineRecipients` is accepted.
+
 ## 8. Service mode, end to end, from any language
 
 1. Get a producer credential bound to your realm.
@@ -198,7 +205,7 @@ Tick per host. This is the originating design's checklist, extended by the revie
 - [ ] **Addresses** — every address per channel; a miss is terminal, not a retry.
 - [ ] **Audiences** — paged resolver, `Directory` callback, or inline lists.
 - [ ] **Transactional producers use `NotifyTx`**; the rest retry `Notify` with a stable key.
-- [ ] **Dispatcher and maintenance running.**
+- [ ] **Dispatcher and maintenance running**, and the broadcast expander if you broadcast.
 - [ ] **Quotas configured** — a realm-wide default row in `channel_quotas` at minimum, if you are
       multi-tenant: a tenant with no row and no default is unlimited and is not counted
       ([D45](../specs/001-notification-core/design-decisions.md#d45)).
