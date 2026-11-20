@@ -118,22 +118,40 @@ func TestDirectoryRoutesByRealmAndAnUnservedRealmHasNone(t *testing.T) {
 // resumes at the page and does not commit a short one.
 func TestADirectoryThatDoesNotAnswerInTimeFailsThePageAndReturnsNothing(t *testing.T) {
 	t.Parallel()
-	conn, srv := serveDirectory(t, func(ctx context.Context, _ *notifyv1.ResolveAudienceRequest) (*notifyv1.ResolveAudienceResponse, error) {
+	conn, srv := serveDirectory(t, func(ctx context.Context, req *notifyv1.ResolveAudienceRequest) (*notifyv1.ResolveAudienceResponse, error) {
+		if req.GetCursor() == "warm" {
+			return page("u1"), nil // answers at once: it only brings the connection up
+		}
 		<-ctx.Done() // the host never answers
 		return nil, ctx.Err()
 	})
-	const timeout = 20 * time.Millisecond
+	const timeout = 100 * time.Millisecond
 	d := grpcclient.NewDirectory(map[domain.Realm]grpc.ClientConnInterface{"alpha": conn}, grpcclient.WithDirectoryTimeout(timeout))
+	tenant := domain.Tenant{Kind: "w", ID: "1"}
+	// The connection is dialled lazily and is slow when the machine is busy, and a deadline that runs out before
+	// the host has seen the call proves nothing about the host. So the connection is brought up first, with a
+	// call that is answered, and the timed call then measures the host's silence and not the dial.
+	warmCtx, cancelWarm := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancelWarm()
+	if _, _, err := d.Resolve(warmCtx, "alpha", tenant, "all", "warm"); err != nil {
+		t.Fatalf("the warm-up call = %v", err)
+	}
+	<-srv.remaining
 	// The caller's own deadline is far away: it is only here so that a client that set no timeout of its
 	// own fails the check below after a few seconds and does not wait for ever.
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	got, next, err := d.Resolve(ctx, "alpha", domain.Tenant{Kind: "w", ID: "1"}, "all", "c")
+	got, next, err := d.Resolve(ctx, "alpha", tenant, "all", "c")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Resolve = %v, %q, %v, want an error that is a deadline", got, next, err)
 	}
-	if left := <-srv.remaining; left > timeout {
-		t.Fatalf("the host was asked with %s left on the call, want at most the %s the client is configured with: a slow host must not hold a worker beyond it", left, timeout)
+	select {
+	case left := <-srv.remaining:
+		if left > timeout {
+			t.Fatalf("the host was asked with %s left on the call, want at most the %s the client is configured with: a slow host must not hold a worker beyond it", left, timeout)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the host never saw the call: the deadline ran out before it was made")
 	}
 	if got != nil || next != "" {
 		t.Fatalf("Resolve returned %v and %q with an error, want nothing: a page is whole or it is not a page", got, next)
