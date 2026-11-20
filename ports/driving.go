@@ -75,6 +75,22 @@ type Admin interface {
 	SetTenantPreference(ctx context.Context, realm domain.Realm, p domain.TenantPreference) error
 }
 
+// Webhook is one provider's callback endpoint, served at /webhooks/{channel}/{provider}: a bounce, a
+// complaint or a delivery status the provider reports about a message the engine sent (NR-032, D14). It
+// is a driving port implemented beside the provider's channel, so the HTTP surface depends on no provider.
+// The header is the request's, as net/http's Header is: this package imports no transport.
+type Webhook interface {
+	// Verify checks the callback's signature over the raw body and returns an error for one that does
+	// not verify. It is called first, on bytes nothing has parsed, and nothing about a body is read
+	// until it returns nil: a forged bounce would otherwise suppress a real address, a denial of
+	// notification that looks like normal operation.
+	Verify(header map[string][]string, body []byte) error
+	// Handle parses a body Verify accepted and applies it. It returns domain.ErrUnknownDelivery for a
+	// callback that names no delivery yet (it can beat the delivery's own record), so the caller can
+	// ask the provider to try again.
+	Handle(ctx context.Context, body []byte) error
+}
+
 // Jobs runs the single-owner jobs — retention, partition provisioning,
 // idempotency and digest expiry, digest flush, broadcast expansion — each under a
 // notify_job_leases lease it renews while it runs, so
