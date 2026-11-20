@@ -22,8 +22,9 @@ import (
 
 type directoryServer struct {
 	notifyv1.UnimplementedDirectoryServer
-	on    func(context.Context, *notifyv1.ResolveAudienceRequest) (*notifyv1.ResolveAudienceResponse, error)
-	asked chan *notifyv1.ResolveAudienceRequest
+	on        func(context.Context, *notifyv1.ResolveAudienceRequest) (*notifyv1.ResolveAudienceResponse, error)
+	asked     chan *notifyv1.ResolveAudienceRequest
+	remaining chan time.Duration // the time left on the deadline each call arrived with; a call with none sends a day
 }
 
 func (d *directoryServer) ResolveAudience(ctx context.Context, req *notifyv1.ResolveAudienceRequest) (*notifyv1.ResolveAudienceResponse, error) {
@@ -31,12 +32,20 @@ func (d *directoryServer) ResolveAudience(ctx context.Context, req *notifyv1.Res
 	case d.asked <- req:
 	default:
 	}
+	left := 24 * time.Hour
+	if dl, ok := ctx.Deadline(); ok {
+		left = time.Until(dl)
+	}
+	select {
+	case d.remaining <- left:
+	default:
+	}
 	return d.on(ctx, req)
 }
 
 func serveDirectory(t *testing.T, on func(context.Context, *notifyv1.ResolveAudienceRequest) (*notifyv1.ResolveAudienceResponse, error)) (grpc.ClientConnInterface, *directoryServer) {
 	t.Helper()
-	srv := &directoryServer{on: on, asked: make(chan *notifyv1.ResolveAudienceRequest, 16)}
+	srv := &directoryServer{on: on, asked: make(chan *notifyv1.ResolveAudienceRequest, 16), remaining: make(chan time.Duration, 16)}
 	return notifytest.NewBufconn(t, func(reg grpc.ServiceRegistrar) { notifyv1.RegisterDirectoryServer(reg, srv) }), srv
 }
 
@@ -109,14 +118,22 @@ func TestDirectoryRoutesByRealmAndAnUnservedRealmHasNone(t *testing.T) {
 // resumes at the page and does not commit a short one.
 func TestADirectoryThatDoesNotAnswerInTimeFailsThePageAndReturnsNothing(t *testing.T) {
 	t.Parallel()
-	conn, _ := serveDirectory(t, func(ctx context.Context, _ *notifyv1.ResolveAudienceRequest) (*notifyv1.ResolveAudienceResponse, error) {
+	conn, srv := serveDirectory(t, func(ctx context.Context, _ *notifyv1.ResolveAudienceRequest) (*notifyv1.ResolveAudienceResponse, error) {
 		<-ctx.Done() // the host never answers
 		return nil, ctx.Err()
 	})
-	d := grpcclient.NewDirectory(map[domain.Realm]grpc.ClientConnInterface{"alpha": conn}, grpcclient.WithDirectoryTimeout(20*time.Millisecond))
-	got, next, err := d.Resolve(t.Context(), "alpha", domain.Tenant{Kind: "w", ID: "1"}, "all", "c")
+	const timeout = 20 * time.Millisecond
+	d := grpcclient.NewDirectory(map[domain.Realm]grpc.ClientConnInterface{"alpha": conn}, grpcclient.WithDirectoryTimeout(timeout))
+	// The caller's own deadline is far away: it is only here so that a client that set no timeout of its
+	// own fails the check below after a few seconds and does not wait for ever.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	got, next, err := d.Resolve(ctx, "alpha", domain.Tenant{Kind: "w", ID: "1"}, "all", "c")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Resolve = %v, %q, %v, want an error that is a deadline", got, next, err)
+	}
+	if left := <-srv.remaining; left > timeout {
+		t.Fatalf("the host was asked with %s left on the call, want at most the %s the client is configured with: a slow host must not hold a worker beyond it", left, timeout)
 	}
 	if got != nil || next != "" {
 		t.Fatalf("Resolve returned %v and %q with an error, want nothing: a page is whole or it is not a page", got, next)
