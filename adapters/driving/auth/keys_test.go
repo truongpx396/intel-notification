@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -160,8 +161,17 @@ func TestARealmThatWasNeverFetchedHasNoKeysAndThatIsAnError(t *testing.T) {
 		"a server error":                func(h *host) { h.serve("/alpha.json", nil); h.fail("/alpha.json", 500) },
 		"not found":                     func(h *host) {},
 		"a document that is not a JWKS": func(h *host) { h.serve("/alpha.json", []byte("<html>")) },
-		"a redirect":                    func(h *host) { h.serve("/alpha.json", nil); h.fail("/alpha.json", 302) },
-		"a document too large":          func(h *host) { h.serve("/alpha.json", append([]byte(`{"keys":[],"x":"`), make([]byte, 2<<20)...)) },
+		"a redirect, even to a good key set": func(h *host) {
+			h.serve("/alpha.json", nil)
+			h.fail("/alpha.json", 302)
+			h.serve("/elsewhere", notifytest.JWKS(notifytest.NewTokenSigner("k1")))
+		},
+		"a valid document too large": func(h *host) {
+			// Valid JSON with a usable key: only its size can refuse it.
+			pad := strings.Repeat("x", 2<<20)
+			doc := notifytest.JWKS(notifytest.NewTokenSigner("k1"))
+			h.serve("/alpha.json", append(doc[:len(doc)-1], []byte(`,"pad":"`+pad+`"}`)...))
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -213,6 +223,29 @@ func TestAnUnknownKeyIDCausesAtMostOneRefetchPerInterval(t *testing.T) {
 	clk.Advance(time.Minute)
 	if _, refetched, _ := k.Refetch(t.Context(), "alpha"); !refetched {
 		t.Fatal("no refetch after the interval passed")
+	}
+}
+
+// An endpoint that is down is not asked again by every request: the interval bounds retries too.
+func TestAnEndpointThatIsDownIsNotHammered(t *testing.T) {
+	t.Parallel()
+	h, clk := newHost(t), newClock()
+	h.serve("/alpha.json", nil)
+	h.fail("/alpha.json", http.StatusInternalServerError)
+	k := keysFor(t, h, clk)
+	for range 20 {
+		if _, err := k.For(t.Context(), "alpha"); err == nil {
+			t.Fatal("For = nil with the endpoint down and no keys held, want an error")
+		}
+	}
+	if n := h.fetches("/alpha.json"); n != 1 {
+		t.Fatalf("%d requests to a down endpoint for 20 uses, want 1 within the interval", n)
+	}
+	clk.Advance(2 * time.Minute)
+	h.fail("/alpha.json", 0)
+	h.serve("/alpha.json", notifytest.JWKS(notifytest.NewTokenSigner("k1")))
+	if set, err := k.For(t.Context(), "alpha"); err != nil || !set.Has("k1") {
+		t.Fatalf("For after the endpoint recovered = %d keys, %v, want it found", set.Len(), err)
 	}
 }
 
