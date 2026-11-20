@@ -11,8 +11,13 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 
 	"github.com/truongpx396/intel-notification/domain"
 )
@@ -45,38 +50,122 @@ func WithFault(f func(error)) Option { return func(o *options) { o.onFault = f }
 // Unauthenticated, one whose credentials are not good is Unauthenticated, and one whose principal has no
 // binding is PermissionDenied: none reaches the handler.
 func RealmInterceptors(b domain.RealmBindings, principal PrincipalFunc, opts ...Option) (grpc.UnaryServerInterceptor, grpc.StreamServerInterceptor) {
-	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
-			return h(ctx, req)
-		},
-		func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, h grpc.StreamHandler) error {
-			return h(srv, ss)
+	o := options{onDenied: func(string) {}, onFault: func(error) {}}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	derive := func(ctx context.Context) (context.Context, error) {
+		who, err := principal(ctx)
+		switch {
+		case errors.Is(err, ErrNoCredentials):
+			return nil, status.Error(codes.Unauthenticated, "authentication is required")
+		case err != nil:
+			// What the verifier said can hold what was presented, so the caller is told no more than that.
+			o.onFault(err)
+			return nil, status.Error(codes.Unauthenticated, "the credentials were not accepted")
 		}
+		realm, ok := b.RealmOf(who)
+		if !ok {
+			o.onDenied(who)
+			return nil, status.Error(codes.PermissionDenied, "the caller is not bound to a realm")
+		}
+		return context.WithValue(ctx, realmKey{}, realm), nil
+	}
+	unary := func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, h grpc.UnaryHandler) (any, error) {
+		ctx, err := derive(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return h(ctx, req)
+	}
+	stream := func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, h grpc.StreamHandler) error {
+		ctx, err := derive(ss.Context())
+		if err != nil {
+			return err
+		}
+		return h(srv, &realmStream{ServerStream: ss, ctx: ctx})
+	}
+	return unary, stream
 }
 
+type realmKey struct{}
+
+// realmStream is a stream whose context carries the realm.
+type realmStream struct {
+	grpc.ServerStream
+	ctx context.Context
+}
+
+func (s *realmStream) Context() context.Context { return s.ctx }
+
 // RealmFrom is the realm the interceptor derived for the call.
-func RealmFrom(ctx context.Context) (domain.Realm, bool) { return "", false }
+func RealmFrom(ctx context.Context) (domain.Realm, bool) {
+	realm, ok := ctx.Value(realmKey{}).(domain.Realm)
+	return realm, ok && realm != ""
+}
 
 // RealmOf is RealmFrom for a handler that must have one: a call with none went through no interceptor,
-// which is a wiring fault and is reported as one.
-func RealmOf(ctx context.Context) (domain.Realm, error) { return "", errors.New("not implemented") }
+// which is a wiring fault and is reported as one, never answered as the caller's.
+func RealmOf(ctx context.Context) (domain.Realm, error) {
+	realm, ok := RealmFrom(ctx)
+	if !ok {
+		return "", errors.New("auth: the call carries no realm: it did not pass the realm interceptor")
+	}
+	return realm, nil
+}
 
 // Route picks what serves a call from the realm the interceptor derived for it: the engine of that
-// realm, built once per bound realm at start.
+// realm, built once per bound realm at start. A realm with no engine is a wiring fault and is never
+// answered by another realm's.
 func Route[T any](byRealm map[domain.Realm]T) func(context.Context) (T, error) {
-	return func(context.Context) (T, error) {
+	return func(ctx context.Context) (T, error) {
 		var zero T
-		return zero, errors.New("not implemented")
+		realm, err := RealmOf(ctx)
+		if err != nil {
+			return zero, err
+		}
+		engine, ok := byRealm[realm]
+		if !ok {
+			return zero, fmt.Errorf("auth: no engine serves realm %q", realm)
+		}
+		return engine, nil
 	}
 }
 
 // MTLSPrincipal is the principal of a call made over mutual TLS: the first URI SAN of the client's
 // certificate, else its first DNS SAN. It reads only a chain the TLS layer verified, so a server that
 // does not require and verify client certificates never has a principal from here.
-func MTLSPrincipal(ctx context.Context) (string, error) { return "", errors.New("not implemented") }
+func MTLSPrincipal(ctx context.Context) (string, error) {
+	p, ok := peer.FromContext(ctx)
+	if !ok {
+		return "", ErrNoCredentials
+	}
+	info, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok || len(info.State.VerifiedChains) == 0 || len(info.State.VerifiedChains[0]) == 0 {
+		return "", ErrNoCredentials
+	}
+	leaf := info.State.VerifiedChains[0][0]
+	switch {
+	case len(leaf.URIs) > 0:
+		return leaf.URIs[0].String(), nil
+	case len(leaf.DNSNames) > 0:
+		return leaf.DNSNames[0], nil
+	}
+	return "", ErrNoCredentials
+}
 
 // FirstPrincipal tries each func in order and uses the first that finds credentials. A func that finds
 // bad ones ends the search with its error: a presented credential that fails is never papered over by
 // another.
 func FirstPrincipal(funcs ...PrincipalFunc) PrincipalFunc {
-	return func(context.Context) (string, error) { return "", errors.New("not implemented") }
+	return func(ctx context.Context) (string, error) {
+		for _, f := range funcs {
+			who, err := f(ctx)
+			if errors.Is(err, ErrNoCredentials) {
+				continue
+			}
+			return who, err
+		}
+		return "", ErrNoCredentials
+	}
 }
