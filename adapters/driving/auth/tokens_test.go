@@ -274,3 +274,30 @@ func TestAProducerPrincipalFuncFindsNoCredentialsWhereThereAreNone(t *testing.T)
 		}
 	}
 }
+
+// A host that rotates a key in place, under the same key id, is followed like one that adds a key: the old key
+// no longer verifies its tokens, which is as good a sign as an unknown key id that the keys moved, and a
+// refetch, once and bounded, finds the new one. Without it every token is refused until the cache expires.
+func TestAKeyRotatedInPlaceUnderTheSameKeyIDIsFollowedAndStillBounded(t *testing.T) {
+	t.Parallel()
+	w := newTokenWorld(t)
+	if _, err := w.recips.Identify(bearer(w.recipientToken(w.alpha, "alpha"))); err != nil {
+		t.Fatal(err)
+	}
+	rotated := notifytest.NewTokenSigner("alpha-1") // the same key id, a new key
+	w.h.serve("/alpha.json", notifytest.JWKS(rotated))
+	w.clk.Advance(2 * time.Minute) // past the refetch bound, within the cache's ttl
+	if got, err := w.recips.Identify(bearer(rotated.Recipient("alpha", tenantW1, userU1, w.clk.Now(), time.Minute))); err != nil || got.Realm != "alpha" {
+		t.Fatalf("a token under the key rotated in place = %+v, %v, want it accepted after one refetch", got, err)
+	}
+	before := w.h.fetches("/alpha.json")
+	stranger := notifytest.NewTokenSigner("alpha-1") // yet another key under that id: not the host's
+	for range 40 {
+		if _, err := w.recips.Identify(bearer(stranger.Recipient("alpha", tenantW1, userU1, w.clk.Now(), time.Minute))); err == nil {
+			t.Fatal("a token signed by a stranger's key under the host's key id was accepted")
+		}
+	}
+	if extra := w.h.fetches("/alpha.json") - before; extra > 1 {
+		t.Fatalf("%d fetches caused by 40 tokens that do not verify, want at most 1 per interval", extra)
+	}
+}
