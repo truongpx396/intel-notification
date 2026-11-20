@@ -1007,9 +1007,11 @@ rule above.
       duplicated `validatePersist`'s, went (its mutant was equivalent). The expander's page size, lease and
       interval are options, not `Config`, because the contract fixes `Config`. A broadcast is not under
       `app.Maintenance`'s `notify_job_leases`: its lease is on its own row, so it is its own loop until the one-call
-      `New` composes it. **Not done here:** the contract's prose (`contracts/notification-ports.md`) still says the
-      broadcast methods "arrive with T041" and does not list the three new sentinels; edits under
-      `specs/*/contracts/` need confirmation, so the change is proposed in the PR and not made.*
+      `New` composes it. **The contract follows the code** (`contracts/notification-ports.md`, confirmed by the
+      maintainer): two sentences that said the broadcast methods "arrive with T041" are gone, the three sentinels
+      (`ErrTooManyRecipients`, `ErrAudienceUnsupported`, `ErrBroadcastLeaseLost`) are listed, and the `Store`
+      comment carries the lease, fence and refusals that `ports/driven.go` already said. Held by
+      `TestCommitBroadcastPageIsFencedByTheLeaseToken` and `TestALostLeaseIsNotAFaultAndThePassGoesOn`.*
 
 ## Stage 10 — Transports
 
