@@ -289,7 +289,7 @@ type TemplateWriter interface {
 
 	// ActivateTemplate makes v the one version of its template that renders, and the one before it stops, in
 	// one statement: a render sees the old version or the new one and never neither. It returns
-	// domain.ErrNotFound, having changed nothing, when no such version is stored in the realm.
+	// domain.ErrUnknownTemplate, having changed nothing, when no such version is stored in the realm.
 	ActivateTemplate(ctx context.Context, realm domain.Realm, v domain.TemplateVersion) error
 }
 

@@ -86,7 +86,7 @@ func (t *Templates) ActivateTemplate(_ context.Context, realm domain.Realm, v do
 	versions := t.m[templateKey{realm, v.Tenant, v.Ref, v.Channel, domain.NormalizeLocale(v.Locale)}]
 	if v.Version < 1 || v.Version > len(versions) {
 		return fmt.Errorf("%w: realm %q, template %q, channel %q, locale %q, version %d",
-			domain.ErrNotFound, realm, v.Ref, v.Channel, v.Locale, v.Version)
+			domain.ErrUnknownTemplate, realm, v.Ref, v.Channel, v.Locale, v.Version)
 	}
 	for i, s := range versions {
 		s.active = i == v.Version-1
