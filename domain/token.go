@@ -148,7 +148,14 @@ type RecipientClaims struct {
 // realm's key set to verify against. What it returns is attacker-controlled and decides nothing but
 // which keys are tried: a token that names a realm it was not signed for fails verification under that
 // realm's keys.
-func PeekIssuer(token string) (string, bool) {
+func PeekIssuer(token string) (string, bool) { return peekClaim(token, "iss") }
+
+// PeekSubject reads a token's sub claim WITHOUT verifying anything, to find which producer principal it
+// claims to be and so which realm's keys to verify it with. Like PeekIssuer it chooses keys and nothing
+// else: the subject a caller acts on is the one VerifyProducerToken returns.
+func PeekSubject(token string) (string, bool) { return peekClaim(token, "sub") }
+
+func peekClaim(token, name string) (string, bool) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return "", false
@@ -157,13 +164,15 @@ func PeekIssuer(token string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	var claims struct {
-		Iss string `json:"iss"`
-	}
-	if json.Unmarshal(raw, &claims) != nil || claims.Iss == "" {
+	var claims map[string]json.RawMessage
+	if json.Unmarshal(raw, &claims) != nil {
 		return "", false
 	}
-	return claims.Iss, true
+	var value string
+	if json.Unmarshal(claims[name], &value) != nil || value == "" {
+		return "", false
+	}
+	return value, true
 }
 
 // maxTokenBytes is the largest token the verifier reads. No token a host mints is anywhere near it.
@@ -182,36 +191,46 @@ func invalidToken(format string, args ...any) error {
 // ES256, EdDSA and RS256 are accepted. alg none is not, and HS256 is not: a secret both sides hold lets
 // either mint a token for any recipient (security.md), so it is not implemented even for development.
 func VerifyRecipientToken(token string, keys KeySet, p TokenPolicy) (RecipientClaims, error) {
+	payload, err := verifyJWS(token, keys)
+	if err != nil {
+		return RecipientClaims{}, err
+	}
+	return recipientClaims(payload, p)
+}
+
+// verifyJWS checks the structure and the signature of a compact JWS against a key set and returns its
+// payload. It is everything that must hold before a claim may be read.
+func verifyJWS(token string, keys KeySet) ([]byte, error) {
 	if len(token) > maxTokenBytes {
-		return RecipientClaims{}, invalidToken("the token is over %d bytes", maxTokenBytes)
+		return nil, invalidToken("the token is over %d bytes", maxTokenBytes)
 	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return RecipientClaims{}, invalidToken("not a compact JWS")
+		return nil, invalidToken("not a compact JWS")
 	}
 	dec := base64.RawURLEncoding.Strict().DecodeString
 	rawHeader, errH := dec(parts[0])
 	rawPayload, errP := dec(parts[1])
 	sig, errS := dec(parts[2])
 	if errH != nil || errP != nil || errS != nil {
-		return RecipientClaims{}, invalidToken("a part is not unpadded base64url")
+		return nil, invalidToken("a part is not unpadded base64url")
 	}
 
 	var header map[string]json.RawMessage
 	if err := json.Unmarshal(rawHeader, &header); err != nil {
-		return RecipientClaims{}, invalidToken("the header is not a JSON object")
+		return nil, invalidToken("the header is not a JSON object")
 	}
 	if _, critical := header["crit"]; critical {
-		return RecipientClaims{}, invalidToken("the header requires an extension this verifier does not implement")
+		return nil, invalidToken("the header requires an extension this verifier does not implement")
 	}
 	var alg, kid string
 	if json.Unmarshal(header["alg"], &alg) != nil || json.Unmarshal(header["kid"], &kid) != nil || kid == "" {
-		return RecipientClaims{}, invalidToken("the header names no algorithm or no key id")
+		return nil, invalidToken("the header names no algorithm or no key id")
 	}
 
 	key, ok := keys.keys[kid]
 	if !ok {
-		return RecipientClaims{}, fmt.Errorf("%w: %w", ErrInvalidToken, ErrUnknownKeyID)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidToken, ErrUnknownKeyID)
 	}
 	signed := []byte(parts[0] + "." + parts[1])
 	sum := sha256.Sum256(signed)
@@ -233,20 +252,59 @@ func VerifyRecipientToken(token string, keys KeySet, p TokenPolicy) (RecipientCl
 		}
 	}
 	if !valid {
-		return RecipientClaims{}, invalidToken("the signature does not verify under the key %q", kid)
+		return nil, invalidToken("the signature does not verify under the key %q", kid)
 	}
-
-	return claimsOf(rawPayload, p)
+	return rawPayload, nil
 }
 
-// claimsOf judges the claims of a token whose signature verified.
-func claimsOf(raw []byte, p TokenPolicy) (RecipientClaims, error) {
+// registered is the registered claims every token of the engine is judged on.
+type registered struct {
+	Iss string          `json:"iss"`
+	Sub string          `json:"sub"`
+	Aud json.RawMessage `json:"aud"`
+	Exp *float64        `json:"exp"`
+	Nbf *float64        `json:"nbf"`
+	Iat *float64        `json:"iat"`
+}
+
+// check judges the registered claims against the policy and returns the expiry.
+func (c registered) check(p TokenPolicy) (time.Time, error) {
+	leeway, maxLife := p.Leeway, p.MaxLifetime
+	if leeway == 0 {
+		leeway = 30 * time.Second
+	}
+	if maxLife == 0 {
+		maxLife = time.Hour
+	}
+	at := func(v *float64) time.Time { return time.Unix(int64(*v), 0).UTC() }
+
+	if c.Iss != string(p.Issuer) {
+		return time.Time{}, invalidToken("the token is for another realm")
+	}
+	if c.Exp == nil {
+		return time.Time{}, invalidToken("the token has no expiry")
+	}
+	exp := at(c.Exp)
+	switch {
+	case !p.Now.Before(exp.Add(leeway)):
+		return time.Time{}, invalidToken("the token has expired")
+	case exp.After(p.Now.Add(maxLife).Add(leeway)):
+		return time.Time{}, invalidToken("the token expires more than %s from now", maxLife)
+	case c.Nbf != nil && at(c.Nbf).After(p.Now.Add(leeway)):
+		return time.Time{}, invalidToken("the token is not valid yet")
+	case c.Iat != nil && at(c.Iat).After(p.Now.Add(leeway)):
+		return time.Time{}, invalidToken("the token was issued in the future")
+	}
+	if p.Audience != "" && !audienceHolds(c.Aud, p.Audience) {
+		return time.Time{}, invalidToken("the token is not for this audience")
+	}
+	return exp, nil
+}
+
+// recipientClaims judges the claims of a recipient token whose signature verified.
+func recipientClaims(raw []byte, p TokenPolicy) (RecipientClaims, error) {
 	var c struct {
-		Iss    string          `json:"iss"`
-		Aud    json.RawMessage `json:"aud"`
-		Exp    *float64        `json:"exp"`
-		Nbf    *float64        `json:"nbf"`
-		Iat    *float64        `json:"iat"`
+		registered
 		Tenant *struct {
 			Kind string `json:"kind"`
 			ID   string `json:"id"`
@@ -259,34 +317,9 @@ func claimsOf(raw []byte, p TokenPolicy) (RecipientClaims, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return RecipientClaims{}, invalidToken("the claims are not a JSON object of the expected shape")
 	}
-	leeway, maxLife := p.Leeway, p.MaxLifetime
-	if leeway == 0 {
-		leeway = 30 * time.Second
-	}
-	if maxLife == 0 {
-		maxLife = time.Hour
-	}
-	at := func(v *float64) time.Time { return time.Unix(int64(*v), 0).UTC() }
-
-	if c.Iss != string(p.Issuer) {
-		return RecipientClaims{}, invalidToken("the token is for another realm")
-	}
-	if c.Exp == nil {
-		return RecipientClaims{}, invalidToken("the token has no expiry")
-	}
-	exp := at(c.Exp)
-	switch {
-	case !p.Now.Before(exp.Add(leeway)):
-		return RecipientClaims{}, invalidToken("the token has expired")
-	case exp.After(p.Now.Add(maxLife).Add(leeway)):
-		return RecipientClaims{}, invalidToken("the token expires more than %s from now", maxLife)
-	case c.Nbf != nil && at(c.Nbf).After(p.Now.Add(leeway)):
-		return RecipientClaims{}, invalidToken("the token is not valid yet")
-	case c.Iat != nil && at(c.Iat).After(p.Now.Add(leeway)):
-		return RecipientClaims{}, invalidToken("the token was issued in the future")
-	}
-	if p.Audience != "" && !audienceHolds(c.Aud, p.Audience) {
-		return RecipientClaims{}, invalidToken("the token is not for this audience")
+	exp, err := c.registered.check(p)
+	if err != nil {
+		return RecipientClaims{}, err
 	}
 	if c.Tenant == nil || c.Tenant.Kind == "" || c.Tenant.ID == "" || c.Recipient == nil || c.Recipient.Kind == "" || c.Recipient.ID == "" {
 		return RecipientClaims{}, invalidToken("the token does not name a tenant and a recipient")
@@ -296,6 +329,36 @@ func claimsOf(raw []byte, p TokenPolicy) (RecipientClaims, error) {
 		Recipient: Recipient{Kind: c.Recipient.Kind, ID: c.Recipient.ID},
 		ExpiresAt: exp,
 	}, nil
+}
+
+// ProducerClaims is what a verified producer token says: which principal is calling.
+type ProducerClaims struct {
+	Subject   string
+	ExpiresAt time.Time
+}
+
+// VerifyProducerToken verifies a token a producer presents to the gRPC surface, signed by the host of the
+// realm it is bound to (D31). It is judged exactly as a recipient token is, and carries a subject, the
+// producer principal, where a recipient token carries a tenant and a recipient. The realm is the
+// policy's and not the token's, so the subject is bound to a realm by RealmBindings and by the keys that
+// signed the token, and by nothing the token says.
+func VerifyProducerToken(token string, keys KeySet, p TokenPolicy) (ProducerClaims, error) {
+	payload, err := verifyJWS(token, keys)
+	if err != nil {
+		return ProducerClaims{}, err
+	}
+	var c registered
+	if err := json.Unmarshal(payload, &c); err != nil {
+		return ProducerClaims{}, invalidToken("the claims are not a JSON object of the expected shape")
+	}
+	exp, err := c.check(p)
+	if err != nil {
+		return ProducerClaims{}, err
+	}
+	if c.Sub == "" {
+		return ProducerClaims{}, invalidToken("the token has no subject")
+	}
+	return ProducerClaims{Subject: c.Sub, ExpiresAt: exp}, nil
 }
 
 // audienceHolds reports whether an aud claim, a string or a list of them, names want.
