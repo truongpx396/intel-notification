@@ -1542,7 +1542,7 @@ once is a cross-tenant read, and the stream is where it would leak live. A webho
 checks lets anyone suppress a real address with a forged bounce. An id that is a `404` for one caller and a `403`
 for another is an oracle.
 
-*Built.* `adapters/driving/internal/wire` maps every message and every error for both gRPC ends. `httpapi` is
+*Built.* `adapters/driving/wire` maps every message and every error for both gRPC ends. `httpapi` is
 `New(Deps, ...Option)` over `ports.Inbox`, `Notifier`, `Admin` and `StreamSubscriber`; a route whose dependency is
 absent is not registered. The unsubscribe page leaks nothing (`Referrer-Policy: no-referrer`, a CSP that allows
 nothing, `no-store`) and a GET of the link makes no call at all. `/readyz` names the failed check and nothing of

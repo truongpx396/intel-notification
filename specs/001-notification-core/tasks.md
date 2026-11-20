@@ -1112,7 +1112,7 @@ rule above.
       `NotifyTx` returns `ErrTxUnsupported`). Make the T047 gRPC run pass.
       **Red first:** a unit test that `NotifyTx` returns `ErrTxUnsupported` and never opens a transaction.
       **Mutate:** open a transaction in `NotifyTx`; return `nil` instead of `ErrTxUnsupported`
-      *Both stand on `adapters/driving/internal/wire`, which maps every message and every error. **Red, witnessed:**
+      *Both stand on `adapters/driving/wire`, which maps every message and every error. **Red, witnessed:**
       `client_test.go:46: a caller's transaction: NotifyTx = grpcclient: not implemented, want domain.ErrTxUnsupported`
       (the lines are in the `test:` commit). The server adds only the two rules that belong to the wire, a key on
       every mutating call and a batch of at most 500 (refused whole, each item independent within it); a refusal
