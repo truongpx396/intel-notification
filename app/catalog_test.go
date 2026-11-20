@@ -123,6 +123,17 @@ func TestCatalogUpsertTopicRegistersInTheRealmItIsGiven(t *testing.T) {
 	if _, found, _ := fx.topics.Lookup(t.Context(), catRealm2, "invoice"); found {
 		t.Fatal("the topic is in another realm too: a registration lands in the realm it is given and nowhere else (NR-009)")
 	}
+	// And the other way round: a call for the second realm lands in the second and not the first, so the
+	// realm is the call's and not one the Catalog knows.
+	if err := fx.cat.UpsertTopic(t.Context(), catRealm2, "only_beta", def); err != nil {
+		t.Fatalf("UpsertTopic: %v", err)
+	}
+	if _, found, _ := fx.topics.Lookup(t.Context(), catRealm2, "only_beta"); !found {
+		t.Fatal("a registration for realm beta is not in realm beta")
+	}
+	if _, found, _ := fx.topics.Lookup(t.Context(), catRealm, "only_beta"); found {
+		t.Fatal("a registration for realm beta is in realm alpha")
+	}
 }
 
 func TestCatalogRefusesBeforeItWrites(t *testing.T) {
