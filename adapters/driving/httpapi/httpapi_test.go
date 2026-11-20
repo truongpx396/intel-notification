@@ -267,7 +267,7 @@ func newFixture(t *testing.T, opts ...httpapi.Option) *fixture {
 		f.mu.Unlock()
 	})}, opts...)
 	h, err := httpapi.New(httpapi.Deps{
-		Inbox: f.inbox, Notifier: f.notifier, Admin: f.admin,
+		Inbox: f.inbox, Notifier: f.notifier, Admin: f.admin, Stream: notifytest.NewStream(notifytest.NewProbe()),
 		Identify: func(r *http.Request) (domain.Identity, error) { return f.identify(r) },
 		// An operator credential is its own: a recipient's token is not one.
 		Operator: func(r *http.Request) (domain.Realm, error) {
@@ -371,7 +371,7 @@ func TestTheRecipientComesFromTheSessionAndNothingElse(t *testing.T) {
 		{"GET", "/notifications/unread-count?recipient=bob&tenant=w9", ""},
 		{"POST", "/notifications/read-all?recipient=bob", ""},
 		{"GET", "/notifications/preferences?recipient=bob", ""},
-		{"PUT", "/notifications/preferences?recipient=bob", `[{"topic":"t","channel":"email","enabled":false,"recipient":"bob"}]`},
+		{"PUT", "/notifications/preferences?recipient=bob", `[{"topic":"t","channel":"email","enabled":false}]`},
 		{"GET", "/notifications/schedule?recipient=bob", ""},
 	}
 	for _, tc := range cases {
@@ -1044,8 +1044,8 @@ func TestATenantsDefaultsAreSetUnderTheOperatorsRealmAndThePathsTenant(t *testin
 	}
 	rec = f2.do("PUT", "/admin/tenants/workspace/w1/preferences", "operator-secret",
 		`[{"topic":"a","channel":"email","enabled":true,"locked":false},{"topic":"b","channel":"email","enabled":false,"locked":false}]`)
-	if rec.Code != 422 || !strings.Contains(rec.Body.String(), `"b"`) || !strings.Contains(rec.Body.String(), "1") {
-		t.Errorf("= %d %s, want a 422 that names the row and the topic", rec.Code, rec.Body.String())
+	if rec.Code != 422 || !strings.Contains(rec.Body.String(), `"row":1`) || !strings.Contains(rec.Body.String(), "essential") {
+		t.Errorf("= %d %s, want a 422 that names the row that was refused and why", rec.Code, rec.Body.String())
 	}
 }
 
