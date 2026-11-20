@@ -2,7 +2,6 @@ package notifytest
 
 import (
 	"errors"
-	"slices"
 	"testing"
 
 	"github.com/truongpx396/intel-notification/domain"
@@ -10,32 +9,6 @@ import (
 
 func content(subject string) domain.RenderedContent {
 	return domain.RenderedContent{Subject: subject, Body: subject + " body", TemplateVersion: 1}
-}
-
-func TestLocaleLadder(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name   string
-		locale string
-		def    string
-		want   []string
-	}{
-		{"tag, language, default", "fr-CA", "en", []string{"fr-ca", "fr", "en"}},
-		{"a bare language", "fr", "en", []string{"fr", "en"}},
-		{"no locale", "", "en", []string{"en"}},
-		{"the default itself", "en", "en", []string{"en"}},
-		{"a tag whose language is the default", "en-GB", "en", []string{"en-gb", "en"}},
-		{"case is folded", "FR-ca", "EN", []string{"fr-ca", "fr", "en"}},
-		{"a tag with several subtags goes straight to its language", "zh-Hant-TW", "en", []string{"zh-hant-tw", "zh", "en"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := localeLadder(tc.locale, tc.def); !slices.Equal(got, tc.want) {
-				t.Fatalf("localeLadder(%q, %q) = %v, want %v", tc.locale, tc.def, got, tc.want)
-			}
-		})
-	}
 }
 
 func TestTemplatesRender(t *testing.T) {
@@ -137,4 +110,13 @@ func TestTemplatesDoNotShareMemoryWithCallers(t *testing.T) {
 	if again.Data["k"] != "v" {
 		t.Fatalf("a map returned by Render changed the stored template: %v", again.Data)
 	}
+}
+
+// T048: the in-memory renderer runs the table the PostgreSQL one runs.
+func TestTemplatesFakeRunsTheRendererContract(t *testing.T) {
+	t.Parallel()
+	TemplateRendererContract(t, func(*testing.T) TemplatesWorld {
+		templates := NewTemplates("en")
+		return TemplatesWorld{Renderer: templates, Writer: templates, DefaultLocale: "en"}
+	})
 }
