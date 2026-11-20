@@ -149,31 +149,40 @@ const templateKeySQL = `realm = $1 AND tenant_kind = $2 AND tenant_id = $3 AND t
 // template's versions, so two activations of one template are taken in turn, then turns the old one
 // off and the new one on. A render sees the state before the commit or after it, so it finds the old
 // version or the new one and never neither.
-func (t *Templates) ActivateTemplate(ctx context.Context, realm domain.Realm, v domain.TemplateVersion) error {
+func (t *Templates) ActivateTemplate(ctx context.Context, realm domain.Realm, v domain.TemplateVersion) (domain.Template, error) {
 	locale := domain.NormalizeLocale(v.Locale)
 	args := []any{string(realm), v.Tenant.Kind, v.Tenant.ID, v.Ref, string(v.Channel), locale}
-	notFound := fmt.Errorf("%w: realm %q, template %q, channel %q, locale %q, version %d",
-		domain.ErrUnknownTemplate, realm, v.Ref, v.Channel, v.Locale, v.Version)
+	activated := domain.Template{Tenant: v.Tenant, Ref: v.Ref, Channel: v.Channel, Locale: locale, Version: v.Version}
 	err := pgx.BeginFunc(ctx, t.pool, func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT version FROM notification_templates WHERE `+templateKeySQL+` ORDER BY version FOR UPDATE`, args...)
+		rows, err := tx.Query(ctx, `SELECT version, subject, body, data FROM notification_templates WHERE `+templateKeySQL+` ORDER BY version FOR UPDATE`, args...)
 		if err != nil {
 			return err
 		}
 		stored := false
 		for rows.Next() {
 			var version int
-			if err := rows.Scan(&version); err != nil {
+			var data []byte
+			var subject, body string
+			if err := rows.Scan(&version, &subject, &body, &data); err != nil {
 				rows.Close()
 				return err
 			}
-			stored = stored || version == v.Version
+			if version == v.Version {
+				stored = true
+				activated.Subject, activated.Body = subject, body
+				if err := json.Unmarshal(data, &activated.Data); err != nil {
+					rows.Close()
+					return fmt.Errorf("template %q version %d holds data that is not a JSON object: %w", v.Ref, v.Version, err)
+				}
+			}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
 		if !stored {
-			return notFound
+			return fmt.Errorf("%w: realm %q, template %q, channel %q, locale %q, version %d",
+				domain.ErrUnknownTemplate, realm, v.Ref, v.Channel, v.Locale, v.Version)
 		}
 		withVersion := append(args[:6:6], v.Version)
 		if _, err := tx.Exec(ctx, `UPDATE notification_templates SET active = false WHERE `+templateKeySQL+` AND active AND version <> $7`, withVersion...); err != nil {
@@ -183,10 +192,10 @@ func (t *Templates) ActivateTemplate(ctx context.Context, realm domain.Realm, v 
 		return err
 	})
 	if errors.Is(err, domain.ErrUnknownTemplate) {
-		return err
+		return domain.Template{}, err
 	}
 	if err != nil {
-		return fmt.Errorf("activate template %q version %d: %w", v.Ref, v.Version, err)
+		return domain.Template{}, fmt.Errorf("activate template %q version %d: %w", v.Ref, v.Version, err)
 	}
-	return nil
+	return activated, nil
 }

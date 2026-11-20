@@ -271,10 +271,13 @@ func TemplateRendererContract(t *testing.T, newWorld TemplatesFactory) {
 	}
 	activate := func(t *testing.T, w TemplatesWorld, realm domain.Realm, stored domain.Template) {
 		t.Helper()
-		err := w.Writer.ActivateTemplate(t.Context(), realm, domain.TemplateVersion{
+		got, err := w.Writer.ActivateTemplate(t.Context(), realm, domain.TemplateVersion{
 			Tenant: stored.Tenant, Ref: stored.Ref, Channel: stored.Channel, Locale: stored.Locale, Version: stored.Version})
 		if err != nil {
 			t.Fatalf("ActivateTemplate: %v", err)
+		}
+		if got.Version != stored.Version || got.Subject != stored.Subject || got.Body != stored.Body || got.Ref != stored.Ref {
+			t.Fatalf("ActivateTemplate = %+v, want the version it activated: %+v", got, stored)
 		}
 	}
 	live := func(t *testing.T, w TemplatesWorld, realm domain.Realm, tpl domain.Template) {
@@ -303,7 +306,8 @@ func TemplateRendererContract(t *testing.T, newWorld TemplatesFactory) {
 	t.Run("a new version reaches no render until it is activated, and then replaces the old (D27)", func(t *testing.T) {
 		t.Parallel()
 		w := newWorld(t)
-		live(t, w, realmA, tpl())
+		v1 := put(t, w, realmA, tpl())
+		activate(t, w, realmA, v1)
 		v2 := put(t, w, realmA, tpl(func(d *domain.Template) { d.Subject = "Updated {{ .number }}" }))
 		if v2.Version != 2 {
 			t.Fatalf("second PutTemplate = version %d, want 2", v2.Version)
@@ -318,7 +322,7 @@ func TemplateRendererContract(t *testing.T, newWorld TemplatesFactory) {
 			t.Fatalf("Render after activating version 2 = %+v, %v, want version 2", got, err)
 		}
 		// Going back is an activation too: a version is immutable and stays stored.
-		activate(t, w, realmA, domain.Template{Ref: "invoice", Channel: "email", Locale: "en", Version: 1})
+		activate(t, w, realmA, v1)
 		got, err = render(t, w)
 		if err != nil || got.TemplateVersion != 1 {
 			t.Fatalf("Render after re-activating version 1 = %+v, %v, want version 1", got, err)
@@ -377,11 +381,11 @@ func TemplateRendererContract(t *testing.T, newWorld TemplatesFactory) {
 			"another channel":              {Ref: "invoice", Channel: "sms", Locale: "en", Version: 1},
 			"another tenant's":             {Tenant: tenantT1, Ref: "invoice", Channel: "email", Locale: "en", Version: 1},
 		} {
-			if err := w.Writer.ActivateTemplate(t.Context(), realmA, v); !errors.Is(err, domain.ErrUnknownTemplate) {
+			if _, err := w.Writer.ActivateTemplate(t.Context(), realmA, v); !errors.Is(err, domain.ErrUnknownTemplate) {
 				t.Errorf("ActivateTemplate(%s) = %v, want ErrUnknownTemplate", name, err)
 			}
 		}
-		if err := w.Writer.ActivateTemplate(t.Context(), realmB, domain.TemplateVersion{Ref: "invoice", Channel: "email", Locale: "en", Version: 1}); !errors.Is(err, domain.ErrUnknownTemplate) {
+		if _, err := w.Writer.ActivateTemplate(t.Context(), realmB, domain.TemplateVersion{Ref: "invoice", Channel: "email", Locale: "en", Version: 1}); !errors.Is(err, domain.ErrUnknownTemplate) {
 			t.Errorf("ActivateTemplate in another realm = %v, want ErrUnknownTemplate: a template is per realm", err)
 		}
 		if got, err := render(t, w); err != nil || got.TemplateVersion != 1 {
