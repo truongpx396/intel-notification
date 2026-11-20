@@ -451,3 +451,44 @@ func TestPeekIssuer(t *testing.T) {
 		}
 	}
 }
+
+// D31. A producer presents a token whose subject is its principal; the realm is the policy's, and the keys
+// that verify it are that realm's.
+func TestAProducerTokenNamesAPrincipalAndIsJudgedLikeARecipientToken(t *testing.T) {
+	t.Parallel()
+	testKeys(t)
+	ks := realmKeys(t)
+	ec := signer{"ec1", "ES256", ecKey}
+	producer := func(f func(map[string]any)) map[string]any {
+		c := map[string]any{"iss": "alpha", "sub": "billing-service", "iat": now.Add(-time.Minute).Unix(), "exp": now.Add(10 * time.Minute).Unix()}
+		if f != nil {
+			f(c)
+		}
+		return c
+	}
+	got, err := domain.VerifyProducerToken(mint(t, ec, producer(nil), nil), ks, policy())
+	if err != nil || got.Subject != "billing-service" || !got.ExpiresAt.Equal(now.Add(10*time.Minute)) {
+		t.Fatalf("VerifyProducerToken = %+v, %v, want the principal the token names", got, err)
+	}
+	if sub, ok := domain.PeekSubject(mint(t, ec, producer(nil), nil)); !ok || sub != "billing-service" {
+		t.Fatalf("PeekSubject = %q, %v", sub, ok)
+	}
+	refused := map[string]string{
+		mint(t, ec, producer(func(c map[string]any) { delete(c, "sub") }), nil):                      "no subject",
+		mint(t, ec, producer(func(c map[string]any) { c["sub"] = "" }), nil):                         "an empty subject",
+		mint(t, ec, producer(func(c map[string]any) { c["iss"] = "beta" }), nil):                     "another realm's iss",
+		mint(t, ec, producer(func(c map[string]any) { c["exp"] = now.Add(-time.Hour).Unix() }), nil): "expired",
+		mint(t, ec, producer(func(c map[string]any) { delete(c, "exp") }), nil):                      "no expiry",
+		mint(t, signer{"ec1", "ES256", otherEC}, producer(nil), nil):                                 "another key",
+		mint(t, signer{"ec1", "ES256", ecKey}, producer(nil), map[string]any{"alg": "none"}):         "alg none",
+	}
+	for token, why := range refused {
+		if got, err := domain.VerifyProducerToken(token, ks, policy()); !errors.Is(err, domain.ErrInvalidToken) || got != (domain.ProducerClaims{}) {
+			t.Errorf("%s: VerifyProducerToken = %+v, %v, want ErrInvalidToken", why, got, err)
+		}
+	}
+	// A recipient token is not a producer's, and a producer token opens no inbox.
+	if _, err := domain.VerifyRecipientToken(mint(t, ec, producer(nil), nil), ks, policy()); !errors.Is(err, domain.ErrInvalidToken) {
+		t.Errorf("a producer token verified as a recipient token: %v: it names no tenant and recipient", err)
+	}
+}
