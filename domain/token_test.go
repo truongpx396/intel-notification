@@ -78,9 +78,23 @@ func jwksOf(t *testing.T, ks ...map[string]any) []byte {
 }
 
 func ecJWK(kid string, k *ecdsa.PublicKey) map[string]any {
-	return map[string]any{"kty": "EC", "crv": "P-256", "kid": kid, "use": "sig", "alg": "ES256",
-		"x": b64(k.X.FillBytes(make([]byte, 32))), "y": b64(k.Y.FillBytes(make([]byte, 32)))}
+	point, err := k.Bytes() // 0x04 || X || Y
+	if err != nil {
+		panic(err)
+	}
+	return map[string]any{"kty": "EC", "crv": "P-256", "kid": kid, "use": "sig", "alg": "ES256", "x": b64(point[1:33]), "y": b64(point[33:65])}
 }
+
+// withJWK returns jwk with one member set, or removed when v is nil.
+func withJWK(jwk map[string]any, k string, v any) map[string]any {
+	if v == nil {
+		delete(jwk, k)
+	} else {
+		jwk[k] = v
+	}
+	return jwk
+}
+
 func edJWK(kid string, k ed25519.PublicKey) map[string]any {
 	return map[string]any{"kty": "OKP", "crv": "Ed25519", "kid": kid, "x": b64(k)}
 }
@@ -189,71 +203,92 @@ func TestATokenIsRefused(t *testing.T) {
 		why   string
 	}{
 		{"expired", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["exp"] = now.Add(-time.Minute).Unix() }), nil)
 		}, policy(), "a token past its exp opens nothing"},
 		{"expired a moment ago, beyond the leeway", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["exp"] = now.Add(-time.Minute).Unix() }), nil)
 		}, policy(func(p *domain.TokenPolicy) { p.Leeway = time.Second }), "the leeway is what is configured"},
 		{"no exp", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { delete(c, "exp") }), nil)
 		}, policy(), "a token that never expires is not one a host mints (rest-api.md: exp ≤ 1 hour)"},
 		{"an exp more than an hour away", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["exp"] = now.Add(25 * time.Hour).Unix() }), nil)
 		}, policy(), "the lifetime is bounded, so a leaked token is bounded too"},
 		{"not yet valid", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["nbf"] = now.Add(time.Hour).Unix() }), nil)
 		}, policy(), "nbf in the future"},
 		{"issued in the future", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["iat"] = now.Add(time.Hour).Unix() }), nil)
 		}, policy(), "a clock that far off is not skew"},
 		{"wrong audience", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["aud"] = "some-other-service" }), nil)
 		}, policy(func(p *domain.TokenPolicy) { p.Audience = "intel-notification" }), "a token minted for another service"},
 		{"no audience where one is required", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, validClaims(), nil)
 		}, policy(func(p *domain.TokenPolicy) { p.Audience = "intel-notification" }), "an audience, once configured, is required"},
 		{"another realm's iss", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["iss"] = "beta" }), nil)
 		}, policy(), "a token for realm beta is not realm alpha's, even signed by a key alpha holds (NR-009)"},
 		{"signed by another realm's key under the same kid", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, signer{"ec1", "ES256", otherEC}, validClaims(), nil)
 		}, policy(), "the signature is checked against the realm's own key"},
 		{"signed by a key the realm does not hold", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, signer{"not-mine", "ES256", otherEC}, validClaims(), nil)
 		}, policy(), "an unknown kid"},
 		{"alg none with no signature", func(t *testing.T) string {
+			t.Helper()
 			return b64(jsonOf(t, map[string]any{"alg": "none", "kid": "ec1"})) + "." + b64(jsonOf(t, validClaims())) + "."
 		}, policy(), "alg none is no signature"},
 		{"alg none with a signature", func(t *testing.T) string {
+			t.Helper()
 			good := mint(t, ec, validClaims(), nil)
 			parts := strings.Split(good, ".")
 			return b64(jsonOf(t, map[string]any{"alg": "none", "kid": "ec1"})) + "." + parts[1] + "." + parts[2]
 		}, policy(), "alg none, whatever follows"},
 		{"alg None in another case", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, validClaims(), map[string]any{"alg": "NoNe"})
 		}, policy(), "the header's alg is not matched case-insensitively against an allow list"},
 		{"HS256 signed with the public key as the secret", func(t *testing.T) string {
+			t.Helper()
 			input := b64(jsonOf(t, map[string]any{"alg": "HS256", "kid": "ec1", "typ": "JWT"})) + "." + b64(jsonOf(t, validClaims()))
 			mac := hmac.New(sha256.New, jsonOf(t, ecJWK("ec1", &ecKey.PublicKey)))
 			mac.Write([]byte(input))
 			return input + "." + b64(mac.Sum(nil))
 		}, policy(), "the classic algorithm confusion: a shared secret either side can mint with"},
 		{"RS256 in the header over an EC key", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, validClaims(), map[string]any{"alg": "RS256"})
 		}, policy(), "the key decides the algorithm, not the header"},
 		{"ES256 in the header over an RSA key", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, signer{"rsa1", "RS256", rsaKey}, validClaims(), map[string]any{"alg": "ES256"})
 		}, policy(), "the key decides the algorithm, not the header"},
 		{"EdDSA in the header over an EC key", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, validClaims(), map[string]any{"alg": "EdDSA"})
 		}, policy(), "the key decides the algorithm, not the header"},
 		{"no kid", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, validClaims(), map[string]any{"kid": nil})
 		}, policy(), "which key is a guess without one"},
 		{"a critical header the verifier does not know", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, validClaims(), map[string]any{"crit": []string{"exp-extension"}})
 		}, policy(), "RFC 7515: a token that requires an extension we do not implement is refused"},
 		{"tampered payload", func(t *testing.T) string {
+			t.Helper()
 			good := mint(t, ec, validClaims(), nil)
 			parts := strings.Split(good, ".")
 			evil := validClaims()
@@ -261,15 +296,18 @@ func TestATokenIsRefused(t *testing.T) {
 			return parts[0] + "." + b64(jsonOf(t, evil)) + "." + parts[2]
 		}, policy(), "a claim changed after signing"},
 		{"tampered header", func(t *testing.T) string {
+			t.Helper()
 			good := mint(t, ec, validClaims(), nil)
 			parts := strings.Split(good, ".")
 			return b64(jsonOf(t, map[string]any{"alg": "ES256", "kid": "ec1", "extra": "x"})) + "." + parts[1] + "." + parts[2]
 		}, policy(), "the header is signed too"},
 		{"a truncated signature", func(t *testing.T) string {
+			t.Helper()
 			good := mint(t, ec, validClaims(), nil)
 			return good[:len(good)-6]
 		}, policy(), ""},
 		{"an ES256 signature in DER form", func(t *testing.T) string {
+			t.Helper()
 			input := b64(jsonOf(t, map[string]any{"alg": "ES256", "kid": "ec1"})) + "." + b64(jsonOf(t, validClaims()))
 			sum := sha256.Sum256([]byte(input))
 			der, err := ecdsa.SignASN1(rand.Reader, ecKey, sum[:])
@@ -279,37 +317,45 @@ func TestATokenIsRefused(t *testing.T) {
 			return input + "." + b64(der)
 		}, policy(), "JWS ES256 is the raw r||s, 64 bytes"},
 		{"no tenant", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { delete(c, "tenant") }), nil)
 		}, policy(), "a token must name whose inbox it opens"},
 		{"a tenant with an empty id", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["tenant"] = map[string]string{"kind": "workspace", "id": ""} }), nil)
 		}, policy(), "an empty component would equal an unset scope (D17)"},
 		{"no recipient", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { delete(c, "recipient") }), nil)
 		}, policy(), ""},
 		{"a recipient with an empty kind", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["recipient"] = map[string]string{"kind": "", "id": "u1"} }), nil)
 		}, policy(), ""},
 		{"not three parts", func(*testing.T) string { return "a.b" }, policy(), ""},
 		{"four parts", func(*testing.T) string { return "a.b.c.d" }, policy(), ""},
 		{"empty", func(*testing.T) string { return "" }, policy(), ""},
 		{"a payload that is not base64", func(t *testing.T) string {
+			t.Helper()
 			good := mint(t, ec, validClaims(), nil)
 			parts := strings.Split(good, ".")
 			return parts[0] + ".!!!." + parts[2]
 		}, policy(), ""},
 		{"padded base64, which JWS does not use", func(t *testing.T) string {
+			t.Helper()
 			good := mint(t, ec, validClaims(), nil)
 			parts := strings.Split(good, ".")
 			return parts[0] + "=." + parts[1] + "." + parts[2]
 		}, policy(), ""},
 		{"a payload that is not an object", func(t *testing.T) string {
+			t.Helper()
 			input := b64(jsonOf(t, map[string]any{"alg": "ES256", "kid": "ec1"})) + "." + b64([]byte(`"just a string"`))
 			sum := sha256.Sum256([]byte(input))
 			r, s, _ := ecdsa.Sign(rand.Reader, ecKey, sum[:])
 			return input + "." + b64(append(r.FillBytes(make([]byte, 32)), s.FillBytes(make([]byte, 32))...))
 		}, policy(), ""},
 		{"too large", func(t *testing.T) string {
+			t.Helper()
 			return mint(t, ec, with(func(c map[string]any) { c["pad"] = strings.Repeat("x", 9000) }), nil)
 		}, policy(), "no token is that large, and the verifier reads it all"},
 	}
@@ -399,8 +445,8 @@ func TestParseJWKS(t *testing.T) {
 			ecJWK("ec1", &ecKey.PublicKey),
 			map[string]any{"kty": "oct", "kid": "shared", "k": b64([]byte("secret"))},
 			map[string]any{"kty": "EC", "crv": "P-384", "kid": "p384", "x": "AA", "y": "AA"},
-			map[string]any{"kty": "EC", "crv": "P-256", "use": "enc", "kid": "enc", "x": b64(ecKey.X.FillBytes(make([]byte, 32))), "y": b64(ecKey.Y.FillBytes(make([]byte, 32)))},
-			map[string]any{"kty": "EC", "crv": "P-256", "x": b64(ecKey.X.FillBytes(make([]byte, 32))), "y": b64(ecKey.Y.FillBytes(make([]byte, 32)))}, // no kid
+			withJWK(ecJWK("enc", &ecKey.PublicKey), "use", "enc"),
+			withJWK(ecJWK("", &ecKey.PublicKey), "kid", nil), // no kid
 			rsaJWK("weak", &small.PublicKey),
 			map[string]any{"kty": "EC", "crv": "P-256", "kid": "off-curve", "x": b64(make([]byte, 32)), "y": b64(make([]byte, 32))},
 		)

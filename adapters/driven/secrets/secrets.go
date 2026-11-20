@@ -69,7 +69,7 @@ func readLimited(path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	buf := make([]byte, maxFileBytes+1)
 	n, err := f.Read(buf)
 	if err != nil && !errors.Is(err, io.EOF) {

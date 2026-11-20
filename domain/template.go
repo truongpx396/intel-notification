@@ -174,7 +174,7 @@ func parseTemplate(name, body string) (*template.Template, error) {
 		if each.Tree == nil {
 			continue
 		}
-		if err := checkNode(each.Tree.Root); err != nil {
+		if err := checkNode(each.Root); err != nil {
 			return nil, invalid("%s: %v", name, err)
 		}
 	}

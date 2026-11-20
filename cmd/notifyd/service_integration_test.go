@@ -108,10 +108,12 @@ const emailKey = "re_live_the-providers-api-key"
 // startService starts a service for one test. withEmail seeds the provider row that makes the email channel
 // exist; without it the service has the in-app channel alone.
 func startService(t *testing.T, withEmail bool) *world {
+	t.Helper()
 	return startServiceWith(t, serviceOpts{email: withEmail})
 }
 
 func startServiceOf(t *testing.T, withEmail, secondRealm bool) *world {
+	t.Helper()
 	return startServiceWith(t, serviceOpts{email: withEmail, secondRealm: secondRealm})
 }
 
@@ -297,6 +299,7 @@ func (w *world) scenario(skipTemplates bool) (failedAt string, err error) {
 }
 
 func TestNS011AProducerThatKnowsOnlyTheAPIGetsOneNotificationDeliveredOnTwoChannels(t *testing.T) {
+	t.Parallel()
 	w := startService(t, true)
 	if failedAt, err := w.scenario(false); err != nil {
 		t.Fatalf("the scenario failed at %q: %v", failedAt, err)
@@ -390,6 +393,7 @@ func TestNS011AProducerThatKnowsOnlyTheAPIGetsOneNotificationDeliveredOnTwoChann
 // T051's "show it can fail", the first half: a service with one channel only. The scenario fails at the step
 // that needs the second channel, and says what is missing.
 func TestTheScenarioFailsWhenTheServiceHasOneChannelOnly(t *testing.T) {
+	t.Parallel()
 	w := startService(t, false)
 	failedAt, err := w.scenario(false)
 	if failedAt != "register the topic" || !errors.Is(err, domain.ErrUnknownChannel) || !strings.Contains(err.Error(), "email") {
@@ -401,6 +405,7 @@ func TestTheScenarioFailsWhenTheServiceHasOneChannelOnly(t *testing.T) {
 // reaches the provider as nothing, because there is no copy to send: it is rejected, and the scenario fails
 // at the delivery it was written to see.
 func TestTheScenarioFailsWhenTheTemplateRegistrationIsSkipped(t *testing.T) {
+	t.Parallel()
 	w := startService(t, true)
 	failedAt, err := w.scenario(true)
 	if failedAt != "see it delivered on two channels" || err == nil || !strings.Contains(err.Error(), "rejected") {
@@ -413,6 +418,7 @@ func TestTheScenarioFailsWhenTheTemplateRegistrationIsSkipped(t *testing.T) {
 
 // Isolation is the schema's, so the service refuses a database role that would skip it.
 func TestTheServiceRefusesADatabaseRoleThatBypassesRowLevelSecurity(t *testing.T) {
+	t.Parallel()
 	db := pgtest.New(t)
 	redisOpt := redistest.New(t).Client.Options()
 	env := func(dsn string, allow string) func(string) string {
@@ -462,6 +468,7 @@ func (w *world) producerAs(realm domain.Realm, principal string) (*grpcclient.Ca
 // cannot see the other's. The topic one registers is unknown to the other, and a token one host signed for
 // one realm opens nothing in the other.
 func TestTwoRealmsInOneProcessNeverMeet(t *testing.T) {
+	t.Parallel()
 	w := startServiceOf(t, false, true)
 	catalogLocal, senderLocal := w.producerAs("local", "local-producer")
 	catalogOther, senderOther := w.producerAs("other", "other-producer")
@@ -540,6 +547,7 @@ func TestTwoRealmsInOneProcessNeverMeet(t *testing.T) {
 // notification in that realm, acknowledged after the commit, with the service as the only thing between the
 // bus and the database.
 func TestTheServiceIngestsFromJetStreamInTheRealmOfTheSubject(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
 	ctr, err := natscontainer.Run(ctx, "nats:2.11-alpine")

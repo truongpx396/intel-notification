@@ -22,9 +22,6 @@ import (
 // T052, NR-035, NR-009, D23. A message is a Notify call that arrived on a stream, acknowledged only after it
 // committed, in the realm of its subject, and never able to block the stream behind it.
 
-// event is one thing that happened, in order, so a test can say what came before what.
-type event struct{ what string }
-
 type log struct {
 	mu     sync.Mutex
 	events []string
@@ -320,7 +317,7 @@ func TestAMessageThatCanNeverSucceedIsParkedAndTerminated(t *testing.T) {
 			m.delivered = 3
 			w.ingest.Handle(t.Context(), m)
 			events := w.log.all()
-			if i, j, k := w.log.index("poison recorded"), w.log.index("dlq published"), w.log.index("term"); !(i >= 0 && j > i && k > j) {
+			if i, j, k := w.log.index("poison recorded"), w.log.index("dlq published"), w.log.index("term"); i < 0 || j <= i || k <= j {
 				t.Fatalf("events = %v, want it recorded, then told to operators, then terminated: never terminated unrecorded", events)
 			}
 			if w.log.index("ack") >= 0 || w.log.index("nak") >= 0 {
@@ -417,7 +414,7 @@ func TestAMessageThatFailsAtEveryDeliveryIsPoisonAtMaxDeliver(t *testing.T) {
 	m := w.msg(subjectFor("alpha", tenant), body(nil))
 	m.delivered = 5
 	w.ingest.Handle(t.Context(), m)
-	if i, j, k := w.log.index("poison recorded"), w.log.index("dlq published"), w.log.index("term"); !(i >= 0 && j > i && k > j) {
+	if i, j, k := w.log.index("poison recorded"), w.log.index("dlq published"), w.log.index("term"); i < 0 || j <= i || k <= j {
 		t.Fatalf("events = %v, want it parked and terminated at the last delivery, so it stops being redelivered", w.log.all())
 	}
 	w.sink.mu.Lock()
