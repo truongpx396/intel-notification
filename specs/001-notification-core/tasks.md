@@ -1015,9 +1015,16 @@ rule above.
 
 ## Stage 10 — Transports
 
-- [ ] **T045** [P] *setup* `api/notifyv1`: the proto from the contract. It is listed first because the
+- [x] **T045** [P] *setup* `api/notifyv1`: the proto from the contract. It is listed first because the
       gRPC run of T047 and T046 are both written against its generated code. Generated code is data
       with no test of its own; a lint and breaking-change check on the proto runs in CI
+      *The proto is the contract's, verbatim, in a buf module at `api/proto` (so a file's directory matches its
+      package); the Go it generates is committed at `api/notifyv1`, so a host that imports the module needs no
+      protoc. Three gates, each shown to fail ([ledger](../../docs/mutations.md)): `make proto-lint` (buf, `BASIC`
+      rules: `STANDARD` would rename the locked RPCs), `make proto-check` (regenerates, and fails when the
+      committed code was stale) and `make proto-breaking` (against the base branch; it says so, and passes, where the
+      base has no proto yet). CI has a `proto` job that installs the Makefile's pinned versions; the `api` and
+      `driving` components are switched on in `.go-arch-lint.yml`.*
 - [ ] **T047a** *red* Enable the Playwright suite: remove `test.describe.fixme` from the `e2e/` specs as
       the routes they drive land, implement `/healthz` and `/readyz`, and switch on the `e2e` CI job
       ([docs/testing.md](../../docs/testing.md)). This is the standing outer loop and stays open until
@@ -1029,10 +1036,22 @@ rule above.
       `errors.New("not implemented")`, so the run fails on each assertion and not on a missing package.
       The kit's `Relay`, an SSE client for a base URL, is built here as part of the red's setup; until
       T044 lands nothing serves the route, so `StreamIsolationContract` fails on its first assertion
-- [ ] **T043** *green* `driving/inprocess`: returns the engine's ports (NR-025). `NotifierContract`
+      *Progress: the gRPC half is done and the box stays open for the other. `TestNotifierContractOverGRPC` (in memory
+      and on Redis) is `NotifierContract` unchanged on an Env whose `Notifier` is the gRPC client of a server over the
+      Env's own, with `notifytest.Remote()`: the three `NotifyTx` cases become the one a remote Notifier owes
+      (`ErrTxUnsupported`, nothing written), and the failed-commit case asks for an error and not the injected one,
+      since a producer is never shown the engine's internals. **Red, witnessed on the stub client:**
+      `notifiercontract.go:175: Notify(k1): grpcclient: not implemented`, 21 cases (the lines are in the `test:`
+      commit). `StreamIsolationContract` and the kit's `Relay` come with the relay, in the REST change of this stack.*
+- [x] **T043** *green* `driving/inprocess`: returns the engine's ports (NR-025). `NotifierContract`
       runs through it unchanged.
       **Mutate:** none. It adds no guarantee of its own; the T024 suite passing through it is the proof,
       and a mutation here would be one of T022's
+      *`inprocess.Engine` is the five driving ports as an embedded host holds them, with nothing in it: a transport
+      that did anything here would make the library and the service differ. `NotifierContract` runs through its
+      `Notifier` (`TestNotifierContractThroughTheInProcessEngine`). The one-call `app.New` that the contract's
+      `Engine` describes is still unbuilt: `app` cannot import a driving adapter, so it would return its own type
+      (the README and the integration guide say so).*
 - [ ] **T044** *red → green* `driving/httpapi`: the REST surface and the SSE relay — subscription from
       the session identity, per-nudge scoped re-read, bounded count first on connect
       ([rest-api.md](contracts/rest-api.md)).
@@ -1044,10 +1063,19 @@ rule above.
       parsed; the stream subscribes from the session's identity and not from a query parameter; a forged
       nudge shows nothing; the bounded count is sent first on connect.
       **Mutate:** read the recipient from a header; parse the webhook body before verifying it
-- [ ] **T046** [P] *red → green* `driving/grpcserver`, `driving/grpcclient` (satisfies `ports.Notifier`;
+- [x] **T046** [P] *red → green* `driving/grpcserver`, `driving/grpcclient` (satisfies `ports.Notifier`;
       `NotifyTx` returns `ErrTxUnsupported`). Make the T047 gRPC run pass.
       **Red first:** a unit test that `NotifyTx` returns `ErrTxUnsupported` and never opens a transaction.
       **Mutate:** open a transaction in `NotifyTx`; return `nil` instead of `ErrTxUnsupported`
+      *Both stand on `adapters/driving/wire`, which maps every message and every error. **Red, witnessed:**
+      `client_test.go:46: a caller's transaction: NotifyTx = grpcclient: not implemented, want domain.ErrTxUnsupported`
+      (the lines are in the `test:` commit). The server adds only the two rules that belong to the wire, a key on
+      every mutating call and a batch of at most 500 (refused whole, each item independent within it); a refusal
+      crosses as a code and an `ErrorInfo` reason a producer in any language branches on, and the client turns it back
+      into the library's sentinel; a fault is reported and shown as "internal error". A `Struct` holds numbers as
+      doubles, so an integer beyond 2^53 in `Data` is refused by the client and not rounded. The two mutants this task
+      names die on `TestNotifyTxIsUnsupportedAndNeverOpensATransaction`; the ledger holds 25 rows for this task and 10 for
+      T047's gRPC run, all killed. The contract's text now carries the error table and the batch's shape.*
 
 ## Stage 11 — Service mode
 
@@ -1164,7 +1192,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding and with a pending delivery; no row deleted on the way to a retirement (a `DELETE` witness, in place of `n_tup_del`); the jobs' cutoffs (`TestRetentionRetiresEachTableAtItsOwnWindow`, `TestTheExpiriesCutAtTheIdempotencyWindowInBatches`); that the `DELETE` witness can fire (`TestTheRetirementWitnessRecordsADeletion`) | T006 (done), T038, T039 |
 | NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; `QuotaContract` and the `channel_quotas` table; noisy-neighbour test | T016 (done), T036 (done), T037 (done) |
 | NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017 (done), T025 (done), T028 (done) |
-| NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
+| NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043 (done), T047, T051 |
 | NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |
 | NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020 (done), T022a (done), T024 (done) |
 | NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033 (done), T048 |

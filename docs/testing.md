@@ -160,7 +160,13 @@ per idempotency key, a channel registry, in-memory fakes for the read-side ports
 - **Contract tables.** `PreferenceStoreContract` and `PreCheckContract` are run by an in-memory fake and by
   the adapter it stands in for. `NotifierContract` is run by the in-process Notifier, in memory and on
   Redis, and is written so the transports reuse it: the cases that join a caller's transaction hold for
-  the in-process Notifier only. `DispatcherContract` is run by the in-process Dispatcher over the Env's real
+  the in-process Notifier only. The gRPC transport runs the same suite on an Env whose Notifier is the
+  client of a server over the Env's own (`grpcclient`'s `TestNotifierContractOverGRPC`, in memory and on
+  Redis), with `notifytest.Remote()`: it swaps the three `NotifyTx` cases for the one a remote Notifier owes
+  (`ErrTxUnsupported`, nothing written), and asks of the failed-commit case an error and not the injected one,
+  because a producer is never shown the engine's internals. The gRPC server and client are tested first with
+  no infrastructure, over an in-memory gRPC connection (`notifytest.NewBufconn`), with
+  `notifytest.ScriptedNotifier` standing in for the engine. `DispatcherContract` is run by the in-process Dispatcher over the Env's real
   queue, and again by the webhook package with a third channel registered, to show a channel is one
   registration.
 - **`Scripted`, `Normalizing`, `Metrics`.** The probe-backed `Channel` cannot say what the dispatcher handed

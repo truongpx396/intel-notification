@@ -1,0 +1,124 @@
+syntax = "proto3";
+package notify.v1;
+option go_package = "github.com/truongpx396/intel-notification/api/notifyv1";
+
+// The producer, catalog and directory surface (contracts/notification-ports.md § Service surface).
+// This file is the contract's proto, verbatim: the contract is normative and a change to either is a
+// change to both. buf lint and buf breaking run in CI (make proto-lint, make proto-breaking).
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// No message carries a realm. The service derives it from the authenticated producer
+// principal (mTLS SAN or token subject) through RealmBindings (D31).
+
+message Tenant    { string kind = 1; string id = 2; }
+message Recipient { string kind = 1; string id = 2; }
+
+message Notification {
+  Tenant tenant = 1;
+  Recipient recipient = 2;
+  string topic = 3;
+  string priority = 4;                         // "" ⇒ topic default
+  google.protobuf.Struct data = 5;             // template variables (D27)
+  string title = 6;                            // fallback copy, optional
+  string body = 7;
+  map<string, string> payload = 8;             // deep links — never a routing input
+  string idem_key = 9;                         // REQUIRED
+  google.protobuf.Timestamp occurred_at = 10;
+  google.protobuf.Timestamp deliver_after = 11;
+  google.protobuf.Timestamp deliver_before = 12;
+  map<string, string> attributes = 13;         // audit only
+}
+message Receipt {
+  string notification_id = 1;
+  bool applied = 2;
+  repeated string channels = 3;
+  bool inbox_visible = 4;
+}
+message NotifyBatchRequest  { repeated Notification notifications = 1; }   // <= 500, each independent
+message NotifyBatchResponse { repeated Receipt receipts = 1; repeated string errors = 2; }
+
+message RecipientList { repeated Recipient recipients = 1; }               // <= MaxInlineRecipients
+message BroadcastRequest {
+  Tenant tenant = 1;
+  oneof source { string audience = 2; RecipientList recipients = 3; }
+  string topic = 4;
+  string priority = 5;
+  google.protobuf.Struct data = 6;
+  string title = 7;
+  string body = 8;
+  map<string, string> payload = 9;
+  string idem_key = 10;                        // REQUIRED
+}
+message BroadcastReceipt { string broadcast_id = 1; bool applied = 2; }
+
+message NotificationRef { Tenant tenant = 1; Recipient recipient = 2; string idem_key = 3; }
+message CancelReceipt   { bool matched = 1; int32 canceled = 2; int32 in_flight = 3; }
+message DeliveryStatus {
+  string channel = 1;
+  string address_key = 2;
+  string state = 3;                            // pending | delivered | suppressed | … | fanned_out
+  int32 attempts = 4;
+  string provider_message_id = 5;
+  string provider_status = 6;
+  google.protobuf.Timestamp completed_at = 7;
+}
+message NotificationStatus {
+  bool found = 1;
+  string notification_id = 2;
+  bool canceled = 3;
+  repeated DeliveryStatus deliveries = 4;
+}
+
+// The producer surface. Named Notifier: a service may not share a name with a message.
+service Notifier {
+  rpc Notify      (Notification)       returns (Receipt);
+  rpc NotifyBatch (NotifyBatchRequest) returns (NotifyBatchResponse);
+  rpc Broadcast   (BroadcastRequest)   returns (BroadcastReceipt);
+  rpc Cancel      (NotificationRef)    returns (CancelReceipt);
+  rpc Status      (NotificationRef)    returns (NotificationStatus);
+}
+
+// ---- management: service mode's replacement for host code (D31) ----
+
+message Topic {
+  string topic = 1;
+  repeated string default_channels = 2;
+  repeated string fallback = 3;
+  string default_priority = 4;
+  bool essential = 5;
+  string template_ref = 6;
+}
+message Template {
+  Tenant tenant = 1;                           // unset ⇒ realm-wide; set ⇒ per-tenant override
+  string template_ref = 2;
+  string channel = 3;
+  string locale = 4;
+  int32 version = 5;                           // assigned by the service on Put
+  string subject = 6;
+  string body = 7;                             // Go template; a restricted function map, no I/O
+  google.protobuf.Struct data = 8;
+}
+message TemplateVersion { Tenant tenant = 1; string template_ref = 2; string channel = 3; string locale = 4; int32 version = 5; }
+message Address { string value = 1; string locale = 2; string timezone = 3; map<string, string> meta = 4; }
+message RecipientAddresses { Tenant tenant = 1; Recipient recipient = 2; string channel = 3; repeated Address addresses = 4; }
+message TenantPreference { Tenant tenant = 1; string topic = 2; string channel = 3; bool enabled = 4; bool locked = 5; }
+message EraseRequest { Tenant tenant = 1; Recipient recipient = 2; }
+message EraseReceipt { map<string, int32> removed = 1; }
+
+service Catalog {
+  rpc UpsertTopic         (Topic)              returns (Topic);
+  rpc PutTemplate         (Template)           returns (Template);          // a new version, inactive
+  rpc ActivateTemplate    (TemplateVersion)    returns (Template);
+  rpc PutAddresses        (RecipientAddresses) returns (RecipientAddresses); // replaces one channel's set
+  rpc SetTenantPreference (TenantPreference)   returns (TenantPreference);
+  rpc Erase               (EraseRequest)       returns (EraseReceipt);      // D35
+}
+
+// Implemented by the HOST when audience selectors should be resolved by callback.
+message ResolveAudienceRequest  { Tenant tenant = 1; string audience = 2; string cursor = 3; }
+message ResolveAudienceResponse { repeated Recipient recipients = 1; string next_cursor = 2; }
+service Directory {
+  rpc ResolveAudience (ResolveAudienceRequest) returns (ResolveAudienceResponse);
+}

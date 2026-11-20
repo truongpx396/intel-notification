@@ -160,9 +160,14 @@ func channelsOf(r domain.Receipt) []string {
 //
 // The cases that join a caller's transaction (NotifyTx) hold for the in-process
 // Notifier; a remote one returns domain.ErrTxUnsupported, and the transport suite
-// that reuses this one says which cases it leaves out.
-func NotifierContract(t *testing.T, newEnv func(t *testing.T) *Env) {
+// that reuses this one passes [Remote], which swaps them for the one thing a remote
+// Notifier owes there.
+func NotifierContract(t *testing.T, newEnv func(t *testing.T) *Env, opts ...ContractOption) {
 	t.Helper()
+	var o contractOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 
 	t.Run("a replay is one row and one enqueue per channel (NR-002)", func(t *testing.T) {
 		t.Parallel()
@@ -220,7 +225,14 @@ func NotifierContract(t *testing.T, newEnv func(t *testing.T) *Env) {
 		key := domain.PreCheckKey(f.id, "k1")
 
 		f.e.Store.FailNextCommit()
-		if _, err := f.e.Notifier.Notify(t.Context(), f.note("k1")); !errors.Is(err, ErrInjectedCommit) {
+		_, err := f.e.Notifier.Notify(t.Context(), f.note("k1"))
+		switch {
+		case o.remote && err == nil:
+			// A fault of the engine's own crosses a wire as "there was a fault" and nothing more
+			// (the producer is not shown the engine's internals), so the identity of the
+			// injected error is not something a remote Notifier can keep.
+			t.Fatal("Notify with the commit failed = nil, want an error")
+		case !o.remote && !errors.Is(err, ErrInjectedCommit):
 			t.Fatalf("Notify with the commit failed = %v, want ErrInjectedCommit", err)
 		}
 		if id, ok, _ := f.e.PreCheck.Seen(t.Context(), key); ok {
@@ -237,87 +249,109 @@ func NotifierContract(t *testing.T, newEnv func(t *testing.T) *Env) {
 		}
 	})
 
-	t.Run("NotifyTx rolled back by the host leaves nothing (D28)", func(t *testing.T) {
-		t.Parallel()
-		f := newNotifierFixture(t, newEnv)
-		tx, err := f.e.DB.Owner.Begin(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		r, err := f.e.Notifier.NotifyTx(t.Context(), tx, f.note("k1"))
-		if err != nil || !r.Applied {
-			_ = tx.Rollback(t.Context())
-			t.Fatalf("NotifyTx = %+v, %v, want applied inside the caller's transaction", r, err)
-		}
-		if err := tx.Rollback(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-		f.nothingPersisted(f.id, "the host rolled back")
-		if claims, err := f.e.Queue.Claim(t.Context(), f.shard(), 10, time.Minute); err != nil || len(claims) != 0 {
-			t.Fatalf("Claim = %d rows, %v, want nothing: a rolled-back NotifyTx left work", len(claims), err)
-		}
-		if id, ok, _ := f.e.PreCheck.Seen(t.Context(), domain.PreCheckKey(f.id, "k1")); ok {
-			t.Fatalf("the pre-check remembers %s for a transaction the host rolled back", id)
-		}
-		if again := f.notify(f.note("k1")); !again.Applied {
-			t.Fatal("the key was spent by a transaction that rolled back")
-		}
-	})
-
-	t.Run("NotifyTx committed by the host is delivered (D28)", func(t *testing.T) {
-		t.Parallel()
-		f := newNotifierFixture(t, newEnv)
-		tx, err := f.e.DB.Owner.Begin(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		r, err := f.e.Notifier.NotifyTx(t.Context(), tx, f.note("k1"))
-		if err != nil || !r.Applied {
-			_ = tx.Rollback(t.Context())
-			t.Fatalf("NotifyTx = %+v, %v, want applied", r, err)
-		}
-		// Not committed yet: nothing is visible to another session, and a replay of
-		// the key inside the same transaction is a replay.
-		if n := f.rows("notifications", f.id); n != 0 {
-			_ = tx.Rollback(t.Context())
-			t.Fatalf("%d notifications visible before the host committed", n)
-		}
-		if err := tx.Commit(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-
-		claims, err := f.e.Queue.Claim(t.Context(), f.shard(), 10, time.Minute)
-		if err != nil {
-			t.Fatalf("Claim: %v", err)
-		}
-		var claimed []string
-		for _, c := range claims {
-			if c.Entry.NotificationID != r.NotificationID {
-				t.Errorf("claimed a delivery of %s, want %s", c.Entry.NotificationID, r.NotificationID)
+	if o.remote {
+		t.Run("NotifyTx is unsupported and writes nothing (D28)", func(t *testing.T) {
+			t.Parallel()
+			f := newNotifierFixture(t, newEnv)
+			// A control first, so a Notifier that accepts nothing cannot pass.
+			f.notify(f.note("control"))
+			tx, err := f.e.DB.Owner.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
 			}
-			claimed = append(claimed, string(c.Entry.Channel))
-		}
-		slices.Sort(claimed)
-		if !slices.Equal(claimed, []string{"email", "in_app"}) {
-			t.Fatalf("claimed channels %v, want email and in_app: committed work must be claimable", claimed)
-		}
-		if id, ok, _ := f.e.PreCheck.Seen(t.Context(), domain.PreCheckKey(f.id, "k1")); ok {
-			t.Fatalf("the pre-check remembers %s: NotifyTx must never write it, the host may yet roll back", id)
-		}
-	})
+			defer func() { _ = tx.Rollback(t.Context()) }()
+			r, err := f.e.Notifier.NotifyTx(t.Context(), tx, f.note("k1"))
+			if !errors.Is(err, domain.ErrTxUnsupported) {
+				t.Fatalf("NotifyTx = %+v, %v, want domain.ErrTxUnsupported: the service cannot commit with the producer's transaction", r, err)
+			}
+			if got := f.rows("notifications", f.id); got != 1 {
+				t.Errorf("%d notifications, want only the control's: the refused call wrote", got)
+			}
+		})
+	} else {
+		t.Run("NotifyTx rolled back by the host leaves nothing (D28)", func(t *testing.T) {
+			t.Parallel()
+			f := newNotifierFixture(t, newEnv)
+			tx, err := f.e.DB.Owner.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := f.e.Notifier.NotifyTx(t.Context(), tx, f.note("k1"))
+			if err != nil || !r.Applied {
+				_ = tx.Rollback(t.Context())
+				t.Fatalf("NotifyTx = %+v, %v, want applied inside the caller's transaction", r, err)
+			}
+			if err := tx.Rollback(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			f.nothingPersisted(f.id, "the host rolled back")
+			if claims, err := f.e.Queue.Claim(t.Context(), f.shard(), 10, time.Minute); err != nil || len(claims) != 0 {
+				t.Fatalf("Claim = %d rows, %v, want nothing: a rolled-back NotifyTx left work", len(claims), err)
+			}
+			if id, ok, _ := f.e.PreCheck.Seen(t.Context(), domain.PreCheckKey(f.id, "k1")); ok {
+				t.Fatalf("the pre-check remembers %s for a transaction the host rolled back", id)
+			}
+			if again := f.notify(f.note("k1")); !again.Applied {
+				t.Fatal("the key was spent by a transaction that rolled back")
+			}
+		})
 
-	t.Run("NotifyTx refuses to run without the host's transaction", func(t *testing.T) {
-		t.Parallel()
-		f := newNotifierFixture(t, newEnv)
-		// A control first, so a Notifier that accepts nothing cannot pass.
-		f.notify(f.note("control"))
-		if r, err := f.e.Notifier.NotifyTx(t.Context(), nil, f.note("k1")); err == nil {
-			t.Fatalf("NotifyTx with no transaction = %+v, want an error: a nil tx would make the engine open and commit its own (D28)", r)
-		}
-		if got := f.rows("notifications", f.id); got != 1 {
-			t.Errorf("%d notifications, want only the control's: the refused call wrote", got)
-		}
-	})
+		t.Run("NotifyTx committed by the host is delivered (D28)", func(t *testing.T) {
+			t.Parallel()
+			f := newNotifierFixture(t, newEnv)
+			tx, err := f.e.DB.Owner.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := f.e.Notifier.NotifyTx(t.Context(), tx, f.note("k1"))
+			if err != nil || !r.Applied {
+				_ = tx.Rollback(t.Context())
+				t.Fatalf("NotifyTx = %+v, %v, want applied", r, err)
+			}
+			// Not committed yet: nothing is visible to another session, and a replay of
+			// the key inside the same transaction is a replay.
+			if n := f.rows("notifications", f.id); n != 0 {
+				_ = tx.Rollback(t.Context())
+				t.Fatalf("%d notifications visible before the host committed", n)
+			}
+			if err := tx.Commit(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+
+			claims, err := f.e.Queue.Claim(t.Context(), f.shard(), 10, time.Minute)
+			if err != nil {
+				t.Fatalf("Claim: %v", err)
+			}
+			var claimed []string
+			for _, c := range claims {
+				if c.Entry.NotificationID != r.NotificationID {
+					t.Errorf("claimed a delivery of %s, want %s", c.Entry.NotificationID, r.NotificationID)
+				}
+				claimed = append(claimed, string(c.Entry.Channel))
+			}
+			slices.Sort(claimed)
+			if !slices.Equal(claimed, []string{"email", "in_app"}) {
+				t.Fatalf("claimed channels %v, want email and in_app: committed work must be claimable", claimed)
+			}
+			if id, ok, _ := f.e.PreCheck.Seen(t.Context(), domain.PreCheckKey(f.id, "k1")); ok {
+				t.Fatalf("the pre-check remembers %s: NotifyTx must never write it, the host may yet roll back", id)
+			}
+		})
+
+		t.Run("NotifyTx refuses to run without the host's transaction", func(t *testing.T) {
+			t.Parallel()
+			f := newNotifierFixture(t, newEnv)
+			// A control first, so a Notifier that accepts nothing cannot pass.
+			f.notify(f.note("control"))
+			if r, err := f.e.Notifier.NotifyTx(t.Context(), nil, f.note("k1")); err == nil {
+				t.Fatalf("NotifyTx with no transaction = %+v, want an error: a nil tx would make the engine open and commit its own (D28)", r)
+			}
+			if got := f.rows("notifications", f.id); got != 1 {
+				t.Errorf("%d notifications, want only the control's: the refused call wrote", got)
+			}
+		})
+
+	}
 
 	t.Run("a disabled channel is not enqueued; the row still exists (NR-011, NR-012)", func(t *testing.T) {
 		t.Parallel()
@@ -640,3 +674,14 @@ func NotifierContract(t *testing.T, newEnv func(t *testing.T) *Env) {
 		}
 	})
 }
+
+// ContractOption changes what NotifierContract asks of the Notifier under test.
+type ContractOption func(*contractOptions)
+
+type contractOptions struct{ remote bool }
+
+// Remote says the Notifier under test is on the far side of a wire, as the gRPC client is. It cannot
+// join a caller's transaction, so the three cases that do are replaced by one that holds it to
+// domain.ErrTxUnsupported; and it cannot return a fault's own error value, so the failed-commit case
+// asks for an error and not for the injected one. Every other case runs unchanged (NR-025).
+func Remote() ContractOption { return func(o *contractOptions) { o.remote = true } }

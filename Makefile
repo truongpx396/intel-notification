@@ -129,6 +129,41 @@ soak: ## Sustained-load soak of the queue for SOAK_DURATION (default 10m); needs
 	SOAK_DURATION=$(SOAK_DURATION) PGTEST_DURABLE=1 go test -tags integration -run '^TestSoak$$' \
 	  -v -count=1 -timeout 0 ./adapters/driven/postgres
 
+# ---------------------------------------------------------------- proto -------
+# api/proto is the contract's gRPC surface (T045); api/notifyv1 is what it generates, committed, so a
+# host that only imports the module needs no protoc. The tools are on PATH: CI installs the versions
+# below, and a different local version shows up as a change in `proto-check`.
+BUF_VERSION                ?= v1.60.0
+PROTOC_GEN_GO_VERSION      ?= v1.36.12
+PROTOC_GEN_GO_GRPC_VERSION ?= v1.6.2
+PROTO_BASE                 ?= origin/main
+
+.PHONY: proto proto-lint proto-check proto-breaking
+proto: ## Regenerate api/notifyv1 from api/proto (needs buf, protoc-gen-go, protoc-gen-go-grpc)
+	@command -v buf >/dev/null || { echo "buf not installed: go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)"; exit 1; }
+	buf generate
+
+proto-lint: ## buf lint on the proto
+	@command -v buf >/dev/null || { echo "buf not installed: go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)"; exit 1; }
+	buf lint
+
+# Regenerates in place and compares a checksum of the generated files before and after, so it needs
+# no scratch directory and says the same thing in a clean checkout (CI) and in a working tree.
+proto-check: ## Fail when api/notifyv1 is not what api/proto generates (regenerates it)
+	@command -v buf >/dev/null || { echo "buf not installed: go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)"; exit 1; }
+	@before=$$(cat api/notifyv1/*.go | cksum); buf generate; after=$$(cat api/notifyv1/*.go | cksum); \
+	if [ "$$before" = "$$after" ]; then echo "api/notifyv1 is current"; \
+	else echo "api/notifyv1 was stale and has been regenerated: commit the result"; exit 1; fi
+
+# A breaking change to a wire contract breaks every producer in every language, so the proto is
+# compared with the base branch's. Where the base has no proto yet (the change that adds it) there is
+# nothing to break, and the target says so instead of failing.
+proto-breaking: ## buf breaking against PROTO_BASE (default origin/main)
+	@command -v buf >/dev/null || { echo "buf not installed: go install github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)"; exit 1; }
+	@if git cat-file -e "$(PROTO_BASE):api/proto/notify/v1/notify.proto" 2>/dev/null; then \
+	  buf breaking --against ".git#ref=$(PROTO_BASE)"; \
+	else echo "$(PROTO_BASE) has no proto yet: nothing to break"; fi
+
 # ------------------------------------------------------------------ e2e -------
 .PHONY: e2e e2e-list
 e2e: ## Playwright end-to-end tests against the compose stack (needs Docker, Node 24)
@@ -150,4 +185,4 @@ docs-links: ## Fail on a relative markdown link with no target on disk
 	if [ $$fail -eq 0 ]; then echo "links OK"; else echo "dangling links above"; exit 1; fi
 
 .PHONY: ci
-ci: lint-sql verify-schema docs-links build test test-integration lint arch-lint e2e-list ## Everything CI runs today
+ci: lint-sql verify-schema docs-links proto-lint proto-check proto-breaking build test test-integration lint arch-lint e2e-list ## Everything CI runs today
