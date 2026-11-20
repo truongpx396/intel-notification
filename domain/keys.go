@@ -81,3 +81,11 @@ func QuotaCounterKey(k QuotaKey, w QuotaWindow, at time.Time) string {
 	return "notify:quota:{" + sha256Hex(Canonical(string(k.Realm), k.Tenant.Kind, k.Tenant.ID, string(k.Channel))) + "}:" +
 		string(w) + ":" + strconv.FormatInt(w.Start(at).Unix(), 10)
 }
+
+// TenantToken is a tenant's token in a bus subject: the first 16 hex characters of
+// sha256(canonical(tenant kind, tenant id)). A tenant id is opaque and may hold a '.', '*' or '>', each of
+// which would break or wildcard a subject, and a hash cannot. It only routes: the payload carries the whole
+// identity (contracts/bus-subjects.md).
+func TenantToken(t Tenant) string {
+	return sha256Hex(Canonical(t.Kind, t.ID))[:16]
+}

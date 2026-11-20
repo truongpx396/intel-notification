@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -275,3 +276,68 @@ func TestAProviderRowCannotHoldABareCredential(t *testing.T) {
 		t.Fatal("a row whose secret_ref is a bare key was stored, want the schema to refuse it")
 	}
 }
+
+// T052, NR-035. A message the bus ingest gave up on is parked as a dead letter, once however many times it is
+// recorded, with what arrived, and is not a delivery to replay.
+func TestPoisonIsParkedOnceAsABusDeadLetter(t *testing.T) {
+	t.Parallel()
+	db := pgtest.New(t)
+	s := postgres.New(db.Owner, postgres.WithClock(fixedClock{time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)}))
+	msg := domain.PoisonMessage{Realm: "alpha", Key: "NOTIFY:7", Subject: "notify.ingest.alpha.e5a69683f60c0c5f", Body: []byte(`{"topic":"t"}`), Attempts: 1, Reason: "idem_key is required"}
+	for range 3 {
+		if err := s.RecordPoison(t.Context(), msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var n int
+	var source, reason, lastErr, body string
+	var tenant *string
+	if err := db.Admin.QueryRow(t.Context(), `SELECT count(*) FROM dead_letters`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("%d dead letters after recording one message three times, %v, want 1", n, err)
+	}
+	if err := db.Admin.QueryRow(t.Context(), `SELECT source, reason, last_error, payload->>'body', tenant_id FROM dead_letters`).Scan(&source, &reason, &lastErr, &body, &tenant); err != nil {
+		t.Fatal(err)
+	}
+	if source != "bus" || reason != "poison" || lastErr != "idem_key is required" || body != `{"topic":"t"}` || tenant != nil {
+		t.Fatalf("row = %q %q %q %q tenant=%v, want a bus poison holding what arrived and no tenant", source, reason, lastErr, body, tenant)
+	}
+	// Another message is another dead letter, and a body that is not text is kept as base64.
+	other := msg
+	other.Key, other.Body = "NOTIFY:8", []byte{0xff, 0xfe, 0x00, 0x01}
+	if err := s.RecordPoison(t.Context(), other); err != nil {
+		t.Fatal(err)
+	}
+	var enc string
+	if err := db.Admin.QueryRow(t.Context(), `SELECT payload->>'body_encoding' FROM dead_letters WHERE last_error = $1 AND payload->>'key' = 'NOTIFY:8'`, msg.Reason).Scan(&enc); err != nil || enc != "base64" {
+		t.Fatalf("body encoding = %q, %v, want base64 for bytes that are not text", enc, err)
+	}
+	if err := s.RecordPoison(t.Context(), domain.PoisonMessage{Realm: "alpha", Subject: "s"}); err == nil {
+		t.Fatal("RecordPoison with no key = nil, want an error: it could not be told from its own redelivery")
+	}
+	// A bus message holds no queue row, so replaying it is not a re-drive.
+	var id string
+	if err := db.Admin.QueryRow(t.Context(), `SELECT id::text FROM dead_letters WHERE payload->>'key' = 'NOTIFY:7'`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplayDeadLetter(t.Context(), "alpha", id); !errors.Is(err, domain.ErrNotReplayable) {
+		t.Fatalf("ReplayDeadLetter of a bus poison = %v, want ErrNotReplayable: the producer must resend it", err)
+	}
+	// An oversized body is cut.
+	big := msg
+	big.Key, big.Body = "NOTIFY:9", make([]byte, 200<<10)
+	for i := range big.Body {
+		big.Body[i] = 'x'
+	}
+	if err := s.RecordPoison(t.Context(), big); err != nil {
+		t.Fatal(err)
+	}
+	var kept int
+	var truncated bool
+	if err := db.Admin.QueryRow(t.Context(), `SELECT length(payload->>'body'), (payload->>'truncated')::boolean FROM dead_letters WHERE payload->>'key' = 'NOTIFY:9'`).Scan(&kept, &truncated); err != nil || kept != 64<<10 || !truncated {
+		t.Fatalf("kept %d bytes, truncated=%v, %v, want 64 KiB and flagged", kept, truncated, err)
+	}
+}
+
+type fixedClock struct{ at time.Time }
+
+func (c fixedClock) Now() time.Time { return c.at }
