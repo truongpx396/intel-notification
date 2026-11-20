@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,7 +72,7 @@ func readLimited(path string) ([]byte, error) {
 	defer f.Close()
 	buf := make([]byte, maxFileBytes+1)
 	n, err := f.Read(buf)
-	if err != nil && n == 0 {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	return buf[:n], nil

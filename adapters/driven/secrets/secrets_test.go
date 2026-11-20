@@ -107,3 +107,26 @@ func TestASchemeCanBeRegistered(t *testing.T) {
 		t.Fatalf("Resolve of an unregistered scheme = %v, want ErrUnsupportedScheme", err)
 	}
 }
+
+// The rules are the resolver's own and do not lean on the file system refusing: a reader that would
+// succeed for any path is shown never to be asked for a relative one, and one that returns nothing is an
+// empty secret.
+func TestTheResolversOwnRulesHoldWhateverTheReaderWouldDo(t *testing.T) {
+	t.Parallel()
+	asked := 0
+	r := secrets.New(secrets.WithReadFile(func(string) ([]byte, error) {
+		asked++
+		return []byte(credential), nil
+	}))
+	if got, err := r.Resolve(t.Context(), "file:relative/key"); err == nil || got != "" || asked != 0 {
+		t.Fatalf("Resolve of a relative path = %q, %v after %d reads, want a refusal before any read: a relative path means whatever the working directory is", got, err, asked)
+	}
+	empty := secrets.New(secrets.WithReadFile(func(string) ([]byte, error) { return nil, nil }))
+	if got, err := empty.Resolve(t.Context(), "file:/run/secrets/key"); err == nil || got != "" {
+		t.Fatalf("Resolve of an empty read = %q, %v, want a refusal: an empty credential is a missing one", got, err)
+	}
+	huge := secrets.New(secrets.WithReadFile(func(string) ([]byte, error) { return []byte(strings.Repeat("x", 70<<10)), nil }))
+	if got, err := huge.Resolve(t.Context(), "file:/run/secrets/key"); err == nil || got != "" {
+		t.Fatalf("Resolve of a 70 KiB read = %d bytes, %v, want a refusal", len(got), err)
+	}
+}
