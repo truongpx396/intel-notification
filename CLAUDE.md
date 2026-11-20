@@ -8,7 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 adopted either as a library or as a gRPC/REST service. **The specification is the primary artifact and the
 implementation is partway through it.** [ROADMAP.md](ROADMAP.md) says what is built, designed or absent, and
 [specs/001-notification-core/tasks.md](specs/001-notification-core/tasks.md) is the build order. Do not
-trust README snippets about the notifier, dispatcher, channels or transports: those layers do not exist yet.
+trust README snippets about the one-call `New`, service mode or `cmd/notifyd`: they describe an intended API and do
+not exist yet.
 
 Where code and spec disagree, one of them is a bug and the spec says which. Order of authority:
 [constitution](.specify/memory/constitution.md) → `specs/*/contracts/` → `spec.md` →
@@ -26,6 +27,7 @@ make verify-schema     # migrations + schema assertions on a throwaway PG16 (nee
 make lint              # golangci-lint v2: depguard boundaries, paralleltest, goimports
 make arch-lint         # go-arch-lint: the hexagon's dependency graph
 make lint-sql          # migration hygiene (BEGIN/COMMIT, header comment, numbering)
+make proto-lint proto-check proto-breaking   # the gRPC proto: buf lint, generated code current, no breaking change (needs buf)
 make docs-links        # dangling relative markdown links
 make e2e-list          # typecheck + list the Playwright suite, no stack needed (Node 24, e2e/.nvmrc)
 make ci                # everything CI runs today
@@ -67,8 +69,12 @@ has the rules):
 - `internal/notifytest/` is the kit every suite is written against (fake clock, fault injection, probe,
   in-memory fakes, `Env`, `NotifierContract`); `internal/pgtest/` and `internal/redistest/` start
   Testcontainers. All are test support only.
-- Not created yet: `adapters/driving/`, `api/`, `cmd/`. Their lines in `.go-arch-lint.yml` are
-  commented out and are uncommented in the change that creates the directory.
+- `adapters/driving/`: the transports. `inprocess` (the engine's ports as a library host holds them), `httpapi`
+  (REST, the SSE relay, one-click unsubscribe, provider webhooks, operator routes, health), `grpcserver` and
+  `grpcclient` (both stand on `internal/wire`, which maps messages and errors). `api/proto` is the contract's
+  proto and `api/notifyv1` its committed generated Go: edit the proto, then `make proto`.
+- Not created yet: `cmd/`. Its line in `.go-arch-lint.yml` is commented out and is uncommented in the change
+  that creates the directory.
 
 How a notification moves, which spans several files: accepting one is a single transaction (the `notify_idem`
 guard, the inbox row, one queue row per enabled channel, digest windows). Dispatcher replicas then claim queue

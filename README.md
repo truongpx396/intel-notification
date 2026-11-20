@@ -12,11 +12,13 @@
 ![Spec Kit](https://img.shields.io/badge/Spec%20Kit-spec--first-8957e5)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> ## ⚠️ Status: design complete, **implementation partway through** (9 of 13 stages built)
+> ## ⚠️ Status: design complete, **implementation partway through** (10 of 13 stages built)
 > The **core is built and proven**: schema, domain rules, every port, the PostgreSQL adapter, the
 > notifier, the reference channels, the dispatcher, digests and quotas — each guarantee held by a test
-> that was broken on purpose to prove it fails. What is **not built**: the gRPC/REST/SSE transports, the
-> one-call `New`, and the adapters behind topics, templates and addresses. `Broadcast` (Stage 9: a durable
+> that was broken on purpose to prove it fails. The **transports are built** (Stage 10): the in-process port, a
+> gRPC server and client held to the same `NotifierContract` as the library, and the REST surface and SSE relay,
+> held to `StreamIsolationContract` over PostgreSQL and Redis. What is **not built**: a service binary to run them
+> in (`cmd/notifyd`), the one-call `New`, and the adapters behind topics, templates and addresses. `Broadcast` (Stage 9: a durable
 > record, expanded a page at a time by a leased worker, resumable after a crash) and the maintenance
 > jobs and `Admin.Erase` (Stage 8) are **built and proven against PostgreSQL**; the startup preflight is built with two
 > documented gaps in its tests. So today you adopt it as a Go library and **wire the pieces by hand** (see
@@ -63,7 +65,7 @@
 | **Durable store** | PostgreSQL 16: partitioned inbox, history and dead letters; forced row-level security | ✅ |
 | **Fast path** | Redis: duplicate pre-check (can only miss), live stream, quota counters | ✅ |
 | **Channels** | `in_app`, `email` (SMTP, Resend), signed `webhook`, provider `failover` | ✅ |
-| **Transports** | gRPC producer API, REST + SSE recipient API, in-process port | 🚧 designed |
+| **Transports** | gRPC producer API, REST + SSE recipient API, in-process port | ✅ as packages; no service binary yet |
 | **Catalog** | Topics, versioned templates and addresses as data, managed over the API | 🚧 designed |
 | **Escalation** | Acknowledgement, escalation chains, workflows ([Phase 2](specs/002-escalation-workflows/)) | 🚧 designed |
 
@@ -346,9 +348,8 @@ transaction, call `NotifyTx(ctx, tx, n)`; the engine never commits or rolls it b
 **Not built yet** — these appear in the design and the [integration guide](docs/integration-guide.md)
 as the intended interface, but do not exist in code:
 
-- `app.New(cfg, deps)` returning every port at once, and `grpcclient.New(conn)` as a drop-in for it —
-  swapping from library to service mode will change one line, because both satisfy `ports.Notifier`.
-- Producers in other languages over the generated `notify.v1` client.
+- `app.New(cfg, deps)` returning every port at once. `grpcclient.New(conn)` **is** built and satisfies
+  `ports.Notifier`, so moving a Go producer from library to service mode changes one line once a service runs.
 - The data-backed `TopicRegistry`, `TemplateRenderer` and `AddressBook`.
 
 ---
@@ -480,10 +481,18 @@ Run `make help` for the live list.
 ├── app/                 use-cases: planner, Notifier, Inbox, Dispatcher, DigestFlusher, quota gate,
 │                        BroadcastExpander; Deps is the one struct they are all built from
 ├── adapters/
-│   └── driven/
-│       ├── postgres/    delivery queue, digests, maintenance, store (broadcasts included), inbox, prefs, suppressions, quotas
-│       ├── redis/       pre-check, live stream, quota counter
-│       └── channel/     inapp · email · failover · webhook
+│   ├── driven/
+│   │   ├── postgres/    delivery queue, digests, maintenance, store (broadcasts included), inbox, prefs, suppressions, quotas
+│   │   ├── redis/       pre-check, live stream, quota counter
+│   │   └── channel/     inapp · email · failover · webhook
+│   └── driving/
+│       ├── inprocess/   the engine's ports as a library host holds them
+│       ├── httpapi/     REST, SSE relay, one-click unsubscribe, provider webhooks, operator routes, health
+│       ├── grpcserver/  notify.v1 Notifier over a ports.Notifier
+│       └── grpcclient/  a ports.Notifier over gRPC (NotifyTx is ErrTxUnsupported)
+├── api/
+│   ├── proto/           the contract's proto, linted and breaking-checked by buf
+│   └── notifyv1/        its generated Go, committed (`make proto`, `make proto-check`)
 ├── migrations/          the schema, embedded as migrations.FS (hosts, tests and the service share it)
 ├── config.go            notify.Config — the one configuration surface
 ├── internal/
@@ -504,8 +513,8 @@ Run `make help` for the live list.
 └── PROVENANCE.md        where this came from and what changed in the lift and the review
 ```
 
-Not created yet: `adapters/driving/`, `api/`, `cmd/`. Their lines in `.go-arch-lint.yml` are commented out
-and are uncommented in the change that creates each directory.
+Not created yet: `cmd/`. Its line in `.go-arch-lint.yml` is commented out and is uncommented in the change
+that creates the directory.
 
 ---
 
@@ -525,15 +534,21 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | 7 | Digest, quotas, fairness — leased flush job, Redis counter, noisy-neighbour test | ✅ built |
 | 8 | Maintenance — leased retention jobs, `Admin.Erase`, startup preflight, a record of each job's last clean finish | ✅ built |
 | 9 | Broadcast — a durable record, expanded a page at a time under a lease, resumable at the next page | ✅ built |
-| 10 | Transports — gRPC, REST, SSE relay, in-process port | 🚧 not built |
+| 10 | Transports — gRPC, REST, SSE relay, in-process port | ✅ built as packages (the Playwright switch-on, T047a, waits for a service binary) |
 | 11 | Service mode — data-backed topics, templates and addresses; recipient token verification; NATS ingest | 🚧 not built |
 | 12 | Boundary gates — arch-lint, depguard, builds with no host present | ✅ built |
 | 13 | Load test and release — capacity harness, integration-guide samples, tag `v0.1.0` | 🚧 not built |
 
 **Not built, and what that means today**
 
-- **No service.** There is no `cmd/notifyd`, no gRPC, no REST and no SSE relay; `deploy/Dockerfile` is the
-  intended shape and cannot build, and the Playwright suite is typechecked and listed but not run.
+- **No service binary.** The gRPC server, the REST surface and the SSE relay exist and are tested as packages, but
+  nothing assembles them: there is no `cmd/notifyd`, `deploy/Dockerfile` is the intended shape and cannot build,
+  and the Playwright suite is typechecked and listed but not run (T047a stays open). Service-mode authentication
+  (recipient-token verification, realm bindings, operator tokens) is Stage 11; the packages take an
+  `IdentityFunc` and an `OperatorFunc` from the host.
+- **Some REST routes wait on their ports.** The Resend webhook decoder and its suppression policy, the dead-letter
+  and delivery lists, the read of a tenant's defaults, and `PUT /admin/recipients/addresses` are not served
+  ([T044a, T044b](specs/001-notification-core/tasks.md), T048).
 - **No one-call `New`.** A host assembles `app.Deps` by hand, as above.
 - **PostgreSQL 16 is the supported version, and 17 is tested.** The checkpoint counters moved views in 17 and the code
   reads each where it is, so CI runs the schema and integration suites on both (`make test-pg-next` is the second by hand).
@@ -581,7 +596,7 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | [specs/001-notification-core/](specs/001-notification-core/) | the normative specification |
 | [constitution](.specify/memory/constitution.md) | the principles every decision is held to; first in the order of authority |
 | [contracts/notification-ports.md](specs/001-notification-core/contracts/notification-ports.md) | every port, the 16 invariants, the dispatcher algorithm, contract tests, the gRPC surface |
-| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 53 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D53 from building the stages |
+| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 54 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D54 from building the stages |
 | [data-model.md](specs/001-notification-core/data-model.md) | tables, keys, RLS, state transitions, retention |
 | [plan.md](specs/001-notification-core/plan.md) | build order and the capacity model |
 | [tasks.md](specs/001-notification-core/tasks.md) | the task list, how a task is worked, and traceability |

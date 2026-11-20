@@ -41,5 +41,9 @@ deps:
   testing:    { mayDependOn: [ migrations ] }
   notifytest: { mayDependOn: [ config, domain, ports, migrations, driven, testing, app ] }   # Env wires the PostgreSQL adapter over pgtest and the use-cases over both
   app:        { mayDependOn: [ config, domain, ports ] }       # app.NewNotifier takes a Config
-  driving:    { mayDependOn: [ domain, ports, api ] }              # implements and calls ports; NOT app, NOT driven
+  driving:    { mayDependOn: [ domain, ports, api, driving ] }     # implements and calls ports; NOT app, NOT driven. Itself: the transports share driving/wire
+  # The generated code imports nothing of this module. The deep scan (dependency injections) reads the gRPC
+  # registration idiom, notifyv1.RegisterNotifierServer(registrar, server), as the transport being handed to
+  # the generated code, so the generated component is allowed to receive it. That is the only edge this adds.
+  api:        { mayDependOn: [ driving ] }
   # cmd:      { mayDependOn: [ config, domain, ports, app, driven, driving, api, migrations ] }

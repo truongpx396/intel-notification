@@ -508,6 +508,11 @@ type Notifier interface {
 // caller's Identity from its authenticated session — never from a parameter (NR-008).
 type Inbox interface {
 	List(ctx context.Context, id Identity, q ListQuery) (Page, error)
+	// Get is one of the caller's notifications, rendered as List renders it, or nil when it is not
+	// theirs ("absent" and "someone else's" are one answer, NR-008). It is what the live relay loads for
+	// each nudge, under the session's identity, so a forged nudge loads nothing (D16). locale is the
+	// viewer's, "" for the default.
+	Get(ctx context.Context, id Identity, notificationID, locale string) (*InboxItem, error)
 	Unread(ctx context.Context, id Identity) (UnreadCount, error)
 	MarkSeen(ctx context.Context, id Identity, before time.Time) error
 	MarkRead(ctx context.Context, id Identity, notificationIDs []string) error
@@ -525,6 +530,18 @@ type Admin interface {
 	Erase(ctx context.Context, id Identity) (map[string]int, error)               // D35
 	ReplayDeadLetter(ctx context.Context, realm Realm, deadLetterID string) error // idempotent
 	SetTenantPreference(ctx context.Context, realm Realm, p TenantPreference) error
+}
+
+// Webhook is one provider's callback endpoint, served at /webhooks/{channel}/{provider}
+// (NR-032, D14). It is a driving port implemented beside the provider's channel, so the HTTP
+// surface depends on no provider; the header is net/http's Header, passed as the map it is.
+type Webhook interface {
+	// Verify checks the signature over the RAW body and is called first: nothing about a body is
+	// read until it returns nil, because a forged bounce would suppress a real address.
+	Verify(header map[string][]string, body []byte) error
+	// Handle parses a body Verify accepted and applies it. ErrUnknownDelivery asks the provider to
+	// try again: a callback can beat the delivery's own record.
+	Handle(ctx context.Context, body []byte) error
 }
 
 // Jobs runs the single-owner jobs — retention, partition provisioning, idempotency
@@ -693,6 +710,8 @@ type PreferenceStore interface {
 // service mode. Realm-aware because one service serves several realms.
 type TopicRegistry interface {
 	Lookup(ctx context.Context, realm Realm, topic Topic) (TopicDef, bool, error)
+	// List names every topic registered in the realm, sorted: a preferences screen is drawn from it.
+	List(ctx context.Context, realm Realm) ([]Topic, error)
 }
 
 // TemplateRenderer is the ONE home of copy, locale and branding (NR-019, D27).
@@ -1345,6 +1364,35 @@ Contract rules baked into the surface:
 - **Deadlines and retries are the producer's.** A failed call is retried with the same `idem_key`;
   that is what the key is for.
 
+**`NotifyBatch`.** At most 500 notifications; a batch over the limit is refused whole (`INVALID_ARGUMENT`,
+reason `BATCH_TOO_LARGE`) before any of it is accepted, because a half-applied batch is one a producer
+cannot retry. Within the limit each notification is independent: `receipts[i]` and `errors[i]` answer
+`notifications[i]`, and `errors[i]` is empty when it was accepted, so a producer retries exactly the ones
+that failed.
+
+**Errors.** A refusal a producer can act on is a gRPC status whose code and `google.rpc.ErrorInfo` (domain
+`notify.v1`) reason are the contract, because a producer in any language branches on them. The pairs are
+fixed:
+
+| Engine error | Code | Reason |
+|---|---|---|
+| `ErrMissingIdem` | `INVALID_ARGUMENT` | `MISSING_IDEM_KEY` |
+| `ErrEmptyIdentity` | `INVALID_ARGUMENT` | `EMPTY_IDENTITY` |
+| `ErrUnknownTopic` | `INVALID_ARGUMENT` | `UNKNOWN_TOPIC` |
+| `ErrTooManyRecipients` | `INVALID_ARGUMENT` | `TOO_MANY_RECIPIENTS` |
+| `ErrAudienceUnsupported` | `FAILED_PRECONDITION` | `AUDIENCE_UNSUPPORTED` |
+| any other rule a request breaks (`*ValidationError`) | `INVALID_ARGUMENT` | `INVALID_REQUEST` |
+| a batch over 500 | `INVALID_ARGUMENT` | `BATCH_TOO_LARGE` |
+| the caller's context ended | `CANCELED` / `DEADLINE_EXCEEDED` | none |
+| a fault of the engine's own | `INTERNAL`, message `notify: internal error` | none |
+
+The message of a refusal is the engine's own words. A fault is **never** shown to the producer (a SQL
+error or a host name is the operator's), and is reported to the server's error handler. The Go client turns
+a refusal back into the sentinel the library returns (a `*ValidationError` wrapping it, where the library
+returns one), so `errors.Is` reads the same in library mode and in service mode; a transport failure stays
+the gRPC status it is, so the producer's retry policy reads its code. A `Notification` whose `data` holds an
+integer beyond 2^53, which a protobuf `Struct` cannot hold exactly, is refused by the client before any call.
+
 The generated client is wrapped so it satisfies `notify.Notifier`:
 
 ```go
@@ -1397,7 +1445,8 @@ module — no host, no replace directives?**
       grpcserver/          notifyv1 over app                                (service mode)
       grpcclient/          notifyv1 client, satisfies ports.Notifier        (service callers)
       natsingest/          optional: JetStream subject → Notifier (D23)
-  api/notifyv1/            generated protobuf
+  api/proto/notify/v1/     the proto, verbatim from this contract; buf lint and buf breaking in CI
+  api/notifyv1/            its generated Go, committed (make proto; make proto-check fails when stale)
   cmd/notifyd/             the service binary: the only place concrete adapters are assembled
   migrations/              owns the schema — travels with the module; migrations.go embeds it
   internal/pgtest/         integration-test support: Testcontainers, one cloned database per test
@@ -1494,6 +1543,7 @@ type Deps struct {
 	Maintenance  ports.Maintenance
 	Prefs        ports.PreferenceStore
 	Suppressions ports.SuppressionStore
+	UnsubscribeSigner *UnsubscribeSigner // nil ⇒ the engine issued no unsubscribe tokens; Unsubscribe refuses every one
 	Quotas       ports.QuotaCounter
 	QuotaPolicies ports.QuotaPolicies // nil ⇒ an exhausted budget always defers
 	Stream       ports.StreamPublisher

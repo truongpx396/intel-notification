@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/truongpx396/intel-notification/adapters/driving/internal/wire"
+	"github.com/truongpx396/intel-notification/adapters/driving/wire"
 	"github.com/truongpx396/intel-notification/domain"
 )
 

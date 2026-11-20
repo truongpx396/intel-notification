@@ -1015,25 +1015,61 @@ rule above.
 
 ## Stage 10 — Transports
 
-- [ ] **T045** [P] *setup* `api/notifyv1`: the proto from the contract. It is listed first because the
+- [x] **T045** [P] *setup* `api/notifyv1`: the proto from the contract. It is listed first because the
       gRPC run of T047 and T046 are both written against its generated code. Generated code is data
       with no test of its own; a lint and breaking-change check on the proto runs in CI
+      *The proto is the contract's, verbatim, in a buf module at `api/proto` (so a file's directory matches its
+      package); the Go it generates is committed at `api/notifyv1`, so a host that imports the module needs no
+      protoc. Three gates, each shown to fail ([ledger](../../docs/mutations.md)): `make proto-lint` (buf, `BASIC`
+      rules: `STANDARD` would rename the locked RPCs), `make proto-check` (regenerates, and fails when the
+      committed code was stale) and `make proto-breaking` (against the base branch; it says so, and passes, where the
+      base has no proto yet). CI has a `proto` job that installs the Makefile's pinned versions; the `api` and
+      `driving` components are switched on in `.go-arch-lint.yml`.*
 - [ ] **T047a** *red* Enable the Playwright suite: remove `test.describe.fixme` from the `e2e/` specs as
       the routes they drive land, implement `/healthz` and `/readyz`, and switch on the `e2e` CI job
       ([docs/testing.md](../../docs/testing.md)). This is the standing outer loop and stays open until
       T049 lands. Take one spec at a time: remove its `fixme`, see it fail because the route or the
       service is missing, then land the route
-- [ ] **T047** *red* **Contract tests** `NotifierContract` through gRPC, and `StreamIsolationContract`
+      *Progress, and why the box stays open. **Done:** `/healthz` (asks nothing, so a database that blinks does not
+      restart a healthy process) and `/readyz` (503 naming the check that failed and nothing of its error), with
+      `httpapi.PartitionsCheck`, which fails only for this month's missing partition; 7 mutants in the ledger.
+      **Not done:** removing any `fixme`, and switching on the `e2e` job. Every spec drives a running service,
+      and nothing assembles the packages into one: there is no `cmd/notifyd`, and service-mode authentication
+      (recipient-token verification, realm bindings, operator tokens, T049 and T050) is what `global-setup.ts`
+      mints tokens for. A spec enabled now could not be seen failing for the right reason, only for a missing
+      binary, so none was. The REST routes the specs drive are served by `httpapi` (T044) and are held by its handler
+      tests; the `webhooks` spec also needs the Resend decoder (T044a) and the `unsubscribe` spec needs
+      `PUT /admin/recipients/addresses` (T048).*
+- [x] **T047** *red* **Contract tests** `NotifierContract` through gRPC, and `StreamIsolationContract`
       against the relay (NS-001). The gRPC run is the same suite as T024 with a different `Env`, built on
       T045's generated code; until T046 lands its `Notifier` is a stub returning
       `errors.New("not implemented")`, so the run fails on each assertion and not on a missing package.
       The kit's `Relay`, an SSE client for a base URL, is built here as part of the red's setup; until
       T044 lands nothing serves the route, so `StreamIsolationContract` fails on its first assertion
-- [ ] **T043** *green* `driving/inprocess`: returns the engine's ports (NR-025). `NotifierContract`
+      *`TestNotifierContractOverGRPC` (in memory and on Redis) is `NotifierContract` unchanged on an Env whose
+      `Notifier` is the gRPC client of a server over the Env's own, with `notifytest.Remote()`: the three `NotifyTx`
+      cases become the one a remote Notifier owes (`ErrTxUnsupported`, nothing written), and the failed-commit case
+      asks for an error and not the injected one, since a producer is never shown the engine's internals. **Red,
+      witnessed on the stub client:** `notifiercontract.go:175: Notify(k1): grpcclient: not implemented`, 21 cases (the
+      lines are in the `test:` commit). `StreamIsolationContract` (`RelayWorld`: an Env with the real in-app
+      channel, a client of the relay, and the stream's publisher) has four cases: the same recipient id in two tenants,
+      a forged nudge (and that the stream is not poisoned by it), another realm's identity, and a reconnect that gets
+      the bounded count first after a missed push. It runs against the real relay over PostgreSQL with the in-memory
+      stream and with Redis's sharded pub/sub. **It was written alongside the relay and not run against a stub**, so
+      its red is its mutants: a relay that shows a nudge that loads nothing, one that loads as another recipient, and
+      one that sends no count first each fail it, and one that listens on another tenant's stream **survives, by
+      design** (the re-read under the session's scope is the second layer, [D54](design-decisions.md#d54)); with the
+      relay acting as another tenant altogether it fails.*
+- [x] **T043** *green* `driving/inprocess`: returns the engine's ports (NR-025). `NotifierContract`
       runs through it unchanged.
       **Mutate:** none. It adds no guarantee of its own; the T024 suite passing through it is the proof,
       and a mutation here would be one of T022's
-- [ ] **T044** *red → green* `driving/httpapi`: the REST surface and the SSE relay — subscription from
+      *`inprocess.Engine` is the five driving ports as an embedded host holds them, with nothing in it: a transport
+      that did anything here would make the library and the service differ. `NotifierContract` runs through its
+      `Notifier` (`TestNotifierContractThroughTheInProcessEngine`). The one-call `app.New` that the contract's
+      `Engine` describes is still unbuilt: `app` cannot import a driving adapter, so it would return its own type
+      (the README and the integration guide say so).*
+- [x] **T044** *red → green* `driving/httpapi`: the REST surface and the SSE relay — subscription from
       the session identity, per-nudge scoped re-read, bounded count first on connect
       ([rest-api.md](contracts/rest-api.md)).
       **Red first:** handler tests over `httptest` with a fake `Notifier` and `Inbox`, no infrastructure,
@@ -1044,10 +1080,47 @@ rule above.
       parsed; the stream subscribes from the session's identity and not from a query parameter; a forged
       nudge shows nothing; the bounded count is sent first on connect.
       **Mutate:** read the recipient from a header; parse the webhook body before verifying it
-- [ ] **T046** [P] *red → green* `driving/grpcserver`, `driving/grpcclient` (satisfies `ports.Notifier`;
+      *Built in three commits ([D54](design-decisions.md#d54)). **The use-cases the routes stand on**, in `app`:
+      `Inbox.Preferences`, `SetPreferences` (all or none, every refused pair named with its reason: an unregistered
+      topic or channel, an essential topic's channel, a pair the tenant locked, refused even to the value in force),
+      `Schedule`, `SetSchedule` (validating first), `Unsubscribe` (verifying the token, disabling its one pair) and
+      `Get`, and `Admin.SetTenantPreference`. They needed two port additions, `TopicRegistry.List` and `Inbox.Get`, a
+      `Deps.UnsubscribeSigner`, and `NewInbox` and `NewAdmin` now name the ports they need. 23 mutants, two of which
+      survived once and have tests now. **The surface:** the inbox, preferences, schedule, the stream, one-click
+      unsubscribe, the operator's broadcast, replay, erasure and tenant defaults, provider webhooks, and health; 40
+      handler tests and 10 stream tests, **red witnessed against a stub that answered 501** (the `test:` commit
+      lists the lines), then 59 mutants (the health and relay-contract ones included), among them the two this task names. A route whose dependency is absent is not
+      registered. **Split out, so the box can be ticked honestly:** [T044a](#t044a) and [T044b](#t044b), because their
+      ports do not exist. `NotifierContract` and the relay run over a fake IdentityFunc: how a recipient token is
+      verified is T050.*
+- [ ] <a id="t044a"></a>**T044a** *red → green* The Resend webhook: the `ports.Webhook` for
+      `/webhooks/email/resend` and the policy it applies (NR-032, [D14](design-decisions.md#d14)). The route, the
+      verify-before-parse order and the port exist (T044); what does not is the provider's end.
+      **Red first:** a svix-style signature over the raw body (a frozen vector, a stale timestamp, a body altered by
+      one byte, a missing header); a hard bounce or a complaint suppresses the address by hash, in the right realm
+      (the callback names none: it comes from the provider's own configuration); a soft bounce sets `expires_at`; a
+      status updates `notification_deliveries.provider_status`; a callback for a message not yet recorded is
+      `ErrUnknownDelivery`. The `webhooks` spec turns on with it.
+      **Mutate:** apply a bounce without verifying; suppress for the wrong realm
+- [ ] <a id="t044b"></a>**T044b** *red → green* The operator's reads: `GET /admin/notifications/dead-letters`
+      (the list T032 left to the REST surface), `GET /admin/notifications/deliveries`, and `GET` of a tenant's
+      defaults. Each needs a read port that does not exist, so each starts as a *setup* of that port and its
+      PostgreSQL adapter, scoped as the tables are (a worker-only read is declared in `verify-schema.sql` TEST 5).
+      **Red first:** a list filtered by tenant, channel and reason, paged, and never showing another realm's rows.
+      **Mutate:** drop the realm predicate
+- [x] **T046** [P] *red → green* `driving/grpcserver`, `driving/grpcclient` (satisfies `ports.Notifier`;
       `NotifyTx` returns `ErrTxUnsupported`). Make the T047 gRPC run pass.
       **Red first:** a unit test that `NotifyTx` returns `ErrTxUnsupported` and never opens a transaction.
       **Mutate:** open a transaction in `NotifyTx`; return `nil` instead of `ErrTxUnsupported`
+      *Both stand on `adapters/driving/internal/wire`, which maps every message and every error. **Red, witnessed:**
+      `client_test.go:46: a caller's transaction: NotifyTx = grpcclient: not implemented, want domain.ErrTxUnsupported`
+      (the lines are in the `test:` commit). The server adds only the two rules that belong to the wire, a key on
+      every mutating call and a batch of at most 500 (refused whole, each item independent within it); a refusal
+      crosses as a code and an `ErrorInfo` reason a producer in any language branches on, and the client turns it back
+      into the library's sentinel; a fault is reported and shown as "internal error". A `Struct` holds numbers as
+      doubles, so an integer beyond 2^53 in `Data` is refused by the client and not rounded. The two mutants this task
+      names die on `TestNotifyTxIsUnsupportedAndNeverOpensATransaction`; the ledger holds 25 rows for this task and 10 for
+      T047's gRPC run, all killed. The contract's text now carries the error table and the batch's shape.*
 
 ## Stage 11 — Service mode
 
@@ -1119,7 +1192,7 @@ that lists no red task has no test scheduled.
 
 | Criterion | Proven by | Written (red) in |
 |---|---|---|
-| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024 (done), T028 (done), T047, T047a |
+| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024 (done), T028 (done), T047 (done), T047a |
 | NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024 (done), T029 (done) |
 | NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020 (done), T033 (done) |
 | NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
@@ -1147,14 +1220,14 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-005 channel idempotency at its declared level | frozen delivery-key vector; `ChannelContract`; per-channel tests | T008 (done), T025 (done), T026 (done), T027 (done), T029 (done) |
 | NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031 (done), T033 (done) |
 | NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032 (done), T033 (done) |
-| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T028 (done), T047, T047a |
-| NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case; realm bindings | T009 (done), T022a (done), T024 (done), T049 |
+| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the REST handlers (the recipient is the session, a 404 and never a 403); the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T028 (done), T044 (done), T047 (done), T047a |
+| NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case (also over gRPC: no message carries a realm); an operator body that names a realm is refused; realm bindings | T009 (done), T022a (done), T024 (done), T044 (done), T047 (done), T049 |
 | NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 (done) |
 | NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021 (done), T024 (done) |
 | NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021 (done), T024 (done) |
 | NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021 (done), T024 (done) |
 | NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021 (done), T034a (done), T035 (done) |
-| NR-015 unsubscribe | email golden files; the token's vector and tamper table; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T026a (done), T044, T047a |
+| NR-015 unsubscribe | email golden files; the token's vector and tamper table; `Inbox.Unsubscribe`; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T026a (done), T044 (done), T047a |
 | NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a (done), T053 (done) |
 | NR-017 a topic is a registration | topics integration table, no migration | T048 |
 | NR-018 re-anchoring identity is a host binding | structural: `Identity` is opaque strings with frozen vectors; `domain` imports nothing | T007 (done), T053 (done) |
@@ -1164,14 +1237,14 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding and with a pending delivery; no row deleted on the way to a retirement (a `DELETE` witness, in place of `n_tup_del`); the jobs' cutoffs (`TestRetentionRetiresEachTableAtItsOwnWindow`, `TestTheExpiriesCutAtTheIdempotencyWindowInBatches`); that the `DELETE` witness can fire (`TestTheRetirementWitnessRecordsADeletion`) | T006 (done), T038, T039 |
 | NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; `QuotaContract` and the `channel_quotas` table; noisy-neighbour test | T016 (done), T036 (done), T037 (done) |
 | NR-024 bounded unread count; nudge only | inbox cap table; in-app payload; stream keys | T017 (done), T025 (done), T028 (done) |
-| NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043, T047, T051 |
+| NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043 (done), T047 (done), T051 |
 | NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |
 | NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020 (done), T022a (done), T024 (done) |
 | NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033 (done), T048 |
 | NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021 (done), T024 (done), T033 (done) |
 | NR-030 cancel | `NotifierContract` cancel cases; the queue's `Cancel` | T016 (done), T022a (done), T024 (done) |
 | NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021 (done), T033 (done) |
-| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the `webhooks` spec | T020 (done), T022a (done), T024 (done), T047a |
+| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the webhook route (verified before parsed); the Resend decoder; the `webhooks` spec | T020 (done), T022a (done), T024 (done), T044 (done), T044a, T047a |
 | NR-033 seen, read, archived | inbox table, independent flags | T017 (done) |
 | NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext; `Admin.Erase`'s own table (`TestErase…` in `app`); the pre-check's entries for the recipient's keys forgotten before the erasure (`TestEraseForgets…`, the `Forget` cases of `PreCheckContract`, `TestIdemKeys`) | T019 (done), T040, T040b |
 | NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack | T020 (done), T052 |

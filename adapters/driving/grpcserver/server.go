@@ -13,7 +13,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
-	"github.com/truongpx396/intel-notification/adapters/driving/internal/wire"
+	"github.com/truongpx396/intel-notification/adapters/driving/wire"
 	"github.com/truongpx396/intel-notification/api/notifyv1"
 	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/ports"

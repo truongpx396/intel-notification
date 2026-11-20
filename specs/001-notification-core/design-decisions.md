@@ -1497,6 +1497,63 @@ Verified: `TestAPageThatFailsInsideItsTransactionRollsBackAsAWhole`, `TestCommit
 in `app`; and end to end `TestACrashBetweenPagesResumesAtTheNextPage` and
 `TestACrashInsideAPageRollsTheWholePageBackAndTheNextWorkerRedoesIt`.
 
+## D54 — A transport translates; what a caller is shown is stated, and the push path is isolated twice · *built*
+
+**Decision.** The gRPC server, the gRPC client and the REST surface add no rule of the engine's: every rule a
+request must meet is the `Notifier`'s, `Inbox`'s or `Admin`'s, so the library and the service refuse the same
+requests in the same words (NR-025). What a transport owns is who is asking, what a status says, and what is
+never shown. Six rules:
+
+1. **A refusal is a code and a reason, and a fault is not shown.** A producer branches on a gRPC `ErrorInfo`
+   reason (`MISSING_IDEM_KEY`, `UNKNOWN_TOPIC`, ...), whose pairs are fixed in the contract, and the Go client
+   turns each back into the sentinel the library returns, so `errors.Is` reads the same on both sides. A fault of
+   the engine's own is `INTERNAL: notify: internal error` on gRPC and `500 {"error":"internal error"}` on REST,
+   and the real error goes to an error handler. A refusal is the engine's own words; a fault's words are the
+   operator's.
+2. **The caller is the session.** No REST route reads a recipient, a tenant or a realm from a header, the query,
+   a path or a body: the identity is the `IdentityFunc`'s (an operator's realm is the `OperatorFunc`'s), and a body
+   is decoded strictly, so one that names a realm is a `400` and not quietly the session's. Authentication fails
+   as an empty `401`; another recipient's notification is a `404`, never a `403`, and the answer does not repeat
+   the id.
+3. **The push path is isolated twice.** The relay subscribes from the session's identity, and loads each nudge
+   under that same identity, so a nudge that was forged or misrouted loads zero rows and shows nothing. Either
+   layer alone holds NS-001; a relay that listened on another tenant's stream, and loaded as the session, still
+   showed nothing. `EventSource` cannot set a header, so a token in the query is read on the stream route and no
+   other, because URLs are logged.
+4. **A webhook is verified before it is parsed.** The surface reads the raw bytes, asks the provider's `Webhook`
+   to verify them, and hands the same bytes to its `Handle` only if they verify; an unverified body is an empty
+   `401` and is never read as data. The port is in `ports`, with the header as the map it is, so a provider's
+   decoder lives beside its channel without importing a transport.
+5. **What a wire cannot carry exactly is refused, not rounded.** A `Struct` holds numbers as doubles: an integer
+   beyond 2^53 in `Data` is an error in the client, before any call, and `NotifyBatch` bounds a batch at 500 and
+   refuses a larger one whole.
+6. **A remote `Notifier` cannot join a transaction.** `NotifyTx` on the gRPC client is `ErrTxUnsupported` with no
+   call and nothing touched (D28), and `NotifierContract` says so with one option, `notifytest.Remote()`, that
+   swaps the three `NotifyTx` cases for the one a remote Notifier owes.
+
+**Alternative.** Each transport validating for itself and passing `err.Error()` through: a transport that
+re-derives a rule drifts from the engine's, and one that passes the error through tells a producer, or a
+recipient, which host and which table were involved. A recipient in the path (`/users/{id}/notifications`), which
+is the shape every REST tutorial has.
+
+**What goes wrong without it.** The library accepts what the service refuses, or the reverse, and a producer
+learns it in production. A SQL error with a host name reaches a browser. A `?recipient=` that a handler reads
+once is a cross-tenant read, and the stream is where it would leak live. A webhook parsed before its signature
+checks lets anyone suppress a real address with a forged bounce. An id that is a `404` for one caller and a `403`
+for another is an oracle.
+
+*Built.* `adapters/driving/internal/wire` maps every message and every error for both gRPC ends. `httpapi` is
+`New(Deps, ...Option)` over `ports.Inbox`, `Notifier`, `Admin` and `StreamSubscriber`; a route whose dependency is
+absent is not registered. The unsubscribe page leaks nothing (`Referrer-Policy: no-referrer`, a CSP that allows
+nothing, `no-store`) and a GET of the link makes no call at all. `/readyz` names the failed check and nothing of
+its error; `PartitionsCheck` fails only for this month's gap. The use-cases the routes needed are `Inbox.Preferences`,
+`SetPreferences` (all or none, naming every refused pair), `Schedule`, `SetSchedule` (validating first), `Unsubscribe`
+and `Get`, and `Admin.SetTenantPreference`; `TopicRegistry` gained `List` and `Inbox` gained `Get`.
+
+Verified: `TestNotifierContractOverGRPC` (in memory and on Redis), `TestStreamIsolationContract` (both streams),
+and the handler tables in `httpapi`, `grpcserver`, `grpcclient` and `wire`. **Not built:** the Resend webhook decoder
+and its suppression policy (T044a), the operator reads (T044b), and `cmd/notifyd`; so `make e2e` still has no service.
+
 ---
 
 ## Open decisions
