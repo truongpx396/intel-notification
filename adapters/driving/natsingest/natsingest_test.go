@@ -286,8 +286,6 @@ func TestAMessageThatCanNeverSucceedIsParkedAndTerminated(t *testing.T) {
 		{"a tenant with an empty id", good, body(func(m map[string]any) { m["tenant"] = map[string]string{"kind": "workspace", "id": ""} }), nil, "tenant"},
 		{"no recipient", good, body(func(m map[string]any) { delete(m, "recipient") }), nil, "recipient"},
 		{"a tenant the subject's token does not name", subjectFor("alpha", domain.Tenant{Kind: "workspace", ID: "someone-else"}), body(nil), nil, "tenant token"},
-		{"a subject with too few tokens", "notify.ingest.alpha", body(nil), nil, "subject"},
-		{"a subject with too many tokens", good + ".extra", body(nil), nil, "subject"},
 		{"a realm nothing serves", subjectFor("gamma", tenant), body(nil), nil, "realm"},
 		{"a topic nobody registered", good, body(nil), func(context.Context, domain.Notification) (domain.Receipt, error) {
 			return domain.Receipt{}, fmt.Errorf("notify: plan: %w", domain.ErrUnknownTopic)
@@ -346,24 +344,35 @@ func TestPoisonIsToldToOperatorsOnTheRealmsDLQSubject(t *testing.T) {
 	}
 }
 
-// A subject whose realm token is not a realm cannot be parked (a dead letter has a realm) or announced (the
-// DLQ subject is the realm's). A credential bound to a realm cannot have published it, so it is a
-// mis-configuration: it is terminated, so it stops being redelivered, and reported to the operator through the
-// error handler.
+// A subject that names no realm cannot be parked (a dead letter has a realm) or announced (the DLQ subject is
+// the realm's). A credential bound to a realm cannot have published it, so it is a mis-configuration: it is
+// terminated, so it stops being redelivered, and reported to the operator through the error handler. "dlq" is
+// not a realm an ingest serves: its subjects are where poison is told.
 func TestAMessageOfNoRealmIsTerminatedAndReportedNotParked(t *testing.T) {
 	t.Parallel()
-	w := newWorld(t)
-	w.ingest.Handle(t.Context(), w.msg("notify.ingest.Not_A_Realm."+domain.TenantToken(tenant), body(nil)))
-	if got := w.log.all(); len(got) != 1 || got[0] != "term" {
-		t.Fatalf("events = %v, want it terminated and nothing else", got)
-	}
-	w.pub.mu.Lock()
-	published := len(w.pub.sent)
-	w.pub.mu.Unlock()
-	w.faultsMu.Lock()
-	defer w.faultsMu.Unlock()
-	if published != 0 || len(w.faults) != 1 || !strings.Contains(w.faults[0].Error(), "Not_A_Realm") {
-		t.Fatalf("published %d, faults %v, want nothing published and the subject reported", published, w.faults)
+	token := domain.TenantToken(tenant)
+	for _, subject := range []string{
+		"notify.ingest.Not_A_Realm." + token,
+		"notify.ingest.alpha", "notify.ingest.alpha." + token + ".extra", "notify.ingest", "",
+		"other.prefix.alpha." + token,
+		"notify.ingest.dlq.alpha",
+	} {
+		t.Run(subject, func(t *testing.T) {
+			t.Parallel()
+			w := newWorld(t)
+			w.ingest.Handle(t.Context(), w.msg(subject, body(nil)))
+			if got := w.log.all(); len(got) != 1 || got[0] != "term" {
+				t.Fatalf("events = %v, want it terminated and nothing else", got)
+			}
+			w.pub.mu.Lock()
+			published := len(w.pub.sent)
+			w.pub.mu.Unlock()
+			w.faultsMu.Lock()
+			defer w.faultsMu.Unlock()
+			if published != 0 || len(w.faults) != 1 {
+				t.Fatalf("published %d, faults %v, want nothing published and the subject reported", published, w.faults)
+			}
+		})
 	}
 }
 
