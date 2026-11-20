@@ -335,6 +335,31 @@ func TestNS011AProducerThatKnowsOnlyTheAPIGetsOneNotificationDeliveredOnTwoChann
 	if r, err := http.Get("http://" + w.svc.HTTPAddr() + "/readyz"); err != nil || r.StatusCode != 200 {
 		t.Errorf("readyz = %v, %v, want 200", r, err)
 	}
+
+	// The operator's route: erasure takes the operator's token, in the realm it administers, and nothing else.
+	erase := func(auth string) (int, string) {
+		req, _ := http.NewRequest(http.MethodPost, "http://"+w.svc.HTTPAddr()+"/admin/erasure",
+			strings.NewReader(`{"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"ada"}}`))
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer r.Body.Close()
+		b, _ := io.ReadAll(r.Body)
+		return r.StatusCode, string(b)
+	}
+	if code, _ := erase("Bearer " + w.signer.Recipient("local", wsTenant, ada, time.Now(), time.Minute)); code != http.StatusUnauthorized {
+		t.Errorf("erasure with a recipient's token: %d, want 401: a recipient token is not an operator credential", code)
+	}
+	if code, _ := erase(""); code != http.StatusUnauthorized {
+		t.Errorf("erasure with no credential: %d, want 401", code)
+	}
+	if code, body := erase("Bearer operator-secret"); code != http.StatusOK || !strings.Contains(body, "notifications") {
+		t.Errorf("erasure with the operator's token: %d %s, want 200 and the rows removed per table", code, body)
+	}
 }
 
 // T051's "show it can fail", the first half: a service with one channel only. The scenario fails at the step
