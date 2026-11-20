@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/truongpx396/intel-notification/adapters/driving/auth"
 	"github.com/truongpx396/intel-notification/adapters/driving/httpapi"
 	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/internal/notifytest"
@@ -1245,5 +1246,27 @@ func TestARouteWhoseDependencyIsAbsentIsNotServed(t *testing.T) {
 		if rec.Code != http.StatusNotFound && rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("%s = %d, want it not served", path, rec.Code)
 		}
+	}
+}
+
+// NR-009, D31. The realm of an operator's call travels with it, so a service that serves several realms
+// routes the broadcast to the engine of the realm the operator's credential administers (auth.Route), and a
+// body that names another realm is still refused.
+func TestTheOperatorsRealmTravelsWithTheCallToTheNotifier(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	var seen domain.Realm
+	var ok bool
+	f.notifier.OnBroadcast = func(ctx context.Context, _ domain.BroadcastRequest) (domain.BroadcastReceipt, error) {
+		seen, ok = auth.RealmFrom(ctx)
+		return domain.BroadcastReceipt{BroadcastID: "b1", Applied: true}, nil
+	}
+	rec := f.do("POST", "/admin/notifications/broadcast", "operator-secret",
+		`{"tenant":{"kind":"workspace","id":"w1"},"recipients":[{"kind":"user","id":"u1"}],"topic":"t","idem_key":"k"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	if !ok || seen != realm {
+		t.Fatalf("the notifier's context carried realm %q (set=%v), want the operator's, %q", seen, ok, realm)
 	}
 }

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/truongpx396/intel-notification/adapters/driving/auth"
 	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/ports"
 )
@@ -177,7 +178,9 @@ func (s *server) operator(h func(http.ResponseWriter, *http.Request, domain.Real
 			unauthorized(w)
 			return
 		}
-		h(w, r, realm)
+		// The realm travels with the call, as a gRPC call's does, so a service of several realms routes to
+		// the engine of the realm this credential administers and to no other.
+		h(w, r.WithContext(auth.WithRealm(r.Context(), realm)), realm)
 	}
 }
 
