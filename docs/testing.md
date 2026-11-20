@@ -164,8 +164,10 @@ per idempotency key, a channel registry, in-memory fakes for the read-side ports
   client of a server over the Env's own (`grpcclient`'s `TestNotifierContractOverGRPC`, in memory and on
   Redis), with `notifytest.Remote()`: it swaps the three `NotifyTx` cases for the one a remote Notifier owes
   (`ErrTxUnsupported`, nothing written), and asks of the failed-commit case an error and not the injected one,
-  because a producer is never shown the engine's internals. The gRPC server and client are tested first with
-  no infrastructure, over an in-memory gRPC connection (`notifytest.NewBufconn`), with
+  because a producer is never shown the engine's internals. `StreamIsolationContract` runs against the relay
+  through the real in-app channel, the real Redis stream and the real row-level-security inbox, and
+  `notifytest.Relay` is its SSE client. The REST handlers and the gRPC server are tested first with no
+  infrastructure, over `httptest` and an in-memory gRPC connection (`notifytest.NewBufconn`), with
   `notifytest.ScriptedNotifier` standing in for the engine. `DispatcherContract` is run by the in-process Dispatcher over the Env's real
   queue, and again by the webhook package with a third channel registered, to show a channel is one
   registration.
@@ -207,8 +209,9 @@ a host's front end does:
 - **Retries show, not hide.** CI retries a failed test once and records a trace of the retry, so a flaky
   test is visible in the report.
 
-The service does not exist yet, so every spec is written against the REST contract and marked
-`test.describe.fixme` with the tasks that will enable it (T044, T049); T047a switches the suite on. CI typechecks and lists the suite
+The REST surface exists as a package (T044) but no service binary assembles it, so every spec is still written
+against the REST contract and marked `test.describe.fixme` with the tasks that will enable it (T044, T049);
+T047a switches the suite on, and stays open until `cmd/notifyd` and service-mode authentication land. CI typechecks and lists the suite
 on every change, so it cannot rot before the service arrives, and the full `e2e` job switches on with
 those tasks.
 

@@ -30,7 +30,7 @@ token.
 | POST | `/notifications/{id}/read` | Mark one read | Idempotent. **404**, not 403, for a notification the caller does not own — a 403 confirms the id exists |
 | POST | `/notifications/read-all` | Mark all read | Idempotent |
 | POST | `/notifications/{id}/archive` | Archive one | Body `{archived: bool}`; idempotent; archived items leave the default list and the badge |
-| GET | `/notifications/stream` | Live push | Server-sent events. On every (re)connect the server sends the authoritative bounded count **first**. Then, per nudge, it loads the item **under the caller's scope** and sends it with the new count; a nudge that loads nothing sends nothing ([D16](../design-decisions.md#d16)) |
+| GET | `/notifications/stream` | Live push | Server-sent events. On every (re)connect the server sends the authoritative bounded count **first**, as `event: count` with `{count, capped}`. Then, per nudge, it loads the item **under the caller's scope** and sends `event: notification` with `{item, unread}`; a nudge that loads nothing sends nothing, and one notification is sent once per connection however often it is nudged ([D16](../design-decisions.md#d16)). `EventSource` cannot set a header, so on this route **only** the token may travel as `?token=`; a header, when there is one, wins. An idle stream sends a comment every 25 seconds |
 
 ## Preferences and schedule
 
@@ -38,8 +38,8 @@ token.
 |---|---|---|---|
 | GET | `/notifications/preferences` | Per-`(topic, channel)` state | Each value carries `source: recipient \| tenant \| topic_default` and `locked` ([D30](../design-decisions.md#d30)) |
 | PUT | `/notifications/preferences` | Upsert preferences | Body `[{topic, channel, enabled}]`. A pair that is essential or tenant-locked is rejected with a stated reason, never silently ignored |
-| GET | `/notifications/schedule` | Quiet hours and digest cadence | |
-| PUT | `/notifications/schedule` | Update them | The response restates that `critical` notifications ignore quiet hours, so a client cannot present a false promise ([D9](../design-decisions.md#d9)) |
+| GET | `/notifications/schedule` | Quiet hours and digest cadence | `{quiet_start, quiet_end, timezone, digest}`; `digest` is a duration such as `"30m"`, `"0s"` for immediate |
+| PUT | `/notifications/schedule` | Update them | The response (`200`, the stored schedule) restates `critical_ignores_quiet_hours: true`, so a client cannot present a false promise ([D9](../design-decisions.md#d9)). A schedule the planner would not apply is `422` |
 
 ## Unsubscribe (RFC 8058)
 
@@ -56,7 +56,7 @@ leaked link disables one preference, not everything), and valid for at least 60 
 | Method | Path | Purpose | Notes |
 |---|---|---|---|
 | GET | `/admin/tenants/{tenant_kind}/{tenant_id}/preferences` | A tenant's defaults and locks | Operator, or a host-authorized tenant administrator |
-| PUT | `/admin/tenants/{tenant_kind}/{tenant_id}/preferences` | Set them | Body `[{topic, channel, enabled, locked}]`. Essential topics cannot be disabled |
+| PUT | `/admin/tenants/{tenant_kind}/{tenant_id}/preferences` | Set them | Body `[{topic, channel, enabled, locked}]`. Essential topics cannot be disabled. Rows are applied in order and a refusal (`422`, with its `row`) stops there; each is an upsert, so the request is safe to retry once fixed |
 
 ## Operator
 
@@ -68,6 +68,10 @@ leaked link disables one preference, not everything), and valid for at least 60 
 | GET | `/admin/notifications/deliveries` | Delivery history | Filter by tenant, channel, outcome, time |
 | PUT | `/admin/recipients/addresses` | Replace one recipient's addresses on one channel | Body `{tenant, recipient, channel, addresses: [{value, locale?, timezone?}]}`. The REST twin of `Catalog.PutAddresses`, for operators and the e2e suite |
 | POST | `/admin/erasure` | Erase a recipient | Body `{tenant, recipient}`. Returns rows removed per table; the erasure is recorded by hash ([D35](../design-decisions.md#d35)) |
+
+**Not served yet**, because their ports do not exist ([tasks.md](../tasks.md), T044b and T048): `GET` of a
+tenant's defaults, `GET /admin/notifications/dead-letters`, `GET /admin/notifications/deliveries` and
+`PUT /admin/recipients/addresses`. A route whose dependency is absent is not registered, so it is a `404`.
 
 ## Health
 
@@ -93,6 +97,7 @@ leaked link disables one preference, not everything), and valid for at least 60 
 | Missing `idem_key` on a broadcast | `422` | States that the key is required for exactly-once |
 | Inline broadcast list over `MaxInlineRecipients` | `422` | States the limit and points to audience selectors |
 | Invalid or expired unsubscribe token | `410` | A page explaining the link expired, with a route to preferences |
+| A query parameter or body that is not what the route takes: a `limit` that is not a number, an unknown `state`, a locale that is not a language tag, a malformed cursor, an unknown body field such as a `recipient`, a missing `enabled` | `400` | Says what is wrong. A body that names a recipient, a tenant or a realm is refused, never read as the session's |
 | Unverified webhook signature | `401` | Empty body; the payload is not parsed |
 
 ## Observable assertions

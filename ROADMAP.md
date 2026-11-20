@@ -82,9 +82,11 @@ on PostgreSQL 16 and 17. And broadcast (Stage 9): `Notifier.Broadcast` records a
 leased `BroadcastExpander` notifies the audience a page at a time, committing each page with the cursor's advance in one
 transaction fenced by the lease token, so a crash between pages resumes at the next, a crash inside one rolls the page back
 as a whole, and a retried broadcast notifies nobody twice; the same expansion respects each recipient's preferences, quiet
-hours and tenant quota. And the first of the transports (Stage 10): the proto, the in-process port, and a gRPC server and client that pass the same `NotifierContract` as
-the library, with the `NotifyTx` cases swapped for the one a remote Notifier owes. Not built: the REST surface and the SSE relay, a service binary, and the
-adapters behind topics, templates and addresses.
+hours and tenant quota. And the transports (Stage 10), as packages: the in-process port, a gRPC server and client that pass the same `NotifierContract`
+as the library (the `NotifyTx` cases swapped for the one a remote Notifier owes), and the REST surface and SSE relay (the inbox,
+preferences, one-click unsubscribe, the operator's broadcast, replay and erasure, health, and provider webhooks verified before
+they are parsed), the relay held to `StreamIsolationContract` over PostgreSQL and Redis. Not built: a service binary to run them in,
+the one-call `New`, the Resend webhook decoder, a few operator reads, and the adapters behind topics, templates and addresses.
 Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
 → [specs/001-notification-core](specs/001-notification-core/)

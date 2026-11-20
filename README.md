@@ -12,11 +12,13 @@
 ![Spec Kit](https://img.shields.io/badge/Spec%20Kit-spec--first-8957e5)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> ## ⚠️ Status: design complete, **implementation partway through** (9 of 13 stages built)
+> ## ⚠️ Status: design complete, **implementation partway through** (10 of 13 stages built)
 > The **core is built and proven**: schema, domain rules, every port, the PostgreSQL adapter, the
 > notifier, the reference channels, the dispatcher, digests and quotas — each guarantee held by a test
-> that was broken on purpose to prove it fails. What is **not built**: the REST and SSE transports (Stage 10 lands in three changes, and the
-> gRPC server and client and the in-process port are the first), the one-call `New`, and the adapters behind topics, templates and addresses. `Broadcast` (Stage 9: a durable
+> that was broken on purpose to prove it fails. The **transports are built** (Stage 10): the in-process port, a
+> gRPC server and client held to the same `NotifierContract` as the library, and the REST surface and SSE relay,
+> held to `StreamIsolationContract` over PostgreSQL and Redis. What is **not built**: a service binary to run them
+> in (`cmd/notifyd`), the one-call `New`, and the adapters behind topics, templates and addresses. `Broadcast` (Stage 9: a durable
 > record, expanded a page at a time by a leased worker, resumable after a crash) and the maintenance
 > jobs and `Admin.Erase` (Stage 8) are **built and proven against PostgreSQL**; the startup preflight is built with two
 > documented gaps in its tests. So today you adopt it as a Go library and **wire the pieces by hand** (see
@@ -63,7 +65,7 @@
 | **Durable store** | PostgreSQL 16: partitioned inbox, history and dead letters; forced row-level security | ✅ |
 | **Fast path** | Redis: duplicate pre-check (can only miss), live stream, quota counters | ✅ |
 | **Channels** | `in_app`, `email` (SMTP, Resend), signed `webhook`, provider `failover` | ✅ |
-| **Transports** | gRPC producer API, REST + SSE recipient API, in-process port | 🚧 gRPC and in-process built; REST + SSE designed |
+| **Transports** | gRPC producer API, REST + SSE recipient API, in-process port | ✅ as packages; no service binary yet |
 | **Catalog** | Topics, versioned templates and addresses as data, managed over the API | 🚧 designed |
 | **Escalation** | Acknowledgement, escalation chains, workflows ([Phase 2](specs/002-escalation-workflows/)) | 🚧 designed |
 
@@ -485,9 +487,9 @@ Run `make help` for the live list.
 │   │   └── channel/     inapp · email · failover · webhook
 │   └── driving/
 │       ├── inprocess/   the engine's ports as a library host holds them
+│       ├── httpapi/     REST, SSE relay, one-click unsubscribe, provider webhooks, operator routes, health
 │       ├── grpcserver/  notify.v1 Notifier over a ports.Notifier
-│       ├── grpcclient/  a ports.Notifier over gRPC (NotifyTx is ErrTxUnsupported)
-│       └── wire/        what the two share: messages and errors, both ways
+│       └── grpcclient/  a ports.Notifier over gRPC (NotifyTx is ErrTxUnsupported)
 ├── api/
 │   ├── proto/           the contract's proto, linted and breaking-checked by buf
 │   └── notifyv1/        its generated Go, committed (`make proto`, `make proto-check`)
@@ -511,8 +513,8 @@ Run `make help` for the live list.
 └── PROVENANCE.md        where this came from and what changed in the lift and the review
 ```
 
-Not created yet: `cmd/`, and `adapters/driving/httpapi/`. Their lines in `.go-arch-lint.yml` are commented out
-(`cmd`) or arrive with the package (`httpapi`).
+Not created yet: `cmd/`. Its line in `.go-arch-lint.yml` is commented out and is uncommented in the change
+that creates the directory.
 
 ---
 
@@ -532,16 +534,21 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | 7 | Digest, quotas, fairness — leased flush job, Redis counter, noisy-neighbour test | ✅ built |
 | 8 | Maintenance — leased retention jobs, `Admin.Erase`, startup preflight, a record of each job's last clean finish | ✅ built |
 | 9 | Broadcast — a durable record, expanded a page at a time under a lease, resumable at the next page | ✅ built |
-| 10 | Transports — gRPC, REST, SSE relay, in-process port | 🚧 the proto, the in-process port and gRPC are built; REST and the SSE relay follow |
+| 10 | Transports — gRPC, REST, SSE relay, in-process port | ✅ built as packages (the Playwright switch-on, T047a, waits for a service binary) |
 | 11 | Service mode — data-backed topics, templates and addresses; recipient token verification; NATS ingest | 🚧 not built |
 | 12 | Boundary gates — arch-lint, depguard, builds with no host present | ✅ built |
 | 13 | Load test and release — capacity harness, integration-guide samples, tag `v0.1.0` | 🚧 not built |
 
 **Not built, and what that means today**
 
-- **No service.** The gRPC server and client exist and are tested as packages, but nothing assembles them: there is
-  no `cmd/notifyd` and no REST or SSE relay yet; `deploy/Dockerfile` is the intended shape and cannot build, and
-  the Playwright suite is typechecked and listed but not run.
+- **No service binary.** The gRPC server, the REST surface and the SSE relay exist and are tested as packages, but
+  nothing assembles them: there is no `cmd/notifyd`, `deploy/Dockerfile` is the intended shape and cannot build,
+  and the Playwright suite is typechecked and listed but not run (T047a stays open). Service-mode authentication
+  (recipient-token verification, realm bindings, operator tokens) is Stage 11; the packages take an
+  `IdentityFunc` and an `OperatorFunc` from the host.
+- **Some REST routes wait on their ports.** The Resend webhook decoder and its suppression policy, the dead-letter
+  and delivery lists, the read of a tenant's defaults, and `PUT /admin/recipients/addresses` are not served
+  ([T044a, T044b](specs/001-notification-core/tasks.md), T048).
 - **No one-call `New`.** A host assembles `app.Deps` by hand, as above.
 - **PostgreSQL 16 is the supported version, and 17 is tested.** The checkpoint counters moved views in 17 and the code
   reads each where it is, so CI runs the schema and integration suites on both (`make test-pg-next` is the second by hand).

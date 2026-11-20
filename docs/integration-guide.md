@@ -4,9 +4,9 @@ How to adopt this engine in a host product. The short version: you supply your c
 templates, addresses and an identity binding — as Go code in library mode, or as data through the API in
 service mode — and you touch nothing in the delivery core.
 
-> The one-call `New`, the REST surface and the service binary are not built yet, so the code here describes the
-> intended API. The gRPC transport is built as packages: `grpcclient.New(conn)` is a `ports.Notifier`, and
-> `grpcserver.New(notifier)` serves one.
+> The one-call `New` and the service binary are not built yet, so the code here describes the intended API.
+> The transports are built as packages: `grpcclient.New(conn)` is a `ports.Notifier`, `grpcserver` serves one, and
+> `httpapi.New(deps)` is the REST and SSE surface over `ports.Inbox`, to be mounted behind your own session.
 > The notifier, the channels (in-app, email, webhook, failover), the dispatcher and the broadcast
 > expander are built, and are wired by hand from their constructors for now. The **checklist** and the **reasoning** are usable today — they
 > are what the design is for.
