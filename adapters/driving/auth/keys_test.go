@@ -249,6 +249,33 @@ func TestAnEndpointThatIsDownIsNotHammered(t *testing.T) {
 	}
 }
 
+// A host that answers with an endless body costs the service the bytes it is willing to read, and no more.
+func TestAnEndlessAnswerIsNotReadToTheEnd(t *testing.T) {
+	t.Parallel()
+	var written atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		chunk := make([]byte, 64<<10)
+		for range 4096 { // 256 MiB on offer
+			n, err := w.Write(chunk)
+			written.Add(int64(n))
+			if err != nil || r.Context().Err() != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	k, err := auth.NewKeys(map[domain.Realm]string{"alpha": srv.URL + "/jwks.json"}, auth.AllowInsecureHTTP())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := k.For(t.Context(), "alpha"); err == nil {
+		t.Fatal("For of an endless answer = nil, want an error")
+	}
+	if got := written.Load(); got > 64<<20 {
+		t.Fatalf("the host got to write %d MiB before the client stopped reading, want a client that reads about a MiB and hangs up", got>>20)
+	}
+}
+
 func TestColdUsesFetchOnce(t *testing.T) {
 	t.Parallel()
 	h := newHost(t)
