@@ -69,11 +69,12 @@ has the rules):
 - `internal/notifytest/` is the kit every suite is written against (fake clock, fault injection, probe,
   in-memory fakes, `Env`, `NotifierContract`); `internal/pgtest/` and `internal/redistest/` start
   Testcontainers. All are test support only.
-- `adapters/driving/`: the transports. `inprocess` (the engine's ports as a library host holds them), `grpcserver`
-  and `grpcclient` (both stand on `wire`, which maps messages and errors). `api/proto` is the contract's proto and
-  `api/notifyv1` its committed generated Go: edit the proto, then `make proto`.
-- Not created yet: `cmd/`, and the REST and SSE package `adapters/driving/httpapi`. The `cmd` line in
-  `.go-arch-lint.yml` is commented out and is uncommented in the change that creates the directory.
+- `adapters/driving/`: the transports. `inprocess` (the engine's ports as a library host holds them), `httpapi`
+  (REST, the SSE relay, one-click unsubscribe, provider webhooks, operator routes, health), `grpcserver` and
+  `grpcclient` (both stand on `wire`, which maps messages and errors). `api/proto` is the contract's
+  proto and `api/notifyv1` its committed generated Go: edit the proto, then `make proto`.
+- Not created yet: `cmd/`. Its line in `.go-arch-lint.yml` is commented out and is uncommented in the change
+  that creates the directory.
 
 How a notification moves, which spans several files: accepting one is a single transaction (the `notify_idem`
 guard, the inbox row, one queue row per enabled channel, digest windows). Dispatcher replicas then claim queue

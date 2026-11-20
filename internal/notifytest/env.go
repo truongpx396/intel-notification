@@ -253,6 +253,19 @@ func (e *Env) BroadcastDeps() app.Deps {
 	}
 }
 
+// InboxUseCase is the recipient-facing Inbox over the Env's real inbox store, preferences and templates,
+// on the Env's clock: what the REST surface and the relay are built over.
+func (e *Env) InboxUseCase(tb testing.TB) ports.Inbox {
+	tb.Helper()
+	inbox, err := app.NewInbox(e.Config, app.Deps{
+		Channels: e.Channels, Inbox: e.Inbox, Prefs: e.Prefs, Renderer: e.Templates, Topics: e.Topics, Clock: e.Clock,
+	})
+	if err != nil {
+		tb.Fatalf("notifytest: build the Inbox: %v", err)
+	}
+	return inbox
+}
+
 // AddChannel registers a fake channel of the given kind, reporting to the Env's
 // Probe, and returns it. It is the one line NS-008 counts: a channel is
 // registered, and nothing else changes.

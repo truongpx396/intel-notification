@@ -129,7 +129,7 @@ jobs:
   e2e:
     name: e2e (Playwright)
     runs-on: ubuntu-latest
-    if: false   # enable with the REST surface and service mode (tasks T044, T049)
+    if: false   # T047a: the REST surface exists (T044) but nothing assembles it into a service; enable with cmd/notifyd and service-mode auth (Stage 11)
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
