@@ -25,7 +25,7 @@ const MaxBatch = 500
 // Server implements notifyv1.NotifierServer.
 type Server struct {
 	notifyv1.UnimplementedNotifierServer
-	n       ports.Notifier
+	pick    func(context.Context) (ports.Notifier, error)
 	onError func(error)
 }
 
@@ -40,7 +40,15 @@ func WithErrorHandler(h func(error)) Option { return func(s *Server) { s.onError
 
 // New returns a Server over n. The realm is n's own: no message carries one (NR-009).
 func New(n ports.Notifier, opts ...Option) *Server {
-	s := &Server{n: n, onError: func(error) {}}
+	return NewRouted(func(context.Context) (ports.Notifier, error) { return n, nil }, opts...)
+}
+
+// NewRouted returns a Server that asks pick, for every call, which Notifier serves it. It is service
+// mode's: one process serves several realms, each with an engine of its own, and the realm is the
+// caller's binding (auth.Route over what auth.RealmInterceptors derived), never the request's (NR-009).
+// An error from pick is the call's answer, so a caller with no binding is refused before anything runs.
+func NewRouted(pick func(context.Context) (ports.Notifier, error), opts ...Option) *Server {
+	s := &Server{pick: pick, onError: func(error) {}}
 	for _, o := range opts {
 		o(s)
 	}
@@ -64,8 +72,11 @@ func (s *Server) Notify(ctx context.Context, req *notifyv1.Notification) (*notif
 	if req.GetIdemKey() == "" {
 		return nil, s.status(missingKey("notify"))
 	}
-	n := wire.NotificationFromProto(req)
-	r, err := s.n.Notify(ctx, n)
+	engine, err := s.pick(ctx)
+	if err != nil {
+		return nil, s.status(err)
+	}
+	r, err := engine.Notify(ctx, wire.NotificationFromProto(req))
 	if err != nil {
 		return nil, s.status(err)
 	}
@@ -83,6 +94,10 @@ func (s *Server) NotifyBatch(ctx context.Context, req *notifyv1.NotifyBatchReque
 		return nil, wire.Reject(codes.InvalidArgument, wire.ReasonBatchTooLarge,
 			fmt.Sprintf("a batch carries at most %d notifications, this one has %d", MaxBatch, len(items)))
 	}
+	engine, err := s.pick(ctx)
+	if err != nil {
+		return nil, s.status(err)
+	}
 	resp := &notifyv1.NotifyBatchResponse{Receipts: make([]*notifyv1.Receipt, len(items)), Errors: make([]string, len(items))}
 	for i, item := range items {
 		resp.Receipts[i] = &notifyv1.Receipt{}
@@ -90,7 +105,7 @@ func (s *Server) NotifyBatch(ctx context.Context, req *notifyv1.NotifyBatchReque
 			resp.Errors[i] = missingKey("notify").Error()
 			continue
 		}
-		r, err := s.n.Notify(ctx, wire.NotificationFromProto(item))
+		r, err := engine.Notify(ctx, wire.NotificationFromProto(item))
 		if err != nil {
 			if ctx.Err() != nil { // the producer gave up: the rest of the batch is not worth starting
 				return nil, s.status(err)
@@ -108,7 +123,11 @@ func (s *Server) Broadcast(ctx context.Context, req *notifyv1.BroadcastRequest) 
 	if req.GetIdemKey() == "" {
 		return nil, s.status(missingKey("broadcast"))
 	}
-	r, err := s.n.Broadcast(ctx, wire.BroadcastFromProto(req))
+	engine, err := s.pick(ctx)
+	if err != nil {
+		return nil, s.status(err)
+	}
+	r, err := engine.Broadcast(ctx, wire.BroadcastFromProto(req))
 	if err != nil {
 		return nil, s.status(err)
 	}
@@ -120,7 +139,11 @@ func (s *Server) Cancel(ctx context.Context, req *notifyv1.NotificationRef) (*no
 	if req.GetIdemKey() == "" {
 		return nil, s.status(missingKey("cancel"))
 	}
-	r, err := s.n.Cancel(ctx, wire.RefFromProto(req))
+	engine, err := s.pick(ctx)
+	if err != nil {
+		return nil, s.status(err)
+	}
+	r, err := engine.Cancel(ctx, wire.RefFromProto(req))
 	if err != nil {
 		return nil, s.status(err)
 	}
@@ -129,7 +152,11 @@ func (s *Server) Cancel(ctx context.Context, req *notifyv1.NotificationRef) (*no
 
 // Status implements notifyv1.NotifierServer.
 func (s *Server) Status(ctx context.Context, req *notifyv1.NotificationRef) (*notifyv1.NotificationStatus, error) {
-	st, err := s.n.Status(ctx, wire.RefFromProto(req))
+	engine, err := s.pick(ctx)
+	if err != nil {
+		return nil, s.status(err)
+	}
+	st, err := engine.Status(ctx, wire.RefFromProto(req))
 	if err != nil {
 		return nil, s.status(err)
 	}
