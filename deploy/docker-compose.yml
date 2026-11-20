@@ -20,7 +20,8 @@ services:
       - pgdata:/var/lib/postgresql/data
       # On first boot of an empty volume, in filename order: 10-schema.sh creates the application role (a
       # role with neither SUPERUSER nor BYPASSRLS, which notifyd insists on), applies the migrations and
-      # hands the schema to it; 20-local-provider.sh seeds the local email provider.
+      # hands the schema to it; 20-local-provider.sh seeds the local email provider and 30-local-topics.sh the
+      # topics the e2e specs send on.
       - ../deploy/initdb:/docker-entrypoint-initdb.d:ro
       - ../migrations:/migrations:ro
     healthcheck:
