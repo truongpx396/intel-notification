@@ -161,6 +161,9 @@ func TestARealmThatWasNeverFetchedHasNoKeysAndThatIsAnError(t *testing.T) {
 		"a server error":                func(h *host) { h.serve("/alpha.json", nil); h.fail("/alpha.json", 500) },
 		"not found":                     func(h *host) {},
 		"a document that is not a JWKS": func(h *host) { h.serve("/alpha.json", []byte("<html>")) },
+		"a key set with no key a token may be verified with": func(h *host) {
+			h.serve("/alpha.json", []byte(`{"keys":[{"kty":"oct","kid":"shared","k":"c2VjcmV0"}]}`))
+		},
 		"a redirect, even to a good key set": func(h *host) {
 			h.serve("/alpha.json", nil)
 			h.fail("/alpha.json", 302)
