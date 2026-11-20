@@ -38,6 +38,10 @@ func TestPrepareAddresses(t *testing.T) {
 		if in[0].Channel != "" {
 			t.Error("the caller's addresses were changed")
 		}
+		in[0].Meta["k"] = "changed after the call"
+		if got[0].Meta["k"] != "v" {
+			t.Errorf("meta = %v, want a copy: a caller reusing its map must not change what is stored", got[0].Meta)
+		}
 	})
 
 	t.Run("two spellings of one address are one address, and the first is kept", func(t *testing.T) {
