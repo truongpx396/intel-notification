@@ -294,14 +294,23 @@ func TestARoutingFaultIsAnsweredAsOneAndReachesNoEngine(t *testing.T) {
 	}, grpcserver.WithErrorHandler(func(e error) { faults = append(faults, e) }))
 	client := notifyv1.NewNotifierClient(notifytest.NewBufconn(t, srv.Register))
 	calls := map[string]func() error{
-		"Notify":      func() error { _, err := client.Notify(t.Context(), note("k")); return err },
-		"NotifyBatch": func() error { _, err := client.NotifyBatch(t.Context(), &notifyv1.NotifyBatchRequest{Notifications: []*notifyv1.Notification{note("k")}}); return err },
+		"Notify": func() error { _, err := client.Notify(t.Context(), note("k")); return err },
+		"NotifyBatch": func() error {
+			_, err := client.NotifyBatch(t.Context(), &notifyv1.NotifyBatchRequest{Notifications: []*notifyv1.Notification{note("k")}})
+			return err
+		},
 		"Broadcast": func() error {
 			_, err := client.Broadcast(t.Context(), &notifyv1.BroadcastRequest{IdemKey: "k", Tenant: pbTenant, Topic: "t"})
 			return err
 		},
-		"Cancel": func() error { _, err := client.Cancel(t.Context(), &notifyv1.NotificationRef{IdemKey: "k"}); return err },
-		"Status": func() error { _, err := client.Status(t.Context(), &notifyv1.NotificationRef{IdemKey: "k"}); return err },
+		"Cancel": func() error {
+			_, err := client.Cancel(t.Context(), &notifyv1.NotificationRef{IdemKey: "k"})
+			return err
+		},
+		"Status": func() error {
+			_, err := client.Status(t.Context(), &notifyv1.NotificationRef{IdemKey: "k"})
+			return err
+		},
 	}
 	for name, call := range calls {
 		if err := call(); status.Code(err) != codes.Internal || status.Convert(err).Message() != "notify: internal error" {
