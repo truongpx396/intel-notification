@@ -29,7 +29,7 @@ components:
   notifytest: { in: internal/notifytest }  # the kit every suite is written against (T013a)
   app:        { in: app/** }             # the use-cases
   # driving:  { in: adapters/driving/** }
-  # api:      { in: api/** }             # generated protobuf
+  api:        { in: api/** }             # generated protobuf (T045)
   # cmd:      { in: cmd/** }
 
 # A component absent from `deps` may depend on nothing in the project: domain is

@@ -87,6 +87,30 @@ jobs:
           go install github.com/fe3dback/go-arch-lint@v1.19.0
           make arch-lint
 
+  proto:
+    name: proto (lint, generated code, breaking changes)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the breaking-change check compares with the base branch
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # The versions are the Makefile's (BUF_VERSION, PROTOC_GEN_GO_VERSION, PROTOC_GEN_GO_GRPC_VERSION),
+      # so a local `make proto` and this job generate the same bytes.
+      - name: Install buf and the plugins
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@v1.60.0
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+      - name: Lint
+        run: make proto-lint
+      - name: Generated code is current
+        run: make proto-check
+      - name: No breaking change against the base
+        run: make proto-breaking PROTO_BASE=origin/${{ github.base_ref || 'main' }}
+
   e2e-suite:
     name: e2e suite compiles
     runs-on: ubuntu-latest
