@@ -229,8 +229,9 @@ VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)`, realm, tk, tid, channel, pr
 			t.Fatal(err)
 		}
 	}
-	insert("alpha", "", "", "email", "smtp", 20, `{"addr":"relay.internal:587","from":"n@x.test"}`, "", true)
-	insert("alpha", "", "", "email", "resend", 10, `{"from":"n@x.test"}`, "env:RESEND_KEY", true)
+	// smtp is tried first although "resend" sorts first: priority orders them, not the name.
+	insert("alpha", "", "", "email", "smtp", 10, `{"addr":"relay.internal:587","from":"n@x.test"}`, "", true)
+	insert("alpha", "", "", "email", "resend", 20, `{"from":"n@x.test"}`, "env:RESEND_KEY", true)
 	insert("alpha", "workspace", "w1", "email", "resend", 0, `{}`, "file:/run/secrets/w1", true)
 	insert("alpha", "", "", "email", "ses", 5, `{}`, "env:SES", false) // disabled: nobody uses it
 	insert("beta", "", "", "webhook", "webhook", 0, `{}`, "env:HOOK", true)
@@ -248,15 +249,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)`, realm, tk, tid, channel, pr
 		seen = append(seen, row{string(p.Realm), p.Tenant.ID, string(p.Channel), p.Provider, p.SecretRef, p.Priority})
 	}
 	want := []row{
-		{"alpha", "", "email", "resend", "env:RESEND_KEY", 10},
-		{"alpha", "", "email", "smtp", "", 20},
+		{"alpha", "", "email", "smtp", "", 10},
+		{"alpha", "", "email", "resend", "env:RESEND_KEY", 20},
 		{"alpha", "w1", "email", "resend", "file:/run/secrets/w1", 0},
 		{"beta", "", "webhook", "webhook", "env:HOOK", 0},
 	}
 	if !slices.Equal(seen, want) {
 		t.Fatalf("Providers = %+v, want %+v: enabled rows only, each scope's in priority order, a reference and never a credential", seen, want)
 	}
-	if got[1].Config["addr"] != "relay.internal:587" || got[0].Config["from"] != "n@x.test" {
+	if got[0].Config["addr"] != "relay.internal:587" || got[1].Config["from"] != "n@x.test" {
 		t.Fatalf("config = %v and %v, want each row's own settings", got[0].Config, got[1].Config)
 	}
 	if got[2].Tenant != (domain.Tenant{Kind: "workspace", ID: "w1"}) || got[0].Tenant != (domain.Tenant{}) {
