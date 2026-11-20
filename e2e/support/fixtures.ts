@@ -45,6 +45,21 @@ export function recipientToken(id: Identity, ttlSeconds = 600): string {
   return `${input}.${b64url(signature)}`;
 }
 
+// producerToken mints what a producer's host gives it to call the gRPC surface: an ES256 JWT whose subject is
+// the producer principal, which the service binds to a realm (NOTIFY_REALM_BINDINGS); a request never names
+// one. The realm in iss is the one the principal is bound to, and the service refuses a token that says
+// otherwise.
+export function producerToken(principal = 'local-producer', ttlSeconds = 600): string {
+  const pem = process.env.NOTIFY_E2E_SIGNING_KEY;
+  if (!pem) throw new Error('NOTIFY_E2E_SIGNING_KEY is unset: global setup did not run');
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'ES256', typ: 'JWT', kid: process.env.NOTIFY_E2E_SIGNING_KID };
+  const claims = { iss: realm, sub: principal, iat: now, exp: now + ttlSeconds };
+  const input = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(claims))}`;
+  const signature = sign('sha256', Buffer.from(input), { key: createPrivateKey(pem), dsaEncoding: 'ieee-p1363' });
+  return `${input}.${b64url(signature)}`;
+}
+
 // Recipients builds identities unique to one test, so parallel tests never share
 // a tenant, a recipient or an idempotency key. `same` deliberately reuses a
 // recipient id in a second tenant: the shape that exposes an isolation bug.
@@ -61,6 +76,12 @@ export class Recipients {
 
   idemKey(label: string): string {
     return `${label}:${this.run}`;
+  }
+
+  // unique names something this test registers (a topic, a template reference) so parallel runs of the suite
+  // against one stack never register the same one.
+  unique(label: string): string {
+    return `${label}_${this.run}`;
   }
 }
 
