@@ -15,7 +15,7 @@ aspirational.
 | Mode | How the identity is established |
 |---|---|
 | Library | The host mounts the handler with an `IdentityFunc(*http.Request) (notify.Identity, error)` over its own session |
-| Service | A **recipient token**: a JWT the host signs (ES256, EdDSA or RS256; `HS256` only in development) and verifies against the realm's JWKS. Claims: `iss` (bound to one realm), `tenant` `{kind,id}`, `recipient` `{kind,id}`, `exp` ≤ 1 hour. The host mints it for the signed-in user; the service never sees the host's session |
+| Service | A **recipient token**: a JWT the host signs (ES256, EdDSA or RS256; `HS256` is not accepted: a secret both sides hold lets either mint a token for any recipient, [D56](../design-decisions.md#d56)) and verifies against the realm's JWKS. Claims: `iss` (bound to one realm), `tenant` `{kind,id}`, `recipient` `{kind,id}`, `exp` ≤ 1 hour. The host mints it for the signed-in user; the service never sees the host's session |
 
 Administrative routes require an operator credential — mTLS or an operator token — never a recipient
 token.
@@ -69,9 +69,11 @@ leaked link disables one preference, not everything), and valid for at least 60 
 | PUT | `/admin/recipients/addresses` | Replace one recipient's addresses on one channel | Body `{tenant, recipient, channel, addresses: [{value, locale?, timezone?}]}`. The REST twin of `Catalog.PutAddresses`, for operators and the e2e suite |
 | POST | `/admin/erasure` | Erase a recipient | Body `{tenant, recipient}`. Returns rows removed per table; the erasure is recorded by hash ([D35](../design-decisions.md#d35)) |
 
-**Not served yet**, because their ports do not exist ([tasks.md](../tasks.md), T044b and T048): `GET` of a
-tenant's defaults, `GET /admin/notifications/dead-letters`, `GET /admin/notifications/deliveries` and
-`PUT /admin/recipients/addresses`. A route whose dependency is absent is not registered, so it is a `404`.
+**Not served yet**, because their ports do not exist ([tasks.md](../tasks.md), T044b): `GET` of a tenant's
+defaults, `GET /admin/notifications/dead-letters` and `GET /admin/notifications/deliveries`. A route whose
+dependency is absent is not registered, so it is a `404`. `PUT /admin/recipients/addresses` is served when the surface
+is given both an operator credential and a `Catalog` (T048); the realm of an administrative call is its operator
+token's, and a body that names one is refused.
 
 ## Health
 

@@ -51,15 +51,40 @@ it is derived from the authenticated producer principal through `NOTIFY_REALM_BI
 cannot name a realm, so it cannot write into another product's key space or read another product's
 status.
 
-In service mode, producers authenticate with mTLS or a signed token. The service is a capability to send
-messages as your product, so an unauthenticated producer path is an open relay.
+In service mode, producers authenticate with mTLS or a signed token ([D56](../specs/001-notification-core/design-decisions.md#d56)).
+With mTLS the principal is the first URI SAN (else the first DNS SAN) of a client certificate the TLS layer
+verified: a certificate that was presented and not verified is no principal. With a token the principal is its
+**subject**, and the token is verified with the keys of the realm that subject is bound to, so a subject bound to
+one realm cannot be claimed with another realm's keys, and its `iss` must be that realm. A principal with no
+binding is refused before any handler runs; a caller is told only that it is not bound, and a credential that
+fails is told only that it was not accepted, never why. The service is a capability to send messages as your
+product, so an unauthenticated producer path is an open relay. An operator's token (for `/admin` routes)
+administers the one realm it was issued for, and the realm of an administrative call is that token's and never a
+request's.
+
+## The database role
+
+The schema's tenant isolation is row-level security, and PostgreSQL does not apply it to a superuser or a role with
+`BYPASSRLS`, whatever `FORCE` says. A service connected as one would pass every test of the policies and hold none
+of the isolation, so `notifyd` refuses to start as one (`NOTIFY_ALLOW_PRIVILEGED_DB_ROLE` is for a throwaway
+development database). The compose stack builds the schema as the superuser and hands it to an application role,
+as the test kit does.
+
+## Credentials of providers
+
+`channel_providers.secret_ref` is a reference (`env:`, `file:`, or a secret manager's URI) and the schema refuses a
+value with no scheme. The service resolves it when a channel is built and hands the result to the provider's
+constructor and to nothing else: it appears in no report, error, log or delivery result, and an error a provider's
+own constructor writes with the key in it is redacted. A reference that cannot be resolved makes that provider
+unavailable, with the reference and the reason, and does not stop the others.
 
 ## Recipients in service mode
 
 The recipient REST surface accepts a **recipient token**: a JWT the host signs for its signed-in user,
 verified against the realm's JWKS, carrying the tenant and recipient, expiring within an hour. The
-service never sees the host's session, and a token for one realm cannot be used in another. `HS256` is
-accepted only in development: a shared secret held by both sides means either can mint tokens for any
+service never sees the host's session, and a token for one realm cannot be used in another. ES256, EdDSA and
+RS256 are accepted, with the algorithm the key allows and not the one the header asks for; `alg: none` and
+`HS256` are not accepted at all, not even in development: a shared secret held by both sides means either can mint tokens for any
 recipient.
 
 ## Tokens in delivered content

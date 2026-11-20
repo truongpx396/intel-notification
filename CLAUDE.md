@@ -8,8 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 adopted either as a library or as a gRPC/REST service. **The specification is the primary artifact and the
 implementation is partway through it.** [ROADMAP.md](ROADMAP.md) says what is built, designed or absent, and
 [specs/001-notification-core/tasks.md](specs/001-notification-core/tasks.md) is the build order. Do not
-trust README snippets about the one-call `New`, service mode or `cmd/notifyd`: they describe an intended API and do
-not exist yet.
+trust README snippets about the one-call `New`: it describes an intended API and does not exist yet. Service mode
+(`cmd/notifyd`) is built; two e2e specs and a few operator reads wait on their ports (see ROADMAP).
 
 Where code and spec disagree, one of them is a bug and the spec says which. Order of authority:
 [constitution](.specify/memory/constitution.md) → `specs/*/contracts/` → `spec.md` →
@@ -61,9 +61,12 @@ has the rules):
   catalog adapters (T048) are not built yet.
 - `adapters/driven/redis/`: the pre-check, a fast path that only ever misses, and the live stream
   (sharded pub/sub on hash-tagged keys), and the quota counter (two fixed UTC windows, taken in one script).
-- `adapters/driven/channel/`: `inapp` (a nudge naming a notification), `email` (SMTP and Resend mailers)
-  and `failover` (ordered providers, the weakest `Dedup` of its members). Each depends on `domain` and
-  `ports` only, and each is held to `notifytest.ChannelContract`.
+- `adapters/driven/channel/`: `inapp` (a nudge naming a notification), `email` (SMTP and Resend mailers),
+  `webhook` and `failover` (ordered providers, the weakest `Dedup` of its members). Each depends on `domain` and
+  `ports` only, and each is held to `notifytest.ChannelContract`. `channel/providers` is the service's channel
+  registry: it builds channels from `channel_providers` rows, resolves each credential from its reference
+  (`adapters/driven/secrets`: `env:`, `file:`), routes a delivery by its realm and tenant, and reports a provider it
+  could not build without ever carrying its credential.
 - `migrations/`: the schema, embedded as `migrations.FS` so hosts, the service binary and the integration
   tests apply the same files. `config.go` is the one configuration surface.
 - `internal/notifytest/` is the kit every suite is written against (fake clock, fault injection, probe,
@@ -71,10 +74,15 @@ has the rules):
   Testcontainers. All are test support only.
 - `adapters/driving/`: the transports. `inprocess` (the engine's ports as a library host holds them), `httpapi`
   (REST, the SSE relay, one-click unsubscribe, provider webhooks, operator routes, health), `grpcserver` and
-  `grpcclient` (both stand on `wire`, which maps messages and errors). `api/proto` is the contract's
-  proto and `api/notifyv1` its committed generated Go: edit the proto, then `make proto`.
-- Not created yet: `cmd/`. Its line in `.go-arch-lint.yml` is commented out and is uncommented in the change
-  that creates the directory.
+  `grpcclient` (both stand on `wire`, which maps messages and errors; the client side also holds the host's
+  `Directory` callback), `auth` (who is calling: realm interceptors from a producer principal, token verification
+  against each realm's JWKS, operator tokens, `Route` to the engine of the caller's realm) and `natsingest` (the
+  optional JetStream ingest). `api/proto` is the contract's proto and `api/notifyv1` its committed generated Go:
+  edit the proto, then `make proto`.
+- `cmd/notifyd`: the service. It assembles every package above from the environment (`config.go`), builds an engine
+  per bound realm, and refuses a database role that bypasses row-level security. `cmd` is the only place that
+  wires concrete implementations, and a transport is handed a port and never an `app` type (the deep scan in
+  `go-arch-lint` reads the difference).
 
 How a notification moves, which spans several files: accepting one is a single transaction (the `notify_idem`
 guard, the inbox row, one queue row per enabled channel, digest windows). Dispatcher replicas then claim queue
@@ -111,8 +119,10 @@ Test-driven, as defined in [tasks.md](specs/001-notification-core/tasks.md#how-a
 - **The module must never import `github.com/aisat/...`**, and `testcontainers` stays in tests and
   `internal/pgtest`. Both are depguard rules, so CI fails on them.
 - **No fake `Queue` or `Store`** in the kit, on purpose: leases, fencing and RLS only PostgreSQL can hold.
+- **The realm of a call is never read from a request.** In service mode it is the caller's binding (`auth`), an
+  operator token's, or a bus subject's; no message, header, query or body names one, and a test per surface tries.
 - **Provider credentials never go in config or env.** `channel_providers` rows reference them
-  (`env:NAME`, `file:/run/secrets/x`). `.env.example` lists the service's inputs only.
+  (`env:NAME`, `file:/run/secrets/x`). `.env.example` lists the service's inputs only. A credential appears in no report, error, log or delivery result.
 
 ## Claude Code setup in this repo
 

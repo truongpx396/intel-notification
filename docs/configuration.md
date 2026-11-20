@@ -75,10 +75,21 @@ NOTIFY_DEFAULT_LOCALE=en
 
 | Variable | Purpose |
 |---|---|
-| `NOTIFY_REALM_BINDINGS` | `principal=realm` pairs, comma-separated. A producer principal is its mTLS certificate SAN or its token subject. A request from an unbound principal is rejected; a request never names its own realm ([D31](../specs/001-notification-core/design-decisions.md#d31)) |
-| `NOTIFY_RECIPIENT_JWKS` | `realm=https://…/jwks.json` pairs: the keys that verify each realm's recipient tokens |
+| `NOTIFY_REALM_BINDINGS` | **required.** `principal=realm` pairs, comma-separated. A producer principal is its mTLS certificate SAN or its token subject. A request from an unbound principal is rejected; a request never names its own realm ([D31](../specs/001-notification-core/design-decisions.md#d31), [D56](../specs/001-notification-core/design-decisions.md#d56)) |
+| `NOTIFY_RECIPIENT_JWKS` | `realm=https://…/jwks.json` pairs: the keys that verify each realm's recipient tokens **and its producers' tokens**. A realm with producers needs this or `NOTIFY_GRPC_TLS_CLIENT_CA`, or `notifyd` will not start. ES256, EdDSA and RS256; a token needs a `kid`; `alg: none` and HS256 are not accepted. A token names its realm in `iss`, which must be that realm |
+| `NOTIFY_ALLOW_INSECURE_HTTP` | `true` lets the JWKS URLs and `NOTIFY_PUBLIC_URL` be plain HTTP. For development and the e2e stack: keys read in the clear can be replaced by anyone on the path, who could then mint tokens for any recipient |
+| `NOTIFY_JWKS_TTL`, `NOTIFY_JWKS_MIN_REFETCH` | How long a realm's keys are used (`10m`), and the shortest interval between two fetches of them (`1m`): the TTL, a token naming a key id the set lacks or that no longer verifies, and a retry after a failure all count. A host's outage does not sign anyone out: the last good set is used |
+| `NOTIFY_RECIPIENT_AUDIENCE`, `NOTIFY_PRODUCER_AUDIENCE` | When set, every token must name it in `aud`. Unset: `aud` is not read |
+| `NOTIFY_HTTP_ADDR`, `NOTIFY_GRPC_ADDR` | Where the REST and SSE surface (`:8080`) and the gRPC surface (`:9090`) listen. gRPC is a capability to send as a product and belongs on an internal network |
+| `NOTIFY_GRPC_TLS_CERT`, `NOTIFY_GRPC_TLS_KEY`, `NOTIFY_GRPC_TLS_CLIENT_CA` | The gRPC server's certificate and key, and the CA its clients' certificates must chain to. With the CA, a client certificate is required and verified, and its SAN is the producer's principal |
+| `NOTIFY_PUBLIC_URL` | The address the REST surface has from outside, where an unsubscribe link in an email points. Required with `NOTIFY_UNSUBSCRIBE_KEYS` |
+| `NOTIFY_ROLE` | `all` (default), `api` (the surfaces only) or `worker` (the dispatcher and the jobs only). Any number of each is safe |
+| `NOTIFY_PROVIDER_REFRESH` | How often `channel_providers` is read again (`1m`). A failed read keeps the configuration in force |
+| `NOTIFY_ALLOW_PRIVILEGED_DB_ROLE` | `true` lets the service run as a superuser or `BYPASSRLS` role. **Isolation is not held with it**: it is for a throwaway development database. Without it `notifyd` refuses to start as one |
+| `NOTIFY_DIRECTORY_INSECURE` | `true` dials the hosts' `Directory` services without TLS (development) |
+| `NOTIFY_INGEST_REPLICAS` | Replicas of the ingest stream (`1`). Use 3 in production: JetStream with an R3 stream is what makes an acknowledged publish survive a node |
 | `NOTIFY_UNSUBSCRIBE_KEYS` | `kid=secret-ref` pairs for signing unsubscribe tokens; the first signs, all verify, so keys rotate without breaking old mail ([D34](../specs/001-notification-core/design-decisions.md#d34)) |
-| `NOTIFY_OPERATOR_TOKENS` | Bearer tokens accepted on `/admin` routes, as secret references (`env:`, `file:`). Prefer mTLS in production; a token is for local stacks and the e2e suite |
+| `NOTIFY_OPERATOR_TOKENS` | Bearer tokens accepted on `/admin` routes, as secret references (`env:`, `file:`), each for **one realm**: `realm=ref` pairs, or a bare `ref` when exactly one realm is served. An operator of one product never holds another's. Prefer mTLS in production; a token is for local stacks and the e2e suite |
 | `NOTIFY_DIRECTORY_ADDRS` | `realm=host:port` pairs: the host's `Directory` service, if audiences resolve by callback |
 | `NOTIFY_INGEST_NATS_URL` | Optional: enables the JetStream ingest adapter ([bus-subjects.md](../specs/001-notification-core/contracts/bus-subjects.md)) |
 
