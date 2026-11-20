@@ -427,6 +427,13 @@ type SecretResolver interface {
 	Resolve(ctx context.Context, ref string) (string, error)
 }
 
+// PoisonSink records a message the bus ingest gave up on, as a dead letter with source "bus" and reason
+// "poison" (NR-035). It is idempotent on the message's key: a message redelivered while it was being parked
+// is recorded once.
+type PoisonSink interface {
+	RecordPoison(ctx context.Context, m domain.PoisonMessage) error
+}
+
 // Channel is one delivery target. Adding one is implementing this and
 // registering it, never an edit to fan-out, persistence, preferences,
 // deduplication or the schema (NR-016).

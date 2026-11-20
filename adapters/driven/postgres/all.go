@@ -14,6 +14,7 @@ type All struct {
 	Queue        ports.Queue
 	Digests      ports.Digests
 	Maintenance  ports.Maintenance
+	Poison       ports.PoisonSink // the dead letters the bus ingest parks a message as
 	Inbox        ports.InboxStore
 	Prefs        ports.PreferenceStore
 	Suppressions ports.SuppressionStore
@@ -29,7 +30,7 @@ type All struct {
 func NewAll(pool *pgxpool.Pool, opts ...Option) *All {
 	store := New(pool, opts...)
 	return &All{
-		Store: store, Queue: store, Digests: store, Maintenance: store,
+		Store: store, Queue: store, Digests: store, Maintenance: store, Poison: store,
 		Inbox:        NewInbox(pool, opts...),
 		Prefs:        NewPreferences(pool, opts...),
 		Suppressions: NewSuppressions(pool, opts...),

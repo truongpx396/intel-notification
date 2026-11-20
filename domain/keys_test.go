@@ -154,3 +154,28 @@ func TestQuotaCounterKeyNamesTheBudgetAndTheWindow(t *testing.T) {
 		t.Errorf("two tenants share the hash tag %s: a product's traffic would sit on one slot", tag(hour))
 	}
 }
+
+// T052, bus-subjects.md. The vectors were computed with Python's hashlib over the canonical encoding in
+// data-model.md, not with this package.
+func TestTenantTokenFrozenVectors(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		tenant Tenant
+		want   string
+	}{
+		{Tenant{Kind: "workspace", ID: "w1"}, "e5a69683f60c0c5f"},
+		{Tenant{Kind: "a:b", ID: "c"}, "39145bdf278e72c5"},
+		{Tenant{Kind: "a", ID: "b:c"}, "c1f40281ea4801c4"}, // not the token of ("a:b", "c"): the encoding is not a bare join
+		{Tenant{Kind: "team", ID: "t.*>"}, "a04e520009392bc6"},
+	}
+	for _, tc := range cases {
+		if got := TenantToken(tc.tenant); got != tc.want {
+			t.Errorf("TenantToken(%+v) = %q, want %q", tc.tenant, got, tc.want)
+		}
+		for _, bad := range []string{".", "*", ">", " "} {
+			if strings.Contains(TenantToken(tc.tenant), bad) {
+				t.Errorf("TenantToken(%+v) holds %q, which would break a subject", tc.tenant, bad)
+			}
+		}
+	}
+}
