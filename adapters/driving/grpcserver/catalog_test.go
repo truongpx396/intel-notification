@@ -281,3 +281,37 @@ func TestARoutedNotifierSendsInTheRealmOfTheCaller(t *testing.T) {
 		t.Errorf("%d notifications reached an engine, want 2: an unbound producer sends nothing", n)
 	}
 }
+
+// A routing fault (a realm no engine serves) is answered as a fault: the producer is told there was one,
+// an operator is given it, and no call reaches an engine. The interceptor refuses an unbound caller first,
+// so this is the server's own answer to the one thing that gets past it.
+func TestARoutingFaultIsAnsweredAsOneAndReachesNoEngine(t *testing.T) {
+	t.Parallel()
+	var faults []error
+	engine := &notifytest.ScriptedNotifier{}
+	srv := grpcserver.NewRouted(func(context.Context) (ports.Notifier, error) {
+		return nil, errors.New("auth: no engine serves realm \"gamma\"")
+	}, grpcserver.WithErrorHandler(func(e error) { faults = append(faults, e) }))
+	client := notifyv1.NewNotifierClient(notifytest.NewBufconn(t, srv.Register))
+	calls := map[string]func() error{
+		"Notify":      func() error { _, err := client.Notify(t.Context(), note("k")); return err },
+		"NotifyBatch": func() error { _, err := client.NotifyBatch(t.Context(), &notifyv1.NotifyBatchRequest{Notifications: []*notifyv1.Notification{note("k")}}); return err },
+		"Broadcast": func() error {
+			_, err := client.Broadcast(t.Context(), &notifyv1.BroadcastRequest{IdemKey: "k", Tenant: pbTenant, Topic: "t"})
+			return err
+		},
+		"Cancel": func() error { _, err := client.Cancel(t.Context(), &notifyv1.NotificationRef{IdemKey: "k"}); return err },
+		"Status": func() error { _, err := client.Status(t.Context(), &notifyv1.NotificationRef{IdemKey: "k"}); return err },
+	}
+	for name, call := range calls {
+		if err := call(); status.Code(err) != codes.Internal || status.Convert(err).Message() != "notify: internal error" {
+			t.Errorf("%s = %v, want Internal and no detail", name, err)
+		}
+	}
+	if len(faults) != len(calls) {
+		t.Errorf("%d faults reported for %d calls, want each handed to the operator", len(faults), len(calls))
+	}
+	if n := len(engine.Notified()); n != 0 {
+		t.Errorf("%d notifications reached an engine, want none", n)
+	}
+}
