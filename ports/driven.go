@@ -263,6 +263,9 @@ type PreferenceStore interface {
 // serves several realms (NR-017).
 type TopicRegistry interface {
 	Lookup(ctx context.Context, realm domain.Realm, topic domain.Topic) (domain.TopicDef, bool, error)
+	// List names every topic registered in the realm, sorted. A preferences screen is drawn from it:
+	// a recipient can choose only among the topics there are.
+	List(ctx context.Context, realm domain.Realm) ([]domain.Topic, error)
 }
 
 // TemplateRenderer is the one home of copy, locale and branding (NR-019, D27).

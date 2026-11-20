@@ -613,6 +613,8 @@ func (failingTopics) Lookup(context.Context, domain.Realm, domain.Topic) (domain
 	return domain.TopicDef{}, false, errPort
 }
 
+func (failingTopics) List(context.Context, domain.Realm) ([]domain.Topic, error) { return nil, errPort }
+
 type failingPrefs struct {
 	ports.PreferenceStore
 	resolve, schedule bool

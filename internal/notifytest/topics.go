@@ -55,6 +55,21 @@ func (t *Topics) Lookup(_ context.Context, realm domain.Realm, topic domain.Topi
 	return cloneTopicDef(def), true, nil
 }
 
+// List implements ports.TopicRegistry: the topics registered in realm, sorted. Another realm's are not
+// there.
+func (t *Topics) List(_ context.Context, realm domain.Realm) ([]domain.Topic, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var out []domain.Topic
+	for k := range t.m {
+		if k.realm == realm {
+			out = append(out, k.topic)
+		}
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
 func cloneTopicDef(d domain.TopicDef) domain.TopicDef {
 	d.DefaultChannels = slices.Clone(d.DefaultChannels)
 	d.Fallback = slices.Clone(d.Fallback)

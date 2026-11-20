@@ -49,6 +49,14 @@ var (
 	// page, or the broadcast is done. Nothing was written. The worker that meets it does
 	// not retry the page, because the one that holds the lease will (NR-020, D7).
 	ErrBroadcastLeaseLost = errors.New("notify: the broadcast's lease was lost; the page was not committed")
+	// ErrUnknownChannel is returned when a preference names a channel nobody registered: a pair that
+	// nothing would ever deliver on, which a recipient would take for a choice that was saved (NR-016).
+	ErrUnknownChannel = errors.New("notify: channel is not registered")
+	// ErrPreferenceLocked is returned for a write to a (topic, channel) pair that is not the writer's to
+	// change: an essential topic's own channel, which can never be disabled (NR-015), or a pair a
+	// tenant locked (D30). It is refused with its reason and never ignored, so a settings screen cannot
+	// show a switch that does nothing.
+	ErrPreferenceLocked = errors.New("notify: this preference cannot be changed")
 	// ErrPermanent is wrapped by a driven port to say a fault is one no retry can fix:
 	// a Redis that refuses the command for this user, or does not have it. A channel
 	// that meets it reports Rejected rather than Retry, so the delivery is dead-lettered
