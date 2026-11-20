@@ -1299,6 +1299,13 @@ func TestAnOperatorReplacesARecipientsAddressesInTheirRealm(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || len(got.Addresses) != 2 || got.Addresses[0].Value != "a@x.test" || got.Addresses[0].Locale != "fr" {
 		t.Fatalf("body = %s, %v, want the stored set", rec.Body, err)
 	}
+	// Another channel is the channel the body names, not the one the first call happened to use.
+	if rec := f.do("PUT", "/admin/recipients/addresses", "operator-secret", `{"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"u1"},"channel":"push","addresses":[]}`); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	if calls := f.catalog.Calls(); len(calls) != 2 || calls[1].Ch != "push" || len(calls[1].Addrs) != 0 {
+		t.Fatalf("second call = %+v, want the push channel and an empty set, which clears it", calls)
+	}
 }
 
 func TestAnAddressBodyThatNamesARealmIsRefusedAndNothingIsStored(t *testing.T) {
