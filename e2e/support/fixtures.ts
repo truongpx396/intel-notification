@@ -101,6 +101,21 @@ export async function notify(
   expect(res.status(), await res.text()).toBe(202);
 }
 
+// putAddresses replaces one recipient's addresses on one channel through the operator route, the REST twin of
+// Catalog.PutAddresses, which is how a test stands in for the producer that registers them.
+export async function putAddresses(
+  api: APIRequestContext,
+  id: Identity,
+  channel: string,
+  values: string[],
+): Promise<void> {
+  const res = await api.put('/admin/recipients/addresses', {
+    headers: { authorization: `Bearer ${process.env.NOTIFY_E2E_OPERATOR_TOKEN ?? 'e2e-operator'}` },
+    data: { tenant: id.tenant, recipient: id.recipient, channel, addresses: values.map((value) => ({ value })) },
+  });
+  expect(res.status(), await res.text()).toBe(200);
+}
+
 // Inbox is a recipient's view of the REST surface, authenticated as that recipient.
 export class Inbox {
   constructor(

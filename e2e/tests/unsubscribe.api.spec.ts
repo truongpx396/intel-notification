@@ -1,4 +1,4 @@
-import { eventually, expect, Inbox, notify, test } from '../support/fixtures.js';
+import { eventually, expect, Inbox, notify, putAddresses, test } from '../support/fixtures.js';
 
 // D34 — RFC 8058 one-click unsubscribe. Mail goes to the Mailpit capture in the
 // compose stack's e2e profile; the test reads it back through Mailpit's API.
@@ -17,16 +17,14 @@ async function unsubscribeLink(request: import('@playwright/test').APIRequestCon
   return link;
 }
 
-// Pending: enable when the REST surface (T044), the email channel (T026) and
-// service mode (T049) exist.
-test.describe.fixme('one-click unsubscribe', () => {
+// Enabled with T047a's second step: the REST surface (T044), the email channel (T026), service mode (T049a)
+// and the REST twin of Catalog.PutAddresses (T048) exist.
+test.describe('one-click unsubscribe', () => {
   test('a GET of the link changes nothing; the one-click POST disables exactly one pair', async ({ request, recipients }) => {
     const inbox = new Inbox(request, recipients.in(recipients.tenant()));
     const email = `${inbox.id.recipient.id}@example.test`;
     // The recipient's address, as a producer registers it (Catalog.PutAddresses).
-    await request.put('/admin/recipients/addresses', {
-      data: { tenant: inbox.id.tenant, recipient: inbox.id.recipient, channel: 'email', addresses: [{ value: email }] },
-    });
+    await putAddresses(request, inbox.id, 'email', [email]);
     await notify(request, inbox.id.tenant, [inbox.id.recipient], 'invite_received', recipients.idemKey('invite'));
     const link = await unsubscribeLink(request, email);
 
