@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D52. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D53. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -1441,6 +1441,61 @@ Verified: `TestFinishJobRecordsTheCleanEndOfTheJobsOwnerAndOfNoOneElse` in `adap
 `TestACleanFlushPassRecordsItsEndOnceAndAfterItsWork`, `TestAFlushPassThatDidNotCompleteIsNotFinished` and
 `TestAFlushFinishThatCannotBeRecordedIsReportedAndTheWindowsStillCount` in `app`; and end to end
 `TestTheJobsClearWhatIsAgedAndLeaveTheRest` and `TestAJobThatFailsEveryRunIsStartedAndNeverFinished`.
+
+## D53 — A broadcast's lease covers one page, and the commit that advances the cursor releases it · *built*
+
+**Decision.** A worker leases a broadcast **for one page**: the resolver call, a plan for each recipient, and the
+commit. `CommitBroadcastPage` is one transaction whose first statement is the fence and the advance together,
+an `UPDATE` that matches only a *pending* broadcast under the caller's lease token, moves the cursor, completes the
+broadcast on its last page, and **clears the lease**. The page's notifications are written after it, through the
+path `Notify` uses, and the broadcast's `fanned` is increased by what was **written**, which a replay by the guard
+is not. Any failure rolls all of it back, the cursor with it, and the lease is left to lapse.
+
+Around that, three rules the store and the worker keep:
+
+- **The store holds the derivation of a recipient's key.** A page whose notification is not keyed by
+  `BroadcastMemberKey(broadcast key, recipient)` is refused whole, so a second caller of the port cannot get it
+  slightly wrong. A page that is not the last and carries no cursor is refused too, because an empty cursor is where
+  a broadcast starts and the next worker would begin again.
+- **A page that cannot be committed is not retried by the worker that lost it.** `ErrBroadcastLeaseLost` means the
+  lease lapsed and another worker holds the page, or the broadcast is done: nothing was written, and it is not a
+  fault. Any other fault ends the pass and is left to the page's lease to lapse.
+- **What the host's resolver returns is untrusted.** A recipient with an empty kind or id is skipped and reported to
+  the error handler, so one bad row does not hold a tenant's broadcast for ever; a resolver that returns the cursor it
+  was given with a page is a fault, because the page would be asked for again for ever; and `Broadcast` refuses, before
+  recording anything, a topic nobody registered, which every page would fail to plan.
+
+**Alternative.** One lease held across the whole broadcast and renewed at every page; the fence checked at the end of
+the page's transaction; the cursor committed in a transaction of its own.
+
+**What goes wrong without it.**
+
+- *A lease across the whole broadcast* needs a renewal the port has no method for. Without one it lapses in the
+  middle of a large tenant's broadcast, and the worker that holds it carries on against a fence that is now someone
+  else's. With a page-sized lease a lapse costs one page, redone by whoever takes it.
+- *A commit that does not release the lease* makes every page wait for the last one's lease to lapse: a broadcast of
+  two hundred pages takes two hundred leases.
+- *A cursor in a transaction of its own* is advanced while the page rolls back, and the recipients of that page are
+  never notified, with nothing to say so. The two are one transaction so that the only states are before and after.
+- *The fence at the end of the transaction* lets a lapsed worker write a whole page before it learns it lost. At the
+  start it writes nothing, and a stale and a live worker never write the same page.
+- *Counting what was handed in* over-counts a recipient a moving audience returns on two pages, and the count is how an
+  operator reads a broadcast's progress.
+- *The derivation of a key left to the caller* is the failure D7 exists for: a second caller derives it differently and
+  a retried broadcast notifies everyone twice.
+
+**Cost.** A page's lease cannot be extended, so a page slower than the lease (2 minutes by default, `WithBroadcastLease`)
+is discarded at its commit and done again by another worker, never half written. A skipped recipient is reported
+through the error handler and counted nowhere. A broadcast that faults at every page is retried at every lease and
+reported at every pass, and nothing in the database marks it failing; D52's alarm covers the jobs, not a broadcast.
+
+Verified: `TestAPageThatFailsInsideItsTransactionRollsBackAsAWhole`, `TestCommitBroadcastPageIsFencedByTheLeaseToken`,
+`TestCommitBroadcastPageWritesThePageAndAdvancesTheCursorTogether`, `TestARecipientOnTwoPagesIsNotifiedOnce`,
+`TestAPageNotKeyedByTheBroadcastsMemberKeysIsRefused` and `TestAPageThatIsNotTheLastNeedsACursor` in
+`adapters/driven/postgres`; `TestALostLeaseIsNotAFaultAndThePassGoesOn`, `TestAResolverThatDoesNotAdvanceIsAFaultAndNotALoop`,
+`TestARecipientWithAnEmptyComponentIsSkippedAndReported` and `TestBroadcastRefusesWhatCannotBeExpandedAndRecordsNothing`
+in `app`; and end to end `TestACrashBetweenPagesResumesAtTheNextPage` and
+`TestACrashInsideAPageRollsTheWholePageBackAndTheNextWorkerRedoesIt`.
 
 ---
 

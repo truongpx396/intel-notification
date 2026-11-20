@@ -51,11 +51,12 @@ has the rules):
   (`keys.go`), shard, backoff, the terminal-outcome policy, dispatch steps.
 - `ports/`: `driven.go` and `driving.go`, the interfaces. Every other layer depends on these.
 - `app/`: the use-cases, which own the invariants: the planner, the `Notifier`, the recipient `Inbox`
-  (rendered at read time), the `Dispatcher`, the leased `DigestFlusher`, and the quota gate the planner and
-  the dispatcher share. `Deps` is the one struct they are all built from.
+  (rendered at read time), the `Dispatcher`, the leased `DigestFlusher`, the `BroadcastExpander` (one page of a
+  broadcast per lease, the cursor committed with the page), and the quota gate the planner and the dispatcher
+  share. `Deps` is the one struct they are all built from.
 - `adapters/driven/postgres/`: the delivery queue, digests and maintenance jobs, the store's persist and
-  read paths, the inbox, preferences and suppressions, and the `channel_quotas` reader. Broadcast (T041)
-  and the catalog adapters (T048) are not built yet.
+  read paths (broadcasts included), the inbox, preferences and suppressions, and the `channel_quotas` reader. The
+  catalog adapters (T048) are not built yet.
 - `adapters/driven/redis/`: the pre-check, a fast path that only ever misses, and the live stream
   (sharded pub/sub on hash-tagged keys), and the quota counter (two fixed UTC windows, taken in one script).
 - `adapters/driven/channel/`: `inapp` (a nudge naming a notification), `email` (SMTP and Resend mailers)

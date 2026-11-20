@@ -12,11 +12,12 @@
 ![Spec Kit](https://img.shields.io/badge/Spec%20Kit-spec--first-8957e5)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> ## ⚠️ Status: design complete, **implementation partway through** (8 of 13 stages built)
+> ## ⚠️ Status: design complete, **implementation partway through** (9 of 13 stages built)
 > The **core is built and proven**: schema, domain rules, every port, the PostgreSQL adapter, the
 > notifier, the reference channels, the dispatcher, digests and quotas — each guarantee held by a test
 > that was broken on purpose to prove it fails. What is **not built**: the gRPC/REST/SSE transports, the
-> one-call `New`, `Broadcast`, and the adapters behind topics, templates and addresses. The maintenance
+> one-call `New`, and the adapters behind topics, templates and addresses. `Broadcast` (Stage 9: a durable
+> record, expanded a page at a time by a leased worker, resumable after a crash) and the maintenance
 > jobs and `Admin.Erase` (Stage 8) are **built and proven against PostgreSQL**; the startup preflight is built with two
 > documented gaps in its tests. So today you adopt it as a Go library and **wire the pieces by hand** (see
 > [Wiring it as a library](#-wiring-it-as-a-library)); service mode is designed and not runnable.
@@ -103,6 +104,7 @@ flowchart TB
         inbox["Inbox<br/>rendered at read time"]
         dispatcher["Dispatcher × N replicas<br/>nine steps, adaptive polling"]
         digest["DigestFlusher<br/>leased job"]
+        broadcast["BroadcastExpander<br/>a page per lease"]
         gate["Quota gate"]
     end
 
@@ -131,6 +133,7 @@ flowchart TB
     planner -. "read before commit,<br/>write after" .-> pre
     queue -- "SKIP LOCKED lease,<br/>fenced by token" --> dispatcher
     digest --> queue
+    broadcast -- "a page + the cursor,<br/>one transaction" --> txn
     dispatcher --> gate --> counter
     dispatcher --> inapp & mail & hook
     mail --> fail
@@ -265,8 +268,8 @@ will hide them.
 ## 🔌 Wiring it as a library
 
 There is no one-call constructor yet. A host builds the pieces and passes them in one `app.Deps`. This
-compiles against the module today; the four seams in the first block are the host's own
-implementations (a data-backed set arrives in Stage 11).
+compiles against the module today; the seams in the first block are the host's own
+implementations (a data-backed set arrives in Stage 11), and the last of them is optional.
 
 ```go
 // The host's implementations of the seams the engine does not ship yet.
@@ -275,6 +278,7 @@ var (
     topics    ports.TopicRegistry    // your event vocabulary and defaults
     renderer  ports.TemplateRenderer // your copy and i18n
     addresses ports.AddressBook      // where each recipient receives
+    audience  ports.AudienceResolver // optional: expands a selector into recipients, a page at a time
 )
 
 pool, _ := pgxpool.New(ctx, os.Getenv("NOTIFY_PG_DSN"))
@@ -296,6 +300,7 @@ channels.Register(email.New(mailer, topics, links))
 
 deps := app.Deps{
     Channels: channels, Topics: topics, Renderer: renderer, Addresses: addresses,
+    Audience: audience, // nil makes Broadcast take an inline recipient list only
     Store: store, Queue: store, Digests: store, Maintenance: store,
     Inbox:         postgres.NewInbox(pool),
     Prefs:         postgres.NewPreferences(pool),
@@ -310,6 +315,9 @@ notifier, _ := app.NewNotifier(cfg, deps)
 dispatcher, _ := app.NewDispatcher(cfg, deps)
 go dispatcher.Run(ctx) // any number of replicas is safe: claims are leased and fenced
 
+expander, _ := app.NewBroadcastExpander(cfg, deps) // Broadcast's worker: one page per lease, resumable
+go expander.Run(ctx)                               // any number of replicas is safe: a page has one holder
+
 maintenance, _ := app.NewMaintenance(cfg, deps) // retention, partition provisioning, expiries, preflight
 go maintenance.Run(ctx)                         // single-owner per job through leases: run it in every worker
 
@@ -320,6 +328,14 @@ notifier.Notify(ctx, domain.Notification{
     Topic:     "ingestion_complete",
     Data:      map[string]any{"doc_name": docName}, // templates own the copy
     IdemKey:   "ingest:" + docID + ":complete",      // REQUIRED — the exactly-once identity
+})
+
+// A broadcast returns once it is recorded; the expander notifies the audience a page at a time.
+notifier.Broadcast(ctx, domain.BroadcastRequest{
+    Tenant:   domain.Tenant{Kind: "workspace", ID: wsID},
+    Audience: "all-members", // or Recipients: up to Config.MaxInlineRecipients, inline
+    Topic:    "release_notes",
+    IdemKey:  "release:" + version, // REQUIRED — a retry of this call notifies no one twice
 })
 ```
 
@@ -333,7 +349,7 @@ as the intended interface, but do not exist in code:
 - `app.New(cfg, deps)` returning every port at once, and `grpcclient.New(conn)` as a drop-in for it —
   swapping from library to service mode will change one line, because both satisfy `ports.Notifier`.
 - Producers in other languages over the generated `notify.v1` client.
-- `Notifier.Broadcast`, and the data-backed `TopicRegistry`, `TemplateRenderer` and `AddressBook`.
+- The data-backed `TopicRegistry`, `TemplateRenderer` and `AddressBook`.
 
 ---
 
@@ -461,11 +477,11 @@ Run `make help` for the live list.
 ├── domain/              pure rules; imports nothing from the module. Canonical encoding and every
 │                        derived key (keys.go), shard, backoff, terminal-outcome policy, dispatch steps
 ├── ports/               driven.go and driving.go — the interfaces every other layer depends on
-├── app/                 use-cases: planner, Notifier, Inbox, Dispatcher, DigestFlusher, quota gate;
-│                        Deps is the one struct they are all built from
+├── app/                 use-cases: planner, Notifier, Inbox, Dispatcher, DigestFlusher, quota gate,
+│                        BroadcastExpander; Deps is the one struct they are all built from
 ├── adapters/
 │   └── driven/
-│       ├── postgres/    delivery queue, digests, maintenance, store, inbox, prefs, suppressions, quotas
+│       ├── postgres/    delivery queue, digests, maintenance, store (broadcasts included), inbox, prefs, suppressions, quotas
 │       ├── redis/       pre-check, live stream, quota counter
 │       └── channel/     inapp · email · failover · webhook
 ├── migrations/          the schema, embedded as migrations.FS (hosts, tests and the service share it)
@@ -508,7 +524,7 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | 6 | Dispatcher — the nine steps, retries, suppression, dead letters and replay, `webhook` | ✅ built |
 | 7 | Digest, quotas, fairness — leased flush job, Redis counter, noisy-neighbour test | ✅ built |
 | 8 | Maintenance — leased retention jobs, `Admin.Erase`, startup preflight, a record of each job's last clean finish | ✅ built |
-| 9 | Broadcast — durable, paged, resumable | 🚧 not built |
+| 9 | Broadcast — a durable record, expanded a page at a time under a lease, resumable at the next page | ✅ built |
 | 10 | Transports — gRPC, REST, SSE relay, in-process port | 🚧 not built |
 | 11 | Service mode — data-backed topics, templates and addresses; recipient token verification; NATS ingest | 🚧 not built |
 | 12 | Boundary gates — arch-lint, depguard, builds with no host present | ✅ built |
@@ -519,7 +535,6 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 - **No service.** There is no `cmd/notifyd`, no gRPC, no REST and no SSE relay; `deploy/Dockerfile` is the
   intended shape and cannot build, and the Playwright suite is typechecked and listed but not run.
 - **No one-call `New`.** A host assembles `app.Deps` by hand, as above.
-- **No `Broadcast`.** `Notifier.Broadcast` is a stub that returns an error (T042), and its adapter is not built.
 - **PostgreSQL 16 is the supported version, and 17 is tested.** The checkpoint counters moved views in 17 and the code
   reads each where it is, so CI runs the schema and integration suites on both (`make test-pg-next` is the second by hand).
   PostgreSQL 18 is not run.
@@ -566,7 +581,7 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | [specs/001-notification-core/](specs/001-notification-core/) | the normative specification |
 | [constitution](.specify/memory/constitution.md) | the principles every decision is held to; first in the order of authority |
 | [contracts/notification-ports.md](specs/001-notification-core/contracts/notification-ports.md) | every port, the 16 invariants, the dispatcher algorithm, contract tests, the gRPC surface |
-| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 52 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D52 from building the stages |
+| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 53 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D53 from building the stages |
 | [data-model.md](specs/001-notification-core/data-model.md) | tables, keys, RLS, state transitions, retention |
 | [plan.md](specs/001-notification-core/plan.md) | build order and the capacity model |
 | [tasks.md](specs/001-notification-core/tasks.md) | the task list, how a task is worked, and traceability |

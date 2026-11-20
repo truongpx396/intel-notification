@@ -385,6 +385,22 @@ var (
 	ErrUnknownTopic  = errors.New("notify: topic is not registered")
 	ErrMissingIdem   = errors.New("notify: IdemKey is required")
 
+	// ErrTooManyRecipients is returned for a broadcast whose inline recipient list is longer than
+	// Config.MaxInlineRecipients: a bigger audience is a selector the host resolves in pages, not a
+	// list the request carries (NR-020, D31). Nothing is recorded.
+	ErrTooManyRecipients = errors.New("notify: an inline recipient list is over the limit; use an audience selector")
+
+	// ErrAudienceUnsupported is returned for a broadcast that names an audience selector when the
+	// engine was built with no AudienceResolver, so it can only expand an inline recipient list
+	// (D7, D31). Nothing is recorded.
+	ErrAudienceUnsupported = errors.New("notify: no AudienceResolver is configured, so a broadcast takes an inline recipient list")
+
+	// ErrBroadcastLeaseLost is returned by Store.CommitBroadcastPage when the lease the page was
+	// expanded under is no longer the broadcast's: it lapsed and another worker took the page, or the
+	// broadcast is done. Nothing was written. It is not a fault, and the worker that meets it does
+	// not retry the page, because the one that holds the lease will (NR-020, D53).
+	ErrBroadcastLeaseLost = errors.New("notify: the broadcast's lease was lost; the page was not committed")
+
 	// ErrPermanent is wrapped by a driven port to say a fault is one no retry fixes: an ACL that
 	// refuses a command, a server without it. A channel that meets it reports Rejected, so the
 	// delivery is dead-lettered at once with its reason; any other error from a port is transient
@@ -541,7 +557,7 @@ type Dispatcher interface {
 ```go
 // Every port is declared in ports/driven.go (and ports/driving.go for the driving
 // ones); the Go declarations there are normative and are summarized here. Queue,
-// Digests, Maintenance, Store (all but its three broadcast methods), InboxStore,
+// Digests, Maintenance, Store, InboxStore,
 // PreferenceStore and SuppressionStore are implemented: adapters/driven/postgres
 // implements them as plain SQL, tested against PostgreSQL by the integration
 // suite (D37). PreCheck is implemented by adapters/driven/redis. Every
@@ -611,8 +627,8 @@ type Maintenance interface {
 	DatabaseConditions(ctx context.Context) (DatabaseConditions, error)
 }
 
-// Store is the persist and read path: implemented by adapters/driven/postgres (T015),
-// but for the three broadcast methods, which arrive with T041. Status reads one
+// Store is the persist and read path: implemented by adapters/driven/postgres (T015,
+// and T041 for the three broadcast methods). Status reads one
 // snapshot of a notification's deliveries and includes a digested channel's window.
 // PersistAndEnqueue requires the effective priority, not "": the store cannot know the
 // topic's default.
@@ -632,8 +648,15 @@ type Store interface {
 
 	Status(ctx context.Context, id Identity, idemKey string) (NotificationStatus, error)
 
-	// Broadcast jobs: create (idempotent on the broadcast key), lease the next page,
-	// and commit a page's notifications together with the cursor advance.
+	// Broadcast jobs: create (idempotent on realm, tenant and the broadcast key; a replay is
+	// Applied=false with the first call's id), lease the next page (the oldest pending broadcast no
+	// live lease holds, at its cursor; the lease covers ONE page, which its commit releases), and
+	// commit a page's notifications together with the cursor advance, in one transaction (D7, D53).
+	// The commit's fence comes first: ErrBroadcastLeaseLost, having written nothing, when the job's
+	// lease token is not the broadcast's or the broadcast is not pending. It refuses the whole page
+	// when an item is not keyed by BroadcastMemberKey(job.Request.IdemKey, its recipient), when an
+	// item is not for the broadcast's tenant, and when the page is not the last and nextCursor is
+	// empty, because an empty cursor is where a broadcast starts.
 	CreateBroadcast(ctx context.Context, realm Realm, b BroadcastRequest) (BroadcastReceipt, error)
 	LeaseBroadcast(ctx context.Context, lease time.Duration) (*BroadcastJob, error)
 	CommitBroadcastPage(ctx context.Context, job BroadcastJob, page []PageItem, nextCursor string, done bool) error

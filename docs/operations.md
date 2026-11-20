@@ -8,6 +8,7 @@ Running the engine. Written for the person on call, so each section leads with t
 |---|---|---|
 | `Notifier` | in-process in producers, or the gRPC service | producer traffic |
 | `Dispatcher` | any number of worker replicas; each claims across every shard with `SKIP LOCKED` leases | queue depth and oldest age |
+| `BroadcastExpander` | any number of worker replicas; each leases one page of one pending broadcast at a time | pending broadcasts and the age of the oldest |
 | Relay | the SSE surface; any replica serves any recipient | connected clients |
 | Maintenance | runs in every worker; each job single-owner through a `notify_job_leases` lease | nothing — the lease picks one runner |
 
@@ -18,6 +19,21 @@ each; the rows are `retention`, `partition_provision`, `idem_expiry`, `digest_ex
 interval (`digest_flush`'s at least 30 s), so a worker that dies leaves its jobs unrun for up to that long, two hours for the hourly ones, and
 another worker then takes them ([D48](../specs/001-notification-core/design-decisions.md#d48)). There is no quota job: a budget's windows are in its Redis keys and
 lapse by themselves.
+
+Broadcast expansion is not a `notify_job_leases` job: its lease is on the broadcast's own row
+(`notification_broadcasts.lease_token`, `lease_expires_at`) and covers **one page**, which the page's commit releases
+([D53](../specs/001-notification-core/design-decisions.md#d53)). A worker that dies mid-page leaves that page waiting for
+its lease, two minutes by default (`WithBroadcastLease`), and the broadcast then resumes at the cursor the last commit left,
+not at the start. A broadcast that makes no progress is one whose `cursor` and `fanned` do not move while it is `pending`:
+
+```sql
+SELECT realm, tenant_id, idem_key, cursor, fanned, lease_expires_at, now() - created_at AS age
+  FROM notification_broadcasts WHERE status = 'pending' ORDER BY created_at;
+```
+
+A lease that is expired and a cursor that does not move mean pages are being taken and failing: read the expander's
+error handler (a resolver that times out, a recipient the resolver returned with an empty id, which is skipped and reported).
+Completed broadcasts are deleted after the idempotency window by the `broadcast_cleanup` job.
 
 There is no broker in the default deployment and nothing to scale for one.
 

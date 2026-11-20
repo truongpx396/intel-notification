@@ -19,12 +19,14 @@ import (
 // realm field and the Notifier reads none out of its free-form maps: what a
 // producer writes there is never a routing input (NR-009).
 type Notifier struct {
-	cfg     notify.Config // the effective configuration
-	planner *Planner
-	store   ports.Store
-	queue   ports.Queue
-	pre     ports.PreCheck // nil: every Notify takes the durable path
-	waker   ports.Waker    // nil: no dispatcher in this process to wake
+	cfg      notify.Config // the effective configuration
+	planner  *Planner
+	topics   ports.TopicRegistry
+	store    ports.Store
+	queue    ports.Queue
+	pre      ports.PreCheck // nil: every Notify takes the durable path
+	waker    ports.Waker    // nil: no dispatcher in this process to wake
+	audience bool           // whether a Broadcast may name an audience selector, or takes inline recipients only
 }
 
 var _ ports.Notifier = (*Notifier)(nil)
@@ -50,7 +52,10 @@ func NewNotifier(cfg notify.Config, d Deps) (*Notifier, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Notifier{cfg: cfg.WithDefaults(), planner: planner, store: d.Store, queue: d.Queue, pre: d.PreCheck, waker: d.Waker}, nil
+	return &Notifier{
+		cfg: cfg.WithDefaults(), planner: planner, topics: d.Topics, store: d.Store, queue: d.Queue,
+		pre: d.PreCheck, waker: d.Waker, audience: d.Audience != nil,
+	}, nil
 }
 
 // Notify implements ports.Notifier. It persists and enqueues one notification in
@@ -121,9 +126,40 @@ func (n *Notifier) notify(ctx context.Context, tx ports.Tx, nt domain.Notificati
 	return receipt, nil
 }
 
-// Broadcast implements ports.Notifier. It is built with T042.
-func (n *Notifier) Broadcast(context.Context, domain.BroadcastRequest) (domain.BroadcastReceipt, error) {
-	return domain.BroadcastReceipt{}, errors.New("app: broadcast is not implemented yet (T042)")
+// Broadcast implements ports.Notifier. It records the broadcast durably and returns: the
+// audience is expanded by a BroadcastExpander, a page at a time, off the caller's time
+// (NR-020, D7). Nothing is resolved, planned or sent here, so a tenant of any size neither
+// blocks nor times out the caller.
+//
+// What cannot be expanded is refused now, where the producer can fix it, and recorded
+// nowhere: a request with no key, with two sources or none, with an inline list over
+// MaxInlineRecipients (the limit is the effective configuration's), one that names an
+// audience when no resolver was given, and one for a topic nobody registered, which every
+// page would fail to plan and a worker would retry for ever. The realm is the engine's own,
+// as for Notify (NR-009).
+//
+// The receipt of a key already accepted is Applied=false with the id of the first call: the
+// retry of a broadcast is a replay, and its member keys (BroadcastMemberKey) are the ones
+// the first call's expansion wrote under, so no recipient is notified twice.
+func (n *Notifier) Broadcast(ctx context.Context, b domain.BroadcastRequest) (domain.BroadcastReceipt, error) {
+	if err := b.Validate(n.cfg.MaxInlineRecipients); err != nil {
+		return domain.BroadcastReceipt{}, fmt.Errorf("broadcast: %w", err)
+	}
+	if b.Audience != "" && !n.audience {
+		return domain.BroadcastReceipt{}, fmt.Errorf("broadcast: %w", domain.ErrAudienceUnsupported)
+	}
+	_, known, err := n.topics.Lookup(ctx, n.cfg.Realm, b.Topic)
+	if err != nil {
+		return domain.BroadcastReceipt{}, fmt.Errorf("broadcast: look up topic %q: %w", b.Topic, err)
+	}
+	if !known {
+		return domain.BroadcastReceipt{}, fmt.Errorf("broadcast: %w: %q", domain.ErrUnknownTopic, b.Topic)
+	}
+	receipt, err := n.store.CreateBroadcast(ctx, n.cfg.Realm, b)
+	if err != nil {
+		return domain.BroadcastReceipt{}, fmt.Errorf("broadcast: %w", err)
+	}
+	return receipt, nil
 }
 
 // Cancel implements ports.Notifier. Pending deliveries stop and an in-flight one is

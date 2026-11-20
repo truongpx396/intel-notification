@@ -563,15 +563,6 @@ func TestCancelAndStatusAskForTheEnginesRealm(t *testing.T) {
 	}
 }
 
-// Broadcast is built with T042; until then it says so rather than pretend.
-func TestBroadcastIsNotBuiltYet(t *testing.T) {
-	t.Parallel()
-	f := newNoteFx(t)
-	if _, err := f.build().Broadcast(t.Context(), domain.BroadcastRequest{}); err == nil {
-		t.Fatal("Broadcast succeeded before it was built")
-	}
-}
-
 // ------------------------------------------------------------------ waking --
 
 // A Notify that commits in a process that runs a dispatcher wakes it, once, after the

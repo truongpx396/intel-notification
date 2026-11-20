@@ -950,17 +950,68 @@ rule above.
       claimed otherwise was wrong, and is fixed). `IdemKeys` orders `COLLATE "C"`, and its
       test gives the column an ICU collation so the order is not one the database would give anyway. The refactor pass
       made the three expiries of `app.Maintenance` one function and the page-size probe of the tests a helper.*
+
 ## Stage 9 — Broadcast
 
-- [ ] **T042** *red* Test: a crash mid-broadcast resumes at the next page; a retried broadcast
+- [x] **T042a** *setup* `internal/notifytest`: an in-memory `AudienceResolver` (`Audiences`) and the `Env`
+      fields the broadcast suites stand on (`Env.Audiences`, `Env.BroadcastDeps`). A host selector names an
+      ordered list of recipients in one realm and tenant; the resolver serves it in pages of a size the test
+      picks (two, on the `Env`, so a small audience still spans pages), ends with the empty cursor, remembers every
+      question it was asked, and fails on request. It is a fake of a port, so it is held to its behaviour by
+      its own tests (NR-020, [D7](design-decisions.md#d7)).
+      **Mutate:** the last page's cursor, an armed failure that is not spent, the call log, a page or a set that
+      shares its slice with the caller, a cursor it did not issue, and the audience's key without its tenant or its
+      realm
+      *Seven tests of its own, eight mutants in the ledger, all killed. One of them (a cursor that is not a number)
+      first died of a slice-bounds panic inside the fake, which shows nothing, and was rewritten to fail on the
+      assertion.*
+- [x] **T042** *red* Test: a crash mid-broadcast resumes at the next page; a retried broadcast
       double-notifies nobody. Cases: a kill between pages, and a kill inside a page's transaction (the page
       rolls back as a whole); a per-recipient key derives deterministically from the broadcast key
       (frozen vector); an inline list over `MaxInlineRecipients` is rejected (NR-020)
-- [ ] **T041** *green* `app/broadcast.go`: durable record, leased paging, cursor committed with each
+      *Two tests in `domain` (`BroadcastRequest.Validate`, the rules a request must meet to be recorded), 23 in `app`
+      (the front door and the expander against a recording stand-in for the three broadcast methods), 23 in
+      `adapters/driven/postgres` (create, lease, the fence, the page's one transaction) and 10 end to end on the
+      `Env`. **Between pages:** the worker's context ends once the first page has committed, and the next worker's
+      resolver is asked for the cursors `2` and `4` and never for the start again. **Inside a page:** a trigger on
+      `notifications` raises at the fourth recipient, so the page's first write, its guards and its cursor advance
+      roll back together, the dead worker's lease is still held, and once it lapses the page is redone from its
+      own cursor (the resolver is asked for `""`, `2`, `2`, `4`). **A retry:** the same key twice before expansion
+      and again after it records and notifies once; the member key's frozen vector already stood
+      (`TestDerivedKeys`), and the page-size test shows a recipient's key does not depend on the page that carries
+      them. **Red, witnessed where the code under test could reach an assertion:** the domain cases and the
+      app's unit cases fail on their assertions (the lines are in the `test:` commit). The PostgreSQL and end-to-end
+      cases stop at the stubbed port's first call (`CreateBroadcast: not implemented`), which is the device this
+      stage's setup rule describes, so their guarantees are witnessed by their mutants, as T040a's were. Two cases
+      were added before T041 (a page keyed any way but by the broadcast's member keys is refused; a non-final page
+      needs a cursor), and five after the first round of mutants (see T041).*
+- [x] **T041** *green* `app/broadcast.go`: durable record, leased paging, cursor committed with each
       page, inline recipients bounded by `MaxInlineRecipients` (NR-020, [D7](design-decisions.md#d7)).
       Make T042 pass.
       **Mutate:** commit the cursor in a separate transaction from the page; derive a key from the page
       number
+      *`Notifier.Broadcast` validates and records and returns; `BroadcastExpander` leases a page, resolves it, plans
+      each recipient as `Notify` does under `BroadcastMemberKey`, and commits it; the store's three methods do the
+      rest in SQL ([D53](design-decisions.md#d53) records the choices the spec left open: a lease per page that the
+      commit releases, the fence and the advance in one statement, `fanned` counting what was written, the store
+      refusing a page whose keys are not the member keys). **Mutants:** 60 for this task and 8 for T042a, 73 rows in
+      the ledger with the survivors' first rows, among them the two this task names: the cursor on the pool and not in the page's transaction
+      dies on `TestAPageThatFailsInsideItsTransactionRollsBackAsAWhole`, and a key derived from the page's cursor
+      dies on `TestAMemberKeyDoesNotDependOnThePageThatCarriesIt` and on the store's own member-key check. **Five
+      survived the first round and were gaps in the tests, not the code:** a planning fault (a page committed short),
+      the fence's `status = 'pending'` (a canceled broadcast still holding its lease), the replay's read by tenant
+      and by realm (the other tenant's row was recorded after, not before), and `SKIP LOCKED` (nothing held a row
+      while another worker leased). Each has a test now and a second row showing it dies. Four mutants did not
+      build and were rewritten (a fifth, T042a's, is above). **Refactor pass:** the idempotency-key rule is one function for a notification and a
+      broadcast; `resolve` returns whether the page is the last; the store's check of a page's tenant, which
+      duplicated `validatePersist`'s, went (its mutant was equivalent). The expander's page size, lease and
+      interval are options, not `Config`, because the contract fixes `Config`. A broadcast is not under
+      `app.Maintenance`'s `notify_job_leases`: its lease is on its own row, so it is its own loop until the one-call
+      `New` composes it. **The contract follows the code** (`contracts/notification-ports.md`, confirmed by the
+      maintainer): two sentences that said the broadcast methods "arrive with T041" are gone, the three sentinels
+      (`ErrTooManyRecipients`, `ErrAudienceUnsupported`, `ErrBroadcastLeaseLost`) are listed, and the `Store`
+      comment carries the lease, fence and refusals that `ports/driven.go` already said. Held by
+      `TestCommitBroadcastPageIsFencedByTheLeaseToken` and `TestALostLeaseIsNotAFaultAndThePassGoesOn`.*
 
 ## Stage 10 — Transports
 
@@ -1108,7 +1159,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-017 a topic is a registration | topics integration table, no migration | T048 |
 | NR-018 re-anchoring identity is a host binding | structural: `Identity` is opaque strings with frozen vectors; `domain` imports nothing | T007 (done), T053 (done) |
 | NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a (done), T026 (done), T048 |
-| NR-020 resumable paged broadcast | crash between pages and inside a page; deterministic member keys | T042 |
+| NR-020 resumable paged broadcast | crash between pages and inside a page (`TestACrashBetweenPagesResumesAtTheNextPage`, `TestACrashInsideAPageRollsTheWholePageBackAndTheNextWorkerRedoesIt`); a retried broadcast (`TestARetriedBroadcastDoubleNotifiesNobody`); deterministic member keys, frozen and checked by the store on every page; the inline limit; the lease-token fence | T042a (done), T042 (done) |
 | NR-021 stable shard, changeable count | shard vectors; `RehomeShards` integration test | T010 (done), T016 (done) |
 | NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding and with a pending delivery; no row deleted on the way to a retirement (a `DELETE` witness, in place of `n_tup_del`); the jobs' cutoffs (`TestRetentionRetiresEachTableAtItsOwnWindow`, `TestTheExpiriesCutAtTheIdempotencyWindowInBatches`); that the `DELETE` witness can fire (`TestTheRetirementWitnessRecordsADeletion`) | T006 (done), T038, T039 |
 | NR-023 quota defers and moves the backlog | `TestDeferTenantChannel`; `QuotaContract` and the `channel_quotas` table; noisy-neighbour test | T016 (done), T036 (done), T037 (done) |

@@ -92,12 +92,7 @@ func (n Notification) Validate() error {
 	if n.Priority != "" && !n.Priority.Valid() {
 		v.add("Priority", fmt.Sprintf("%q is not info, warning or critical", n.Priority), nil)
 	}
-	switch {
-	case n.IdemKey == "":
-		v.add("IdemKey", "is required: it is the notification's exactly-once identity", ErrMissingIdem)
-	case len(n.IdemKey) > MaxIdemKeyBytes:
-		v.add("IdemKey", fmt.Sprintf("is %d bytes, the limit is %d", len(n.IdemKey), MaxIdemKeyBytes), nil)
-	}
+	v.idemKey("the notification's", n.IdemKey)
 	// An unset DeliverAfter is the zero time, earlier than any real expiry, so an
 	// expiry alone is always after it; the notifier's clock judges it against now.
 	if !n.DeliverBefore.IsZero() && !n.DeliverBefore.After(n.DeliverAfter) {
