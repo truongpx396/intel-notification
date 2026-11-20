@@ -1497,6 +1497,40 @@ Verified: `TestAPageThatFailsInsideItsTransactionRollsBackAsAWhole`, `TestCommit
 in `app`; and end to end `TestACrashBetweenPagesResumesAtTheNextPage` and
 `TestACrashInsideAPageRollsTheWholePageBackAndTheNextWorkerRedoesIt`.
 
+## D54 — A transport translates; what a caller is shown is stated · *built*
+
+**Decision.** The gRPC server and client add no rule of the engine's: every rule a request must meet is the
+`Notifier`'s, so the library and the service refuse the same requests in the same words (NR-025). What a
+transport owns is who is asking, what a status says, and what is never shown. For gRPC, three rules (the REST
+surface and the relay add their own, below them, in the change that builds them):
+
+1. **A refusal is a code and a reason, and a fault is not shown.** A producer branches on a gRPC `ErrorInfo`
+   reason (`MISSING_IDEM_KEY`, `UNKNOWN_TOPIC`, ...), whose pairs are fixed in the contract, and the Go client
+   turns each back into the sentinel the library returns, so `errors.Is` reads the same on both sides. A fault of
+   the engine's own is `INTERNAL: notify: internal error`, and the real error goes to an error handler. A refusal is
+   the engine's own words; a fault's words are the operator's.
+2. **What a wire cannot carry exactly is refused, not rounded.** A `Struct` holds numbers as doubles: an integer
+   beyond 2^53 in `Data` is an error in the client, before any call, and `NotifyBatch` bounds a batch at 500 and
+   refuses a larger one whole.
+3. **A remote `Notifier` cannot join a transaction.** `NotifyTx` on the gRPC client is `ErrTxUnsupported` with no
+   call and nothing touched (D28), and `NotifierContract` says so with one option, `notifytest.Remote()`, that
+   swaps the three `NotifyTx` cases for the one a remote Notifier owes.
+
+**Alternative.** Each transport validating for itself and passing `err.Error()` through: a transport that
+re-derives a rule drifts from the engine's, and one that passes the error through tells a producer which host and
+which table were involved.
+
+**What goes wrong without it.** The library accepts what the service refuses, or the reverse, and a producer
+learns it in production. A SQL error with a host name reaches a producer. A 19-digit id arrives as another id and
+the template renders someone else's invoice number.
+
+*Built.* `adapters/driving/wire` maps every message and every error for both gRPC ends; `grpcserver` adds only the
+two rules that belong to the wire (a key on every mutating call, and the batch bound), and `grpcclient` is a
+`ports.Notifier` that retries nothing: the deadline and the retries are the producer's.
+
+Verified: `TestNotifierContractOverGRPC` (in memory and on Redis), and the tables in `wire`, `grpcserver` and
+`grpcclient`.
+
 ---
 
 ## Open decisions

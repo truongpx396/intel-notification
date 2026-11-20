@@ -1345,6 +1345,35 @@ Contract rules baked into the surface:
 - **Deadlines and retries are the producer's.** A failed call is retried with the same `idem_key`;
   that is what the key is for.
 
+**`NotifyBatch`.** At most 500 notifications; a batch over the limit is refused whole (`INVALID_ARGUMENT`,
+reason `BATCH_TOO_LARGE`) before any of it is accepted, because a half-applied batch is one a producer
+cannot retry. Within the limit each notification is independent: `receipts[i]` and `errors[i]` answer
+`notifications[i]`, and `errors[i]` is empty when it was accepted, so a producer retries exactly the ones
+that failed.
+
+**Errors.** A refusal a producer can act on is a gRPC status whose code and `google.rpc.ErrorInfo` (domain
+`notify.v1`) reason are the contract, because a producer in any language branches on them. The pairs are
+fixed:
+
+| Engine error | Code | Reason |
+|---|---|---|
+| `ErrMissingIdem` | `INVALID_ARGUMENT` | `MISSING_IDEM_KEY` |
+| `ErrEmptyIdentity` | `INVALID_ARGUMENT` | `EMPTY_IDENTITY` |
+| `ErrUnknownTopic` | `INVALID_ARGUMENT` | `UNKNOWN_TOPIC` |
+| `ErrTooManyRecipients` | `INVALID_ARGUMENT` | `TOO_MANY_RECIPIENTS` |
+| `ErrAudienceUnsupported` | `FAILED_PRECONDITION` | `AUDIENCE_UNSUPPORTED` |
+| any other rule a request breaks (`*ValidationError`) | `INVALID_ARGUMENT` | `INVALID_REQUEST` |
+| a batch over 500 | `INVALID_ARGUMENT` | `BATCH_TOO_LARGE` |
+| the caller's context ended | `CANCELED` / `DEADLINE_EXCEEDED` | none |
+| a fault of the engine's own | `INTERNAL`, message `notify: internal error` | none |
+
+The message of a refusal is the engine's own words. A fault is **never** shown to the producer (a SQL
+error or a host name is the operator's), and is reported to the server's error handler. The Go client turns
+a refusal back into the sentinel the library returns (a `*ValidationError` wrapping it, where the library
+returns one), so `errors.Is` reads the same in library mode and in service mode; a transport failure stays
+the gRPC status it is, so the producer's retry policy reads its code. A `Notification` whose `data` holds an
+integer beyond 2^53, which a protobuf `Struct` cannot hold exactly, is refused by the client before any call.
+
 The generated client is wrapped so it satisfies `notify.Notifier`:
 
 ```go
@@ -1397,7 +1426,8 @@ module — no host, no replace directives?**
       grpcserver/          notifyv1 over app                                (service mode)
       grpcclient/          notifyv1 client, satisfies ports.Notifier        (service callers)
       natsingest/          optional: JetStream subject → Notifier (D23)
-  api/notifyv1/            generated protobuf
+  api/proto/notify/v1/     the proto, verbatim from this contract; buf lint and buf breaking in CI
+  api/notifyv1/            its generated Go, committed (make proto; make proto-check fails when stale)
   cmd/notifyd/             the service binary: the only place concrete adapters are assembled
   migrations/              owns the schema — travels with the module; migrations.go embeds it
   internal/pgtest/         integration-test support: Testcontainers, one cloned database per test
