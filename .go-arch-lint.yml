@@ -30,14 +30,14 @@ components:
   app:        { in: app/** }             # the use-cases
   driving:    { in: adapters/driving/** }   # the transports (Stage 10)
   api:        { in: api/** }             # generated protobuf (T045)
-  # cmd:      { in: cmd/** }
+  cmd:        { in: cmd/** }
 
 # A component absent from `deps` may depend on nothing in the project: domain is
 # pure, and migrations (like api, later) is data.
 deps:
   config:     { mayDependOn: [ domain ] }                          # Config.Realm is a domain.Realm
   ports:      { mayDependOn: [ domain ] }
-  driven:     { mayDependOn: [ domain, ports, migrations ] }       # implements ports; NOT app
+  driven:     { mayDependOn: [ domain, ports, migrations, driven ] }   # implements ports; NOT app. Itself: the provider manager builds on the failover channel
   testing:    { mayDependOn: [ migrations ] }
   notifytest: { mayDependOn: [ config, domain, ports, migrations, driven, testing, app ] }   # Env wires the PostgreSQL adapter over pgtest and the use-cases over both
   app:        { mayDependOn: [ config, domain, ports ] }       # app.NewNotifier takes a Config
@@ -46,4 +46,4 @@ deps:
   # registration idiom, notifyv1.RegisterNotifierServer(registrar, server), as the transport being handed to
   # the generated code, so the generated component is allowed to receive it. That is the only edge this adds.
   api:        { mayDependOn: [ driving ] }
-  # cmd:      { mayDependOn: [ config, domain, ports, app, driven, driving, api, migrations ] }
+  cmd:        { mayDependOn: [ config, domain, ports, app, driven, driving, api, migrations ] }

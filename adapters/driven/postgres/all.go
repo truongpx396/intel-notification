@@ -21,6 +21,7 @@ type All struct {
 	Topics       *Topics // ports.TopicRegistry and ports.TopicWriter
 	Templates    *Templates
 	Addresses    *Addresses
+	Providers    *Providers // ports.ProviderStore, over channel_providers
 }
 
 // NewAll returns every port of this package over pool, each configured with opts. The pool's role
@@ -36,5 +37,6 @@ func NewAll(pool *pgxpool.Pool, opts ...Option) *All {
 		Topics:       NewTopics(pool, opts...),
 		Templates:    NewTemplates(pool, opts...),
 		Addresses:    NewAddresses(pool, opts...),
+		Providers:    NewProviders(pool, opts...),
 	}
 }
