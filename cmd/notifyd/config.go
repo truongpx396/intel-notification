@@ -38,6 +38,9 @@ type Config struct {
 	DirectoryTLS      bool
 	GRPCTLS           TLSFiles
 	NATSURL           string
+	// JWKSTTL and JWKSMinRefetch are how long a realm's keys are used, and the shortest interval between two
+	// fetches of them (an unknown key id, a signature that stops verifying, a retry after a failure).
+	JWKSTTL, JWKSMinRefetch time.Duration
 	// NATSReplicas is the replication of the ingest stream. JetStream with a replicated stream (R3) is what
 	// makes an acknowledged publish survive a node (bus-subjects.md); one replica is for development.
 	NATSReplicas int
@@ -154,6 +157,12 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	c.RecipientAud = str("NOTIFY_RECIPIENT_AUDIENCE", "")
 	c.ProducerAud = str("NOTIFY_PRODUCER_AUDIENCE", "")
 	c.NATSURL = str("NOTIFY_INGEST_NATS_URL", "")
+	c.JWKSTTL, c.JWKSMinRefetch = 10*time.Minute, time.Minute
+	dur("NOTIFY_JWKS_TTL", &c.JWKSTTL)
+	dur("NOTIFY_JWKS_MIN_REFETCH", &c.JWKSMinRefetch)
+	if c.JWKSTTL <= 0 || c.JWKSMinRefetch <= 0 {
+		bad("NOTIFY_JWKS_TTL", "the keys' ttl and the refetch interval must both be positive")
+	}
 	c.NATSReplicas = 1
 	num("NOTIFY_INGEST_REPLICAS", &c.NATSReplicas)
 	if c.NATSReplicas < 1 || c.NATSReplicas > 5 {

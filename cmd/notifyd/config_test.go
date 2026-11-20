@@ -128,3 +128,20 @@ func TestEngineProblemsAreNamedByTheEnginesOwnRules(t *testing.T) {
 		t.Fatalf("err = %v, want the engine's own rule: the window is at least 24h", err)
 	}
 }
+
+func TestTheKeyCacheIsConfigurable(t *testing.T) {
+	t.Parallel()
+	c, err := LoadConfig(env(good()))
+	if err != nil || c.JWKSTTL != 10*time.Minute || c.JWKSMinRefetch != time.Minute {
+		t.Fatalf("defaults = %v, %v, %v, want ten minutes and a minute", c.JWKSTTL, c.JWKSMinRefetch, err)
+	}
+	kv := good()
+	kv["NOTIFY_JWKS_TTL"], kv["NOTIFY_JWKS_MIN_REFETCH"] = "30s", "1s"
+	if c, err = LoadConfig(env(kv)); err != nil || c.JWKSTTL != 30*time.Second || c.JWKSMinRefetch != time.Second {
+		t.Fatalf("configured = %v, %v, %v", c.JWKSTTL, c.JWKSMinRefetch, err)
+	}
+	kv["NOTIFY_JWKS_MIN_REFETCH"] = "0s"
+	if _, err = LoadConfig(env(kv)); err == nil {
+		t.Fatal("a zero refetch interval was accepted: it would refetch on every unknown key")
+	}
+}

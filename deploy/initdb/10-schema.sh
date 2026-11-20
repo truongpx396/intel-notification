@@ -15,6 +15,12 @@ psql() { command psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" "
 
 psql -c "CREATE ROLE $OWNER LOGIN PASSWORD '$PASSWORD' NOSUPERUSER NOBYPASSRLS"
 psql -c "GRANT USAGE, CREATE ON SCHEMA public TO $OWNER"
+# What the service's startup preflight asks of its role (docs/operations.md): a transaction left open must not
+# pin vacuum for ever, one runaway statement must not hold its snapshot, and the role must see other sessions'
+# transactions for the age it reports to cover more than its own.
+psql -c "ALTER ROLE $OWNER SET idle_in_transaction_session_timeout = '60s'"
+psql -c "ALTER ROLE $OWNER SET statement_timeout = '120s'"
+psql -c "GRANT pg_read_all_stats TO $OWNER"
 for f in /migrations/*.sql; do
   echo "applying $f"
   psql -q -f "$f"

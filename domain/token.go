@@ -26,6 +26,13 @@ var ErrInvalidToken = errors.New("notify: invalid recipient token")
 // may have rotated its keys since the set was read (T050).
 var ErrUnknownKeyID = errors.New("notify: the token's key id is not in the realm's key set")
 
+// ErrBadSignature is a token whose signature does not verify under the key its header names. It wraps
+// ErrInvalidToken. Like ErrUnknownKeyID it is a refusal a caller may answer by fetching the key set again,
+// once and bounded: a host that rotates a key in place, under the same key id, produces exactly this, and a
+// stranger's forgery produces it too, which is why the fetch is bounded and its result is only ever used to
+// verify again.
+var ErrBadSignature = errors.New("notify: the token's signature does not verify")
+
 // KeySet is the keys one realm's host signs recipient tokens with, by key id. It is parsed from the JWKS
 // the host publishes (RFC 7517) and holds only keys of the three types the verifier accepts.
 type KeySet struct{ keys map[string]any }
@@ -252,7 +259,7 @@ func verifyJWS(token string, keys KeySet) ([]byte, error) {
 		}
 	}
 	if !valid {
-		return nil, invalidToken("the signature does not verify under the key %q", kid)
+		return nil, fmt.Errorf("%w: %w: under the key %q", ErrInvalidToken, ErrBadSignature, kid)
 	}
 	return rawPayload, nil
 }

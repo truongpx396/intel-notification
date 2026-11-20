@@ -28,8 +28,9 @@ func bearerToken(header string) (string, bool) {
 // way that would help forge another.
 var errBadToken = fmt.Errorf("%w: not accepted", domain.ErrInvalidToken)
 
-// verifyWithRefetch runs verify against realm's keys and, when the token names a key id the set does not
-// hold, fetches the set once more (bounded by Keys) and runs it again.
+// verifyWithRefetch runs verify against realm's keys and, when the token names a key id the set does not hold
+// or does not verify under the one it names, fetches the set once more (bounded by Keys) and runs it again:
+// the host may have added a key, or replaced one under the same id.
 func verifyWithRefetch[T any](ctx context.Context, keys *Keys, realm domain.Realm, verify func(domain.KeySet) (T, error)) (T, error) {
 	var zero T
 	set, err := keys.For(ctx, realm)
@@ -37,7 +38,7 @@ func verifyWithRefetch[T any](ctx context.Context, keys *Keys, realm domain.Real
 		return zero, err
 	}
 	got, err := verify(set)
-	if !errors.Is(err, domain.ErrUnknownKeyID) {
+	if !errors.Is(err, domain.ErrUnknownKeyID) && !errors.Is(err, domain.ErrBadSignature) {
 		return got, err
 	}
 	set, refetched, ferr := keys.Refetch(ctx, realm)

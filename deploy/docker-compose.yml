@@ -61,6 +61,9 @@ services:
       NOTIFY_RECIPIENT_JWKS: local=http://host.docker.internal:8099/jwks.json
       # The e2e suite's host serves its JWKS in the clear; a real deployment's is HTTPS.
       NOTIFY_ALLOW_INSECURE_HTTP: "true"
+      # Each e2e run mints a new key under the same key id: the keys are looked at again within seconds.
+      NOTIFY_JWKS_TTL: 30s
+      NOTIFY_JWKS_MIN_REFETCH: 1s
       NOTIFY_PUBLIC_URL: http://localhost:8080
       NOTIFY_UNSUBSCRIBE_KEYS: k1=env:NOTIFY_UNSUBSCRIBE_KEY_K1
       NOTIFY_UNSUBSCRIBE_KEY_K1: local-development-unsubscribe-key-0123456789
