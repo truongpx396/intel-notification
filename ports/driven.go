@@ -288,9 +288,10 @@ type TemplateWriter interface {
 	PutTemplate(ctx context.Context, realm domain.Realm, t domain.Template) (domain.Template, error)
 
 	// ActivateTemplate makes v the one version of its template that renders, and the one before it stops, in
-	// one statement: a render sees the old version or the new one and never neither. It returns
-	// domain.ErrUnknownTemplate, having changed nothing, when no such version is stored in the realm.
-	ActivateTemplate(ctx context.Context, realm domain.Realm, v domain.TemplateVersion) error
+	// one transaction: a render sees the old version or the new one and never neither. It returns the
+	// version now active. It returns domain.ErrUnknownTemplate, having changed nothing, when no such
+	// version is stored in the realm.
+	ActivateTemplate(ctx context.Context, realm domain.Realm, v domain.TemplateVersion) (domain.Template, error)
 }
 
 // AddressWriter stores the addresses an AddressBook resolves (NR-028, D31). Addresses are a

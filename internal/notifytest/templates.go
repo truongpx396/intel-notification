@@ -80,18 +80,20 @@ func (t *Templates) PutTemplate(_ context.Context, realm domain.Realm, tpl domai
 }
 
 // ActivateTemplate implements ports.TemplateWriter.
-func (t *Templates) ActivateTemplate(_ context.Context, realm domain.Realm, v domain.TemplateVersion) error {
+func (t *Templates) ActivateTemplate(_ context.Context, realm domain.Realm, v domain.TemplateVersion) (domain.Template, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	versions := t.m[templateKey{realm, v.Tenant, v.Ref, v.Channel, domain.NormalizeLocale(v.Locale)}]
-	if v.Version < 1 || v.Version > len(versions) {
-		return fmt.Errorf("%w: realm %q, template %q, channel %q, locale %q, version %d",
+	if v.Version < 1 || v.Version > len(versions) || versions[v.Version-1].static != nil {
+		return domain.Template{}, fmt.Errorf("%w: realm %q, template %q, channel %q, locale %q, version %d",
 			domain.ErrUnknownTemplate, realm, v.Ref, v.Channel, v.Locale, v.Version)
 	}
 	for i, s := range versions {
 		s.active = i == v.Version-1
 	}
-	return nil
+	out := versions[v.Version-1].tpl
+	out.Data = maps.Clone(out.Data)
+	return out, nil
 }
 
 // Render implements ports.TemplateRenderer. It walks the locale ladder, the request's tag, then its

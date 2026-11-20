@@ -155,7 +155,7 @@ func TestActivationNeverLeavesAWindowWithNoActiveVersion(t *testing.T) {
 	ver := func(v int) domain.TemplateVersion {
 		return domain.TemplateVersion{Ref: "r", Channel: "email", Locale: "en", Version: v}
 	}
-	if err := templates.ActivateTemplate(t.Context(), "aisat", ver(1)); err != nil {
+	if _, err := templates.ActivateTemplate(t.Context(), "aisat", ver(1)); err != nil {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
@@ -163,7 +163,7 @@ func TestActivationNeverLeavesAWindowWithNoActiveVersion(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := range 150 {
-			if err := templates.ActivateTemplate(t.Context(), "aisat", ver(i%2+1)); err != nil {
+			if _, err := templates.ActivateTemplate(t.Context(), "aisat", ver(i%2+1)); err != nil {
 				t.Errorf("ActivateTemplate: %v", err)
 				return
 			}
@@ -201,7 +201,7 @@ func TestConcurrentActivationsAreTakenInTurn(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range 120 {
-				err := templates.ActivateTemplate(t.Context(), "aisat", domain.TemplateVersion{Ref: "r", Channel: "email", Locale: "en", Version: version})
+				_, err := templates.ActivateTemplate(t.Context(), "aisat", domain.TemplateVersion{Ref: "r", Channel: "email", Locale: "en", Version: version})
 				if err != nil {
 					t.Errorf("ActivateTemplate(version %d): %v", version, err)
 					return

@@ -69,7 +69,7 @@ func TestADeliveryIsRenderedAndAddressedFromTheDataBackedPorts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := templates.ActivateTemplate(t.Context(), id.Realm, domain.TemplateVersion{
+	if _, err := templates.ActivateTemplate(t.Context(), id.Realm, domain.TemplateVersion{
 		Ref: "invoice", Channel: "email", Locale: "en", Version: stored.Version}); err != nil {
 		t.Fatal(err)
 	}
