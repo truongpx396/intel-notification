@@ -24,11 +24,10 @@ type operatorToken struct {
 }
 
 // NewOperators returns Operators over the tokens, one realm each. An empty token is refused: it would
-// authenticate a request that sent none. Two tokens that are the same value are refused too, because which
-// realm they administer would then be a guess.
+// authenticate a request that sent none. A token is the key of the map, so one value cannot administer two
+// realms.
 func NewOperators(tokens map[string]domain.Realm) (*Operators, error) {
 	o := &Operators{}
-	seen := map[[sha256.Size]byte]bool{}
 	for token, realm := range tokens {
 		if token == "" {
 			return nil, errors.New("auth: an operator token is empty")
@@ -36,12 +35,7 @@ func NewOperators(tokens map[string]domain.Realm) (*Operators, error) {
 		if err := realm.Validate(); err != nil {
 			return nil, err
 		}
-		d := sha256.Sum256([]byte(token))
-		if seen[d] {
-			return nil, errors.New("auth: two operator tokens are the same value")
-		}
-		seen[d] = true
-		o.tokens = append(o.tokens, operatorToken{digest: d, realm: realm})
+		o.tokens = append(o.tokens, operatorToken{digest: sha256.Sum256([]byte(token)), realm: realm})
 	}
 	return o, nil
 }
