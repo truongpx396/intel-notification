@@ -72,7 +72,7 @@ func newInboxFx(t *testing.T, change ...func(*notify.Config, *domain.TopicDef)) 
 	}
 	e.Topics.Register(notifytest.Realm, inboxTopic, def)
 	rend := &recRenderer{inner: e.Templates}
-	inbox, err := app.NewInbox(cfg, app.Deps{Inbox: e.Inbox, Renderer: rend, Topics: e.Topics, Channels: e.Channels})
+	inbox, err := app.NewInbox(cfg, app.Deps{Inbox: e.Inbox, Prefs: e.Prefs, Renderer: rend, Topics: e.Topics, Channels: e.Channels})
 	if err != nil {
 		t.Fatalf("NewInbox: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestInboxReadsTheInboxBackedChannelsTemplate(t *testing.T) {
 			DefaultChannels: []domain.ChannelKind{"feed", "email"}, DefaultPriority: domain.PriorityInfo})
 		e.Templates.Put(notifytest.Realm, string(inboxTopic), "feed", "en", domain.RenderedContent{Subject: "From the feed"})
 		e.Templates.Put(notifytest.Realm, string(inboxTopic), "in_app", "en", domain.RenderedContent{Subject: "Wrong: in_app is not special"})
-		inbox, err := app.NewInbox(e.Config, app.Deps{Inbox: e.Inbox, Renderer: e.Templates, Topics: e.Topics, Channels: e.Channels})
+		inbox, err := app.NewInbox(e.Config, app.Deps{Inbox: e.Inbox, Prefs: e.Prefs, Renderer: e.Templates, Topics: e.Topics, Channels: e.Channels})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -414,7 +414,7 @@ func TestInboxLooksEachTopicUpOncePerPage(t *testing.T) {
 		f.accept(f.id, k)
 	}
 	counting := &countingTopics{TopicRegistry: f.e.Topics}
-	inbox, err := app.NewInbox(f.e.Config, app.Deps{Inbox: f.e.Inbox, Renderer: f.rend, Topics: counting, Channels: f.e.Channels})
+	inbox, err := app.NewInbox(f.e.Config, app.Deps{Inbox: f.e.Inbox, Prefs: f.e.Prefs, Renderer: f.rend, Topics: counting, Channels: f.e.Channels})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestInboxWithNoInboxBackedChannelShowsStoredCopyAndAsksNoRenderer(t *testin
 
 	// An Inbox built over a registry that holds no inbox-backed channel.
 	rend := &recRenderer{inner: e.Templates}
-	inbox, err := app.NewInbox(e.Config, app.Deps{Inbox: e.Inbox, Renderer: rend, Topics: e.Topics,
+	inbox, err := app.NewInbox(e.Config, app.Deps{Inbox: e.Inbox, Prefs: e.Prefs, Renderer: rend, Topics: e.Topics,
 		Channels: notifytest.NewRegistry(notifytest.NewChannel("email", domain.ChannelCapabilities{NeedsAddress: true}, notifytest.NewProbe()))})
 	if err != nil {
 		t.Fatal(err)

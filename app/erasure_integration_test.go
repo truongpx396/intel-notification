@@ -139,7 +139,7 @@ func TestNS012AnErasedRecipientLeavesNothingAndTheirSuppressionStays(t *testing.
 		t.Fatalf("the pre-check holds no entry for u2's o1 (%v): the check below would prove nothing", err)
 	}
 
-	admin, err := app.NewAdmin(e.Config, app.Deps{Maintenance: e.Maintenance, Waker: e.Dispatcher, PreCheck: e.PreCheck})
+	admin, err := app.NewAdmin(e.Config, app.Deps{Maintenance: e.Maintenance, Waker: e.Dispatcher, PreCheck: e.PreCheck, Prefs: e.Prefs, Topics: e.Topics, Channels: e.Channels})
 	if err != nil {
 		t.Fatal(err)
 	}

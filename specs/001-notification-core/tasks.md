@@ -1063,6 +1063,15 @@ rule above.
       parsed; the stream subscribes from the session's identity and not from a query parameter; a forged
       nudge shows nothing; the bounded count is sent first on connect.
       **Mutate:** read the recipient from a header; parse the webhook body before verifying it
+      *Progress: the use-cases the routes stand on are built (this change) and the box stays open for the surface itself.
+      In `app`: `Inbox.Preferences`, `SetPreferences` (all or none, every refused pair named with its reason: an
+      unregistered topic or channel, an essential topic's channel, a pair the tenant locked, refused even to the value in
+      force), `Schedule`, `SetSchedule` (validating first), `Unsubscribe` (verifying the token, disabling its one pair)
+      and `Get`, and `Admin.SetTenantPreference`. They needed two port additions, `TopicRegistry.List` and `Inbox.Get`
+      (the contract follows), a `Deps.UnsubscribeSigner`, and `NewInbox` and `NewAdmin` now name the ports they need.
+      **Red, witnessed on the not-built stubs:** `inbox_surface_test.go:174: SetPreferences: app: Inbox.SetPreferences is
+      not implemented yet (T044)` (the lines are in the commit). 23 mutants, two of which survived once and have tests
+      now. The HTTP handlers, the relay and `StreamIsolationContract` are the next change.*
 - [x] **T046** [P] *red → green* `driving/grpcserver`, `driving/grpcclient` (satisfies `ports.Notifier`;
       `NotifyTx` returns `ErrTxUnsupported`). Make the T047 gRPC run pass.
       **Red first:** a unit test that `NotifyTx` returns `ErrTxUnsupported` and never opens a transaction.

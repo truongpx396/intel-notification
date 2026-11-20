@@ -508,6 +508,11 @@ type Notifier interface {
 // caller's Identity from its authenticated session — never from a parameter (NR-008).
 type Inbox interface {
 	List(ctx context.Context, id Identity, q ListQuery) (Page, error)
+	// Get is one of the caller's notifications, rendered as List renders it, or nil when it is not
+	// theirs ("absent" and "someone else's" are one answer, NR-008). It is what the live relay loads for
+	// each nudge, under the session's identity, so a forged nudge loads nothing (D16). locale is the
+	// viewer's, "" for the default.
+	Get(ctx context.Context, id Identity, notificationID, locale string) (*InboxItem, error)
 	Unread(ctx context.Context, id Identity) (UnreadCount, error)
 	MarkSeen(ctx context.Context, id Identity, before time.Time) error
 	MarkRead(ctx context.Context, id Identity, notificationIDs []string) error
@@ -693,6 +698,8 @@ type PreferenceStore interface {
 // service mode. Realm-aware because one service serves several realms.
 type TopicRegistry interface {
 	Lookup(ctx context.Context, realm Realm, topic Topic) (TopicDef, bool, error)
+	// List names every topic registered in the realm, sorted: a preferences screen is drawn from it.
+	List(ctx context.Context, realm Realm) ([]Topic, error)
 }
 
 // TemplateRenderer is the ONE home of copy, locale and branding (NR-019, D27).
@@ -1524,6 +1531,7 @@ type Deps struct {
 	Maintenance  ports.Maintenance
 	Prefs        ports.PreferenceStore
 	Suppressions ports.SuppressionStore
+	UnsubscribeSigner *UnsubscribeSigner // nil ⇒ the engine issued no unsubscribe tokens; Unsubscribe refuses every one
 	Quotas       ports.QuotaCounter
 	QuotaPolicies ports.QuotaPolicies // nil ⇒ an exhausted budget always defers
 	Stream       ports.StreamPublisher
