@@ -366,7 +366,7 @@ func TemplateRendererContract(t *testing.T, newWorld TemplatesFactory) {
 		}
 	})
 
-	t.Run("activating a version nobody stored is not found, and changes nothing", func(t *testing.T) {
+	t.Run("activating a version nobody stored is ErrUnknownTemplate, and changes nothing", func(t *testing.T) {
 		t.Parallel()
 		w := newWorld(t)
 		live(t, w, realmA, tpl())
@@ -377,12 +377,12 @@ func TemplateRendererContract(t *testing.T, newWorld TemplatesFactory) {
 			"another channel":              {Ref: "invoice", Channel: "sms", Locale: "en", Version: 1},
 			"another tenant's":             {Tenant: tenantT1, Ref: "invoice", Channel: "email", Locale: "en", Version: 1},
 		} {
-			if err := w.Writer.ActivateTemplate(t.Context(), realmA, v); !errors.Is(err, domain.ErrNotFound) {
-				t.Errorf("ActivateTemplate(%s) = %v, want ErrNotFound", name, err)
+			if err := w.Writer.ActivateTemplate(t.Context(), realmA, v); !errors.Is(err, domain.ErrUnknownTemplate) {
+				t.Errorf("ActivateTemplate(%s) = %v, want ErrUnknownTemplate", name, err)
 			}
 		}
-		if err := w.Writer.ActivateTemplate(t.Context(), realmB, domain.TemplateVersion{Ref: "invoice", Channel: "email", Locale: "en", Version: 1}); !errors.Is(err, domain.ErrNotFound) {
-			t.Errorf("ActivateTemplate in another realm = %v, want ErrNotFound: a template is per realm", err)
+		if err := w.Writer.ActivateTemplate(t.Context(), realmB, domain.TemplateVersion{Ref: "invoice", Channel: "email", Locale: "en", Version: 1}); !errors.Is(err, domain.ErrUnknownTemplate) {
+			t.Errorf("ActivateTemplate in another realm = %v, want ErrUnknownTemplate: a template is per realm", err)
 		}
 		if got, err := render(t, w); err != nil || got.TemplateVersion != 1 {
 			t.Fatalf("Render = %+v, %v, want version 1 still active", got, err)

@@ -153,7 +153,7 @@ func (t *Templates) ActivateTemplate(ctx context.Context, realm domain.Realm, v 
 	locale := domain.NormalizeLocale(v.Locale)
 	args := []any{string(realm), v.Tenant.Kind, v.Tenant.ID, v.Ref, string(v.Channel), locale}
 	notFound := fmt.Errorf("%w: realm %q, template %q, channel %q, locale %q, version %d",
-		domain.ErrNotFound, realm, v.Ref, v.Channel, v.Locale, v.Version)
+		domain.ErrUnknownTemplate, realm, v.Ref, v.Channel, v.Locale, v.Version)
 	err := pgx.BeginFunc(ctx, t.pool, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT version FROM notification_templates WHERE `+templateKeySQL+` ORDER BY version FOR UPDATE`, args...)
 		if err != nil {
@@ -182,7 +182,7 @@ func (t *Templates) ActivateTemplate(ctx context.Context, realm domain.Realm, v 
 		_, err = tx.Exec(ctx, `UPDATE notification_templates SET active = true WHERE `+templateKeySQL+` AND version = $7`, withVersion...)
 		return err
 	})
-	if errors.Is(err, domain.ErrNotFound) {
+	if errors.Is(err, domain.ErrUnknownTemplate) {
 		return err
 	}
 	if err != nil {
