@@ -128,3 +128,47 @@ func (s *server) tenantPreferences(w http.ResponseWriter, r *http.Request, realm
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// putAddresses replaces one recipient's addresses on one channel, in the operator's realm: the REST twin of
+// Catalog.PutAddresses, for operators and the e2e suite. The recipient and tenant are the body's, because they
+// are the operator's data; a body that names a realm is refused, because the realm is the credential's
+// (NR-009).
+func (s *server) putAddresses(w http.ResponseWriter, r *http.Request, realm domain.Realm) {
+	var body struct {
+		Tenant    tenantJSON    `json:"tenant"`
+		Recipient recipientJSON `json:"recipient"`
+		Channel   string        `json:"channel"`
+		Addresses []struct {
+			Value    string            `json:"value"`
+			Locale   string            `json:"locale"`
+			Timezone string            `json:"timezone"`
+			Meta     map[string]string `json:"meta"`
+		} `json:"addresses"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	id := domain.Identity{Realm: realm, Tenant: body.Tenant.tenant(), Recipient: domain.Recipient{Kind: body.Recipient.Kind, ID: body.Recipient.ID}}
+	addrs := make([]domain.Address, len(body.Addresses))
+	for i, a := range body.Addresses {
+		addrs[i] = domain.Address{Value: a.Value, Locale: a.Locale, Timezone: a.Timezone, Meta: a.Meta}
+	}
+	stored, err := s.d.Catalog.PutAddresses(r.Context(), id, domain.ChannelKind(body.Channel), addrs)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	type out struct {
+		Value    string            `json:"value"`
+		Locale   string            `json:"locale,omitempty"`
+		Timezone string            `json:"timezone,omitempty"`
+		Meta     map[string]string `json:"meta,omitempty"`
+	}
+	resp := make([]out, len(stored))
+	for i, a := range stored {
+		resp[i] = out{Value: a.Value, Locale: a.Locale, Timezone: a.Timezone, Meta: a.Meta}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Addresses []out `json:"addresses"`
+	}{resp})
+}

@@ -376,6 +376,11 @@ func (s *Service) surfaces(ctx context.Context, pg *postgres.All, channels ports
 	if err != nil {
 		return fmt.Errorf("build the Catalog: %w", err)
 	}
+	// The transports are handed ports and not the use-cases behind them: the transport never sees an app type.
+	var (
+		catalogPort ports.Catalog = catalog
+		adminPort   ports.Admin   = admin
+	)
 
 	// -- who may call
 	keys, err := auth.NewKeys(cfg.RecipientJWKS, s.keyOptions()...)
@@ -405,7 +410,7 @@ func (s *Service) surfaces(ctx context.Context, pg *postgres.All, channels ports
 
 	// -- REST
 	httpDeps := httpapi.Deps{
-		Inbox: inbox, Notifier: &auth.RoutedNotifier{Route: route}, Admin: admin, Stream: stream,
+		Inbox: inbox, Notifier: &auth.RoutedNotifier{Route: route}, Admin: admin, Catalog: catalogPort, Stream: stream,
 		Identify: recipients.Identify,
 		Ready: []httpapi.Check{
 			{Name: "postgres", Run: s.pool.Ping},
@@ -447,11 +452,6 @@ func (s *Service) surfaces(ctx context.Context, pg *postgres.All, channels ports
 	}
 	s.grpcSrv = grpc.NewServer(serverOpts...)
 	grpcserver.NewRouted(route, grpcserver.WithErrorHandler(fault("grpc producer"))).Register(s.grpcSrv)
-	// The transports are handed ports and not the use-cases behind them: the transport never sees an app type.
-	var (
-		catalogPort ports.Catalog = catalog
-		adminPort   ports.Admin   = admin
-	)
 	grpcserver.NewCatalog(catalogPort, adminPort, auth.RealmOf, grpcserver.WithCatalogErrorHandler(fault("grpc catalog"))).Register(s.grpcSrv)
 	s.grpcLn, err = net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
