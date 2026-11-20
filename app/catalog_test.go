@@ -238,6 +238,16 @@ func TestCatalogTemplatesAreVersionedAndActivatedExplicitly(t *testing.T) {
 	if _, err := fx.cat.ActivateTemplate(t.Context(), catRealm, domain.TemplateVersion{Ref: "invoice", Channel: "email", Locale: "en", Version: 9}); !errors.Is(err, domain.ErrUnknownTemplate) {
 		t.Fatalf("ActivateTemplate of a version nobody stored = %v, want ErrUnknownTemplate", err)
 	}
+	// The second realm stores and activates its own, under its own name: the realm is the call's.
+	if _, err := fx.cat.PutTemplate(t.Context(), catRealm2, domain.Template{Ref: "invoice", Channel: "email", Locale: "en", Subject: "Beta {{ .name }}", Body: "B"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.cat.ActivateTemplate(t.Context(), catRealm2, domain.TemplateVersion{Ref: "invoice", Channel: "email", Locale: "en", Version: 1}); err != nil {
+		t.Fatalf("ActivateTemplate in the second realm: %v", err)
+	}
+	if err := render(catRealm2); err != nil {
+		t.Fatalf("Render in the second realm = %v, want the template its own call stored", err)
+	}
 }
 
 func TestCatalogPutAddressesKeysThemByTheChannelsNormalization(t *testing.T) {
