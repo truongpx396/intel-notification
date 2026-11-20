@@ -181,3 +181,37 @@ func TestActivationNeverLeavesAWindowWithNoActiveVersion(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// Two producers activating different versions of one template at once are taken in turn: both calls
+// succeed, one after the other, and the template ends with exactly one active version. Without the
+// lock on the template's versions the unique index still keeps two from being active, but it does so by
+// failing one of the calls with a constraint error the producer cannot act on.
+func TestConcurrentActivationsAreTakenInTurn(t *testing.T) {
+	t.Parallel()
+	db := pgtest.New(t)
+	templates := postgres.NewTemplates(db.Owner)
+	for range 2 {
+		if _, err := templates.PutTemplate(t.Context(), "aisat", domain.Template{Ref: "r", Channel: "email", Locale: "en", Body: "v"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wg sync.WaitGroup
+	for version := 1; version <= 2; version++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 120 {
+				err := templates.ActivateTemplate(t.Context(), "aisat", domain.TemplateVersion{Ref: "r", Channel: "email", Locale: "en", Version: version})
+				if err != nil {
+					t.Errorf("ActivateTemplate(version %d): %v", version, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	var active int
+	if err := db.Admin.QueryRow(t.Context(), `SELECT count(*) FROM notification_templates WHERE active`).Scan(&active); err != nil || active != 1 {
+		t.Fatalf("%d versions are active, %v, want exactly 1", active, err)
+	}
+}
