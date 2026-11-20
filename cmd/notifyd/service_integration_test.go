@@ -104,7 +104,10 @@ const emailKey = "re_live_the-providers-api-key"
 
 // startService starts a service for one test. withEmail seeds the provider row that makes the email channel
 // exist; without it the service has the in-app channel alone.
-func startService(t *testing.T, withEmail bool) *world {
+func startService(t *testing.T, withEmail bool) *world { return startServiceOf(t, withEmail, false) }
+
+// startServiceOf is startService, optionally serving a second realm, "other", with a producer bound to it.
+func startServiceOf(t *testing.T, withEmail, secondRealm bool) *world {
 	t.Helper()
 	w := &world{t: t, db: pgtest.New(t), mail: newMailbox(t), signer: notifytest.NewTokenSigner("host-key-1")}
 	dir := t.TempDir()
@@ -129,18 +132,23 @@ VALUES ('local', 'email', 'resend', 0, $1::jsonb, $2)`,
 		}
 	}
 	redisOpt := redistest.New(t).Client.Options()
+	bindings, jwksSetting, operatorTokens := "local-producer=local", "local="+jwks.URL, write("operator", "operator-secret")
+	if secondRealm {
+		bindings, jwksSetting = "local-producer=local,other-producer=other", "local="+jwks.URL+",other="+jwks.URL
+		operatorTokens = "local=" + write("operator", "operator-secret") + ",other=" + write("operator-other", "other-operator-secret")
+	}
 	cfg, err := LoadConfig(func(k string) string {
 		return map[string]string{
 			"NOTIFY_PG_DSN":              dsnOf(w.db.Owner),
 			"NOTIFY_REDIS_URL":           fmt.Sprintf("redis://%s/%d", redisOpt.Addr, redisOpt.DB),
-			"NOTIFY_REALM_BINDINGS":      "local-producer=local",
-			"NOTIFY_RECIPIENT_JWKS":      "local=" + jwks.URL,
+			"NOTIFY_REALM_BINDINGS":      bindings,
+			"NOTIFY_RECIPIENT_JWKS":      jwksSetting,
 			"NOTIFY_ALLOW_INSECURE_HTTP": "true",
 			"NOTIFY_HTTP_ADDR":           "127.0.0.1:0",
 			"NOTIFY_GRPC_ADDR":           "127.0.0.1:0",
 			"NOTIFY_PUBLIC_URL":          "http://notify.example.test",
 			"NOTIFY_UNSUBSCRIBE_KEYS":    "k1=" + write("unsub-key", strings.Repeat("u", 40)),
-			"NOTIFY_OPERATOR_TOKENS":     write("operator", "operator-secret"),
+			"NOTIFY_OPERATOR_TOKENS":     operatorTokens,
 			"NOTIFY_POLL_INTERVAL":       "50ms",
 		}[k]
 	})
@@ -419,4 +427,94 @@ func TestTheServiceRefusesADatabaseRoleThatBypassesRowLevelSecurity(t *testing.T
 		t.Fatalf("Build with the override = %v, want it to start (a throwaway development database)", err)
 	}
 	svc.Close()
+}
+
+// producerAs is a producer's clients, authenticated as principal of realm.
+func (w *world) producerAs(realm domain.Realm, principal string) (*grpcclient.Catalog, *grpcclient.Client) {
+	w.t.Helper()
+	token := w.signer.Producer(realm, principal, time.Now(), 30*time.Minute)
+	conn, err := grpc.NewClient(w.svc.GRPCAddr(), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithPerRPCCredentials(bearer(token)))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	w.t.Cleanup(func() { _ = conn.Close() })
+	return grpcclient.NewCatalog(conn), grpcclient.New(conn)
+}
+
+// NR-009, D31. One process, two realms: each producer registers and sends in the realm it is bound to and
+// cannot see the other's. The topic one registers is unknown to the other, and a token one host signed for
+// one realm opens nothing in the other.
+func TestTwoRealmsInOneProcessNeverMeet(t *testing.T) {
+	w := startServiceOf(t, false, true)
+	catalogLocal, senderLocal := w.producerAs("local", "local-producer")
+	catalogOther, senderOther := w.producerAs("other", "other-producer")
+	ctx := context.Background()
+	only := domain.TopicDef{DefaultChannels: []domain.ChannelKind{"in_app"}, DefaultPriority: domain.PriorityInfo}
+	if _, err := catalogOther.UpsertTopic(ctx, "only_in_other", only); err != nil {
+		t.Fatalf("the other realm's producer registering its topic: %v", err)
+	}
+	note := domain.Notification{Tenant: wsTenant, Recipient: ada, Topic: "only_in_other", IdemKey: "k1", Title: "Hello"}
+	if _, err := senderLocal.Notify(ctx, note); !errors.Is(err, domain.ErrUnknownTopic) {
+		t.Fatalf("local's producer sending on a topic only the other realm registered = %v, want ErrUnknownTopic: a realm's topics are its own", err)
+	}
+	if r, err := senderOther.Notify(ctx, note); err != nil || !r.Applied {
+		t.Fatalf("the other realm's producer sending its own topic = %+v, %v, want it applied", r, err)
+	}
+	// Local registers the same name with different defaults: neither disturbs the other.
+	if _, err := catalogLocal.UpsertTopic(ctx, "only_in_other", domain.TopicDef{DefaultChannels: []domain.ChannelKind{"in_app"}, DefaultPriority: domain.PriorityCritical, Essential: true}); err != nil {
+		t.Fatalf("local registering the same topic name: %v", err)
+	}
+	var local, other struct{ prio, realm string }
+	if err := w.db.Admin.QueryRow(ctx, `SELECT default_priority, realm FROM notification_topics WHERE realm = 'local' AND topic = 'only_in_other'`).Scan(&local.prio, &local.realm); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.db.Admin.QueryRow(ctx, `SELECT default_priority, realm FROM notification_topics WHERE realm = 'other' AND topic = 'only_in_other'`).Scan(&other.prio, &other.realm); err != nil {
+		t.Fatal(err)
+	}
+	if local.prio != "critical" || other.prio != "info" {
+		t.Fatalf("the topics hold priorities %q (local) and %q (other), want critical and info: each realm registered its own", local.prio, other.prio)
+	}
+	// The notification was stored in the realm that sent it.
+	var inOther, inLocal int
+	_ = w.db.Admin.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE realm = 'other'`).Scan(&inOther)
+	_ = w.db.Admin.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE realm = 'local'`).Scan(&inLocal)
+	if inOther != 1 || inLocal != 0 {
+		t.Fatalf("notifications stored: %d in other, %d in local, want 1 and 0", inOther, inLocal)
+	}
+	// A producer's token for one realm, naming the other's principal, opens nothing.
+	forged := w.signer.Producer("local", "other-producer", time.Now(), time.Minute)
+	conn, err := grpc.NewClient(w.svc.GRPCAddr(), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithPerRPCCredentials(bearer(forged)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := grpcclient.New(conn).Notify(ctx, note); err == nil {
+		t.Fatal("a token claiming realm local with the other realm's principal was accepted: a principal is the realm it is bound to, and its token must say so")
+	}
+	// An operator administers the realm of their token: local's cannot erase in other's.
+	erase := func(token string) int {
+		req, _ := http.NewRequest(http.MethodPost, "http://"+w.svc.HTTPAddr()+"/admin/erasure", strings.NewReader(`{"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"ada"}}`))
+		req.Header.Set("Authorization", "Bearer "+token)
+		r, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Body.Close()
+		return r.StatusCode
+	}
+	if code := erase("operator-secret"); code != http.StatusOK {
+		t.Fatalf("local's operator erasing: %d", code)
+	}
+	var left int
+	_ = w.db.Admin.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE realm = 'other'`).Scan(&left)
+	if left != 1 {
+		t.Fatalf("%d notifications left in realm other after local's operator erased: an operator's erasure is in the realm of their token (NR-009)", left)
+	}
+	if code := erase("other-operator-secret"); code != http.StatusOK {
+		t.Fatalf("other's operator erasing: %d", code)
+	}
+	_ = w.db.Admin.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE realm = 'other'`).Scan(&left)
+	if left != 0 {
+		t.Fatalf("%d notifications left in realm other after its own operator erased the recipient", left)
+	}
 }
