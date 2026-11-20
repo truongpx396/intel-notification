@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	goredis "github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -31,6 +33,7 @@ import (
 	"github.com/truongpx396/intel-notification/adapters/driving/grpcclient"
 	"github.com/truongpx396/intel-notification/adapters/driving/grpcserver"
 	"github.com/truongpx396/intel-notification/adapters/driving/httpapi"
+	"github.com/truongpx396/intel-notification/adapters/driving/natsingest"
 	"github.com/truongpx396/intel-notification/app"
 	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/ports"
@@ -352,6 +355,11 @@ func (s *Service) surfaces(ctx context.Context, pg *postgres.All, channels ports
 		notifiers[realm] = n
 	}
 	route := auth.Route(notifiers)
+	if cfg.NATSURL != "" {
+		if err := s.ingest(ctx, notifiers, pg.Poison); err != nil {
+			return err
+		}
+	}
 
 	inbox, err := app.NewInbox(engine, app.Deps{
 		Channels: channels, Inbox: pg.Inbox, Prefs: pg.Prefs, Renderer: pg.Templates, Topics: pg.Topics,
@@ -559,4 +567,42 @@ func (s *Service) Close() {
 			s.closers[i]()
 		}
 	})
+}
+
+// ingest connects the optional JetStream ingest (T052, D23): the stream the producers publish to, a durable
+// consumer per realm bound to that realm's subjects, and a loop per realm that turns each message into a
+// Notify call of that realm's engine. The realm is the subject's, so a consumer is created with the realm's
+// filter and the ingest is handed that realm's engine only (NR-009).
+func (s *Service) ingest(ctx context.Context, notifiers map[domain.Realm]ports.Notifier, sink ports.PoisonSink) error {
+	nc, err := nats.Connect(s.cfg.NATSURL, nats.Name("notifyd"), nats.MaxReconnects(-1))
+	if err != nil {
+		return fmt.Errorf("NOTIFY_INGEST_NATS_URL: %w", err)
+	}
+	s.closers = append(s.closers, nc.Close)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		return fmt.Errorf("JetStream: %w", err)
+	}
+	const stream = "NOTIFY_INGEST"
+	if _, err := js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
+		Name: stream, Subjects: []string{natsingest.SubjectPrefix + ".>"}, Replicas: s.cfg.NATSReplicas,
+		Storage: jetstream.FileStorage, Retention: jetstream.LimitsPolicy, MaxAge: 7 * 24 * time.Hour,
+	}); err != nil {
+		return fmt.Errorf("the ingest stream: %w", err)
+	}
+	const maxDeliver = 10
+	for realm, notifier := range notifiers {
+		consumer, err := js.CreateOrUpdateConsumer(ctx, stream, jetstream.ConsumerConfig{
+			Durable: "notifyd-" + string(realm), FilterSubject: natsingest.SubjectPrefix + "." + string(realm) + ".*",
+			AckPolicy: jetstream.AckExplicitPolicy, MaxDeliver: maxDeliver, AckWait: 30 * time.Second,
+		})
+		if err != nil {
+			return fmt.Errorf("the ingest consumer of realm %q: %w", realm, err)
+		}
+		in := natsingest.New(map[domain.Realm]ports.Notifier{realm: notifier}, sink, js,
+			natsingest.WithMaxDeliver(maxDeliver),
+			natsingest.WithErrorHandler(func(err error) { s.log.Warn("ingest", "realm", string(realm), "event", err.Error()) }))
+		s.loops = append(s.loops, namedLoop{"nats ingest " + string(realm), func(ctx context.Context) error { return in.Run(ctx, consumer) }})
+	}
+	return nil
 }
