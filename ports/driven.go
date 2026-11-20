@@ -268,6 +268,42 @@ type TopicRegistry interface {
 	List(ctx context.Context, realm domain.Realm) ([]domain.Topic, error)
 }
 
+// TopicWriter registers the topics a TopicRegistry reads: in service mode, a row in
+// notification_topics managed through the Catalog API, so adding a topic is a call and not a
+// deployment (NR-017, D31).
+type TopicWriter interface {
+	// UpsertTopic registers topic in realm, replacing an earlier registration whole. A registration
+	// that does not validate (domain.ValidateTopicRegistration) is refused with a
+	// *domain.ValidationError and nothing is stored.
+	UpsertTopic(ctx context.Context, realm domain.Realm, topic domain.Topic, def domain.TopicDef) error
+}
+
+// TemplateWriter stores the templates a TemplateRenderer renders (D27, D55).
+type TemplateWriter interface {
+	// PutTemplate stores t as a new, inactive version of its (realm, tenant, ref, channel, locale) and
+	// returns it with the version number the store assigned: one more than the highest stored. An
+	// inactive version renders for nobody, so an edit reaches no delivery until it is activated.
+	// A template that does not validate (domain.Template.Validate) wraps domain.ErrInvalidTemplate
+	// and nothing is stored, and the version number is not used.
+	PutTemplate(ctx context.Context, realm domain.Realm, t domain.Template) (domain.Template, error)
+
+	// ActivateTemplate makes v the one version of its template that renders, and the one before it stops, in
+	// one statement: a render sees the old version or the new one and never neither. It returns
+	// domain.ErrNotFound, having changed nothing, when no such version is stored in the realm.
+	ActivateTemplate(ctx context.Context, realm domain.Realm, v domain.TemplateVersion) error
+}
+
+// AddressWriter stores the addresses an AddressBook resolves (NR-028, D31). Addresses are a
+// recipient's personal data, so a write runs under the identity's scope like the inbox does.
+type AddressWriter interface {
+	// PutAddresses replaces id's addresses on ch with addrs, in one transaction: an address not in addrs is
+	// removed, one already stored keeps its row and takes the new locale, timezone and meta. keys[i]
+	// is addrs[i]'s domain.AddressKey, which the caller computes with the channel's normalization,
+	// as Queue.BindAddresses is given its keys; two with one key are an error, and nothing is
+	// stored. An empty addrs removes them all.
+	PutAddresses(ctx context.Context, id domain.Identity, ch domain.ChannelKind, addrs []domain.Address, keys []string) error
+}
+
 // TemplateRenderer is the one home of copy, locale and branding (NR-019, D27).
 type TemplateRenderer interface {
 	// Render returns domain.ErrNoTemplate when nothing matches after locale

@@ -147,3 +147,12 @@ func TestAddressBookRefusesAnAddressForAnotherChannel(t *testing.T) {
 	}()
 	NewAddressBook().Put(who("aisat", "w1", "u1"), "email", domain.Address{Channel: "sms", Value: "+15551234567"})
 }
+
+// T048: the in-memory address book runs the table the PostgreSQL one runs.
+func TestAddressBookFakeRunsTheBookContract(t *testing.T) {
+	t.Parallel()
+	AddressBookContract(t, func(*testing.T) AddressesWorld {
+		book := NewAddressBook()
+		return AddressesWorld{Book: book, Writer: book}
+	})
+}

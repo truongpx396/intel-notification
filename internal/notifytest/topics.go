@@ -22,7 +22,10 @@ type Topics struct {
 	m  map[topicKey]domain.TopicDef
 }
 
-var _ ports.TopicRegistry = (*Topics)(nil)
+var (
+	_ ports.TopicRegistry = (*Topics)(nil)
+	_ ports.TopicWriter   = (*Topics)(nil)
+)
 
 // NewTopics returns an empty registry.
 func NewTopics() *Topics {
@@ -42,6 +45,18 @@ func (t *Topics) Register(realm domain.Realm, topic domain.Topic, def domain.Top
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.m[topicKey{realm, topic}] = cloneTopicDef(def)
+}
+
+// UpsertTopic implements ports.TopicWriter: it refuses what domain.ValidateTopicRegistration refuses, as the
+// table does, and replaces an earlier registration whole.
+func (t *Topics) UpsertTopic(_ context.Context, realm domain.Realm, topic domain.Topic, def domain.TopicDef) error {
+	if err := domain.ValidateTopicRegistration(realm, topic, def); err != nil {
+		return err
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.m[topicKey{realm, topic}] = cloneTopicDef(def)
+	return nil
 }
 
 // Lookup implements ports.TopicRegistry. The definition it returns is a copy.

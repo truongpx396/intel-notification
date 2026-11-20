@@ -310,6 +310,7 @@ func TestLocaleLadder(t *testing.T) {
 		{"fr", "en", []string{"fr", "en"}},
 		{"en", "en", []string{"en"}},
 		{"EN-gb", "EN", []string{"en-gb", "en"}},
+		{"FR-ca", "EN", []string{"fr-ca", "fr", "en"}},
 		{"zh-Hant-TW", "en", []string{"zh-hant-tw", "zh", "en"}},
 		{"", "en", []string{"en"}},
 		{"fr-CA", "", []string{"fr-ca", "fr"}},
