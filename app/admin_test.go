@@ -11,6 +11,7 @@ import (
 	notify "github.com/truongpx396/intel-notification"
 	"github.com/truongpx396/intel-notification/app"
 	"github.com/truongpx396/intel-notification/domain"
+	"github.com/truongpx396/intel-notification/internal/notifytest"
 	"github.com/truongpx396/intel-notification/ports"
 )
 
@@ -87,7 +88,7 @@ func adminFx(t *testing.T, replayed bool, err error) (*app.Admin, *recMaintenanc
 	ev := &events{}
 	m := &recMaintenance{ev: ev, replayed: replayed, err: err}
 	a, aerr := app.NewAdmin(notify.Config{Realm: planRealm, StoreDSN: "x", RedisURL: "y"},
-		app.Deps{Maintenance: m, Waker: recWaker{ev: ev}})
+		adminPorts(app.Deps{Maintenance: m, Waker: recWaker{ev: ev}}))
 	if aerr != nil {
 		t.Fatalf("NewAdmin: %v", aerr)
 	}
@@ -101,7 +102,7 @@ func erasureFx(t *testing.T, keys ...string) (*app.Admin, *recMaintenance, *recP
 	m := &recMaintenance{ev: ev, keys: slices.Sorted(slices.Values(keys)), counts: map[string]int{"notify_idem": len(keys)}}
 	pre := &recPreCheck{ev: ev}
 	a, err := app.NewAdmin(notify.Config{Realm: planRealm, StoreDSN: "x", RedisURL: "y"},
-		app.Deps{Maintenance: m, PreCheck: pre})
+		adminPorts(app.Deps{Maintenance: m, PreCheck: pre}))
 	if err != nil {
 		t.Fatalf("NewAdmin: %v", err)
 	}
@@ -201,14 +202,11 @@ func TestReplayDeadLetterRefusals(t *testing.T) {
 	}
 }
 
-// The part of the operator surface that belongs to a later task says so, because a nil
-// would tell an operator that a tenant's default was set.
-func TestTheAdminMethodsNotBuiltYetSaySo(t *testing.T) {
-	t.Parallel()
-	a, _, _ := adminFx(t, false, nil)
-	if err := a.SetTenantPreference(t.Context(), "aisat", domain.TenantPreference{}); err == nil || !strings.Contains(err.Error(), "T044") {
-		t.Errorf("SetTenantPreference = %v, want an error naming T044", err)
-	}
+// adminPorts adds the ports Admin needs for the tenant preference, which these tests do not exercise:
+// empty ones of the kit.
+func adminPorts(d app.Deps) app.Deps {
+	d.Prefs, d.Topics, d.Channels = notifytest.NewPreferences(), notifytest.NewTopics(), notifytest.NewRegistry()
+	return d
 }
 
 // ---------------------------------------------------------------- erasure --

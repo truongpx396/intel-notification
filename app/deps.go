@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/ports"
 )
 
@@ -17,28 +18,31 @@ import (
 // only the fields it uses, so a host that has built the notifier alone can say so
 // and leave the dispatcher's ports empty.
 type Deps struct {
-	Channels      ports.ChannelRegistry
-	Topics        ports.TopicRegistry
-	Renderer      ports.TemplateRenderer
-	Addresses     ports.AddressBook
-	Audience      ports.AudienceResolver // nil: Broadcast accepts inline recipients only
-	Store         ports.Store
-	Inbox         ports.InboxStore
-	Queue         ports.Queue
-	Digests       ports.Digests
-	Maintenance   ports.Maintenance
-	Prefs         ports.PreferenceStore
-	Suppressions  ports.SuppressionStore
-	Quotas        ports.QuotaCounter
-	QuotaPolicies ports.QuotaPolicies // nil: an exhausted budget always defers
-	Stream        ports.StreamPublisher
-	PreCheck      ports.PreCheck   // nil: every Notify takes the durable path
-	Metrics       ports.Metrics    // nil: nothing is counted
-	Steps         ports.StepHook   // nil: the dispatcher's steps are not observed (a test's seam)
-	Waker         ports.Waker      // nil: the Notifier wakes no dispatcher; polling finds the work
-	Listener      ports.WakeSource // nil: polling alone; needed only with Config.ListenNotify
-	Clock         ports.Clock      // nil: the system clock
-	IDs           ports.IDSource   // nil: UUIDv7
+	Channels     ports.ChannelRegistry
+	Topics       ports.TopicRegistry
+	Renderer     ports.TemplateRenderer
+	Addresses    ports.AddressBook
+	Audience     ports.AudienceResolver // nil: Broadcast accepts inline recipients only
+	Store        ports.Store
+	Inbox        ports.InboxStore
+	Queue        ports.Queue
+	Digests      ports.Digests
+	Maintenance  ports.Maintenance
+	Prefs        ports.PreferenceStore
+	Suppressions ports.SuppressionStore
+	// UnsubscribeSigner verifies the one-click unsubscribe tokens the email channel signed (D34). Nil:
+	// the engine issued none, so Inbox.Unsubscribe refuses every token it is shown.
+	UnsubscribeSigner *domain.UnsubscribeSigner
+	Quotas            ports.QuotaCounter
+	QuotaPolicies     ports.QuotaPolicies // nil: an exhausted budget always defers
+	Stream            ports.StreamPublisher
+	PreCheck          ports.PreCheck   // nil: every Notify takes the durable path
+	Metrics           ports.Metrics    // nil: nothing is counted
+	Steps             ports.StepHook   // nil: the dispatcher's steps are not observed (a test's seam)
+	Waker             ports.Waker      // nil: the Notifier wakes no dispatcher; polling finds the work
+	Listener          ports.WakeSource // nil: polling alone; needed only with Config.ListenNotify
+	Clock             ports.Clock      // nil: the system clock
+	IDs               ports.IDSource   // nil: UUIDv7
 }
 
 // systemClock is the default ports.Clock.

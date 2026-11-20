@@ -116,3 +116,21 @@ func TestTopicsRefuseWhatTheRealRegistryWould(t *testing.T) {
 		})
 	}
 }
+
+// List names a realm's topics, sorted, and only that realm's: a preferences screen drawn from another
+// product's topics would offer a recipient switches that mean nothing here.
+func TestTopicsListIsSortedAndScopedToARealm(t *testing.T) {
+	t.Parallel()
+	topics := NewTopics()
+	topics.Register("aisat", "zeta", sampleTopic())
+	topics.Register("aisat", "alpha", sampleTopic())
+	topics.Register("rival", "beta", sampleTopic())
+
+	got, err := topics.List(t.Context(), "aisat")
+	if err != nil || !slices.Equal(got, []domain.Topic{"alpha", "zeta"}) {
+		t.Fatalf("List(aisat) = %v, %v, want alpha and zeta, sorted, and not rival's beta", got, err)
+	}
+	if none, _ := topics.List(t.Context(), "empty"); len(none) != 0 {
+		t.Errorf("List(empty) = %v, want none", none)
+	}
+}

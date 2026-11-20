@@ -454,6 +454,10 @@ func (failingTopics) Lookup(context.Context, domain.Realm, domain.Topic) (domain
 	return domain.TopicDef{}, false, errors.New("topic store down")
 }
 
+func (failingTopics) List(context.Context, domain.Realm) ([]domain.Topic, error) {
+	return nil, errors.New("topic store down")
+}
+
 // The footer is copy, and copy is the template's (NR-019): the default is English
 // and plain, and a host that wants its own words passes them.
 func TestEmailFooterCanBeReplaced(t *testing.T) {

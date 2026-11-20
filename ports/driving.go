@@ -43,6 +43,14 @@ type Notifier interface {
 // request parameter (NR-008).
 type Inbox interface {
 	List(ctx context.Context, id domain.Identity, q domain.ListQuery) (domain.Page, error)
+	// Get returns one of the caller's notifications, rendered as List renders it, or nil when it
+	// is not theirs: a caller cannot tell "absent" from "someone else's" (NR-008). It is what the
+	// live relay loads for each nudge, under the session's identity (D16). The item carries what
+	// the notification is (its topic, priority, copy, data and payload) and not the states a list
+	// reads off the row: a nudge announces a new notification, and its times are the list's. locale
+	// is the viewer's, as for List, and "" takes the default, so a live toast reads in the language
+	// the list does.
+	Get(ctx context.Context, id domain.Identity, notificationID, locale string) (*domain.InboxItem, error)
 	Unread(ctx context.Context, id domain.Identity) (domain.UnreadCount, error)
 	MarkSeen(ctx context.Context, id domain.Identity, before time.Time) error
 	MarkRead(ctx context.Context, id domain.Identity, notificationIDs []string) error

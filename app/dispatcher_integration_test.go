@@ -86,7 +86,7 @@ func TestAParkedDeliveryIsReplayedAndDeliveredOnce(t *testing.T) {
 		t.Fatalf("dead letter = %q, %q, want it inspectable with its reason and last error", reason, lastError)
 	}
 
-	admin, err := app.NewAdmin(e.Config, app.Deps{Maintenance: e.Maintenance, Waker: e.Dispatcher})
+	admin, err := app.NewAdmin(e.Config, app.Deps{Maintenance: e.Maintenance, Waker: e.Dispatcher, Prefs: e.Prefs, Topics: e.Topics, Channels: e.Channels})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestAReplayedDeliveryThatHasExpiredIsNotSentLate(t *testing.T) {
 	}
 
 	e.Clock.Set(notifytest.Epoch.Add(2 * time.Hour))
-	admin, _ := app.NewAdmin(e.Config, app.Deps{Maintenance: e.Maintenance})
+	admin, _ := app.NewAdmin(e.Config, app.Deps{Maintenance: e.Maintenance, Prefs: e.Prefs, Topics: e.Topics, Channels: e.Channels})
 	if err := admin.ReplayDeadLetter(t.Context(), notifytest.Realm, deadLetter); err != nil {
 		t.Fatal(err)
 	}
