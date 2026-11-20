@@ -10,16 +10,23 @@ name: intel-notification
 services:
   postgres:
     image: postgres:16-alpine
+    ports: [ "5432:5432" ]
     environment:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: notify
-    ports: [ "5432:5432" ]
+      # Local development and the e2e suite send through Mailpit (profile e2e).
+      NOTIFY_SEED_SMTP_ADDR: mailpit:1025
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Applied in filename order on first boot of an empty volume.
-      - ../migrations:/docker-entrypoint-initdb.d:ro
+      # On first boot of an empty volume, in filename order: 10-schema.sh creates the application role (a
+      # role with neither SUPERUSER nor BYPASSRLS, which notifyd insists on), applies the migrations and
+      # hands the schema to it; 20-local-provider.sh seeds the local email provider.
+      - ../deploy/initdb:/docker-entrypoint-initdb.d:ro
+      - ../migrations:/migrations:ro
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U postgres -d notify" ]
+      # Over TCP: the init scripts run on a temporary server that listens on the socket only, so a socket
+      # check could pass before the schema exists. Only the final server answers on 127.0.0.1.
+      test: [ "CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d notify" ]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -44,13 +51,19 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     environment:
-      NOTIFY_PG_DSN: postgres://postgres:postgres@postgres:5432/notify?sslmode=disable
+      # The application role, not a superuser: notifyd refuses a role that bypasses row-level security.
+      NOTIFY_PG_DSN: postgres://notify_owner:owner@postgres:5432/notify?sslmode=disable
       NOTIFY_REDIS_URL: redis://redis:6379/0
       NOTIFY_REALM_BINDINGS: local-producer=local
       NOTIFY_SHARDS: "16"
       # Recipient tokens are verified against the host's JWKS. The e2e suite
       # serves one on the host (e2e/support/global-setup.ts).
       NOTIFY_RECIPIENT_JWKS: local=http://host.docker.internal:8099/jwks.json
+      # The e2e suite's host serves its JWKS in the clear; a real deployment's is HTTPS.
+      NOTIFY_ALLOW_INSECURE_HTTP: "true"
+      NOTIFY_PUBLIC_URL: http://localhost:8080
+      NOTIFY_UNSUBSCRIBE_KEYS: k1=env:NOTIFY_UNSUBSCRIBE_KEY_K1
+      NOTIFY_UNSUBSCRIBE_KEY_K1: local-development-unsubscribe-key-0123456789
       # Local development and e2e only; production uses mTLS on /admin.
       NOTIFY_OPERATOR_TOKENS: env:NOTIFY_OPERATOR_TOKEN
       NOTIFY_OPERATOR_TOKEN: e2e-operator
