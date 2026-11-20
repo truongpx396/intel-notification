@@ -1,0 +1,18 @@
+# The proto's lint and breaking-change gates (T045). The module is api/proto, so a file's directory
+# matches its package (notify.v1 lives in notify/v1) and the generated Go goes to api/notifyv1 by its
+# go_package. Nothing here generates code: buf.gen.yaml does, and `make proto-check` fails when the
+# committed code is not what the proto generates.
+version: v2
+modules:
+  - path: api/proto
+lint:
+  use:
+    # BASIC, not STANDARD: STANDARD wants every RPC to take its own FooRequest and return its own
+    # FooResponse and every service to end in "Service". The contract is locked (a Notify takes a
+    # Notification and returns a Receipt; the service is Notifier, so the Go client is NotifierClient),
+    # and renaming them to satisfy a style rule would be a breaking change to a wire contract.
+    - BASIC
+breaking:
+  use:
+    # FILE is the strictest: a rename or a move of a message breaks generated code in every language.
+    - FILE

@@ -1,0 +1,10 @@
+# Generates api/notifyv1 from api/proto. Plugins are the ones on PATH, so `make proto` and the CI job
+# install the versions named in the Makefile and nothing is fetched from a remote plugin registry.
+version: v2
+plugins:
+  - local: protoc-gen-go
+    out: .
+    opt: module=github.com/truongpx396/intel-notification
+  - local: protoc-gen-go-grpc
+    out: .
+    opt: module=github.com/truongpx396/intel-notification
