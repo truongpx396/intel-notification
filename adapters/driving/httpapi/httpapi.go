@@ -53,6 +53,9 @@ type Deps struct {
 	Notifier ports.Notifier
 	// Admin serves replay, erasure and tenant defaults. Required with Operator.
 	Admin ports.Admin
+	// Catalog serves PUT /admin/recipients/addresses, the REST twin of Catalog.PutAddresses. Required with
+	// Operator to serve it; nil: it is not.
+	Catalog ports.Catalog
 	// Stream serves /notifications/stream; nil: it is not served.
 	Stream   ports.StreamSubscriber
 	Identify IdentityFunc

@@ -242,6 +242,7 @@ type fixture struct {
 	inbox    *inboxFake
 	notifier *notifytest.ScriptedNotifier
 	admin    *adminFake
+	catalog  *notifytest.ScriptedCatalog
 	hook     *webhookFake
 	errs     []error
 	mu       sync.Mutex
@@ -254,7 +255,7 @@ var tokens = map[string]domain.Identity{"alice": alice, "bob": bob}
 
 func newFixture(t *testing.T, opts ...httpapi.Option) *fixture {
 	t.Helper()
-	f := &fixture{inbox: &inboxFake{}, notifier: &notifytest.ScriptedNotifier{}, admin: &adminFake{}, hook: &webhookFake{}}
+	f := &fixture{inbox: &inboxFake{}, notifier: &notifytest.ScriptedNotifier{}, admin: &adminFake{}, catalog: &notifytest.ScriptedCatalog{}, hook: &webhookFake{}}
 	f.identify = func(r *http.Request) (domain.Identity, error) {
 		id, ok := tokens[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
 		if !ok {
@@ -268,7 +269,7 @@ func newFixture(t *testing.T, opts ...httpapi.Option) *fixture {
 		f.mu.Unlock()
 	})}, opts...)
 	h, err := httpapi.New(httpapi.Deps{
-		Inbox: f.inbox, Notifier: f.notifier, Admin: f.admin, Stream: notifytest.NewStream(notifytest.NewProbe()),
+		Inbox: f.inbox, Notifier: f.notifier, Admin: f.admin, Catalog: f.catalog, Stream: notifytest.NewStream(notifytest.NewProbe()),
 		Identify: func(r *http.Request) (domain.Identity, error) { return f.identify(r) },
 		// An operator credential is its own: a recipient's token is not one.
 		Operator: func(r *http.Request) (domain.Realm, error) {
@@ -855,6 +856,7 @@ func TestOperatorRoutesAreClosedToEveryoneButAnOperator(t *testing.T) {
 		{"POST", "/admin/notifications/dead-letters/7f1c7b0e-5a53-4f5c-9d1a-2b7a6b0f2f11/replay", ""},
 		{"POST", "/admin/erasure", `{"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"u1"}}`},
 		{"PUT", "/admin/tenants/workspace/w1/preferences", `[]`},
+		{"PUT", "/admin/recipients/addresses", `{"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"u1"},"channel":"email","addresses":[]}`},
 	}
 	for _, rt := range routes {
 		for _, token := range []string{"", "alice", "operator"} { // "alice" is a recipient's token
@@ -865,7 +867,7 @@ func TestOperatorRoutesAreClosedToEveryoneButAnOperator(t *testing.T) {
 				if rec.Code != http.StatusUnauthorized || rec.Body.Len() != 0 {
 					t.Errorf("status %d body %q, want 401 and empty", rec.Code, rec.Body.String())
 				}
-				if len(f.notifier.Broadcasted())+len(f.admin.Calls()) != 0 {
+				if len(f.notifier.Broadcasted())+len(f.admin.Calls())+len(f.catalog.Calls()) != 0 {
 					t.Error("something was called without an operator credential")
 				}
 			})
@@ -1268,5 +1270,80 @@ func TestTheOperatorsRealmTravelsWithTheCallToTheNotifier(t *testing.T) {
 	}
 	if !ok || seen != realm {
 		t.Fatalf("the notifier's context carried realm %q (set=%v), want the operator's, %q", seen, ok, realm)
+	}
+}
+
+// D31, NR-028, NR-009. The REST twin of Catalog.PutAddresses, for operators and the e2e suite: the recipient
+// is the body's (it is the operator's data), and the realm is the credential's.
+func TestAnOperatorReplacesARecipientsAddressesInTheirRealm(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	rec := f.do("PUT", "/admin/recipients/addresses", "operator-secret", `{
+		"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"u1"},"channel":"email",
+		"addresses":[{"value":"a@x.test","locale":"fr","timezone":"Europe/Paris"},{"value":"b@x.test"}]
+	}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	calls := f.catalog.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("%d catalog calls, want 1", len(calls))
+	}
+	want := domain.Identity{Realm: realm, Tenant: domain.Tenant{Kind: "workspace", ID: "w1"}, Recipient: domain.Recipient{Kind: "user", ID: "u1"}}
+	if calls[0].ID != want || calls[0].Ch != "email" || len(calls[0].Addrs) != 2 || calls[0].Addrs[0].Locale != "fr" || calls[0].Addrs[0].Timezone != "Europe/Paris" {
+		t.Fatalf("catalog was given %+v, want the recipient as sent, in the operator's realm %q", calls[0], realm)
+	}
+	var got struct {
+		Addresses []struct{ Value, Locale, Timezone string } `json:"addresses"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil || len(got.Addresses) != 2 || got.Addresses[0].Value != "a@x.test" || got.Addresses[0].Locale != "fr" {
+		t.Fatalf("body = %s, %v, want the stored set", rec.Body, err)
+	}
+}
+
+func TestAnAddressBodyThatNamesARealmIsRefusedAndNothingIsStored(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	rec := f.do("PUT", "/admin/recipients/addresses", "operator-secret", `{
+		"realm":"another","tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"u1"},"channel":"email","addresses":[{"value":"a@x.test"}]
+	}`)
+	if rec.Code != http.StatusBadRequest || len(f.catalog.Calls()) != 0 {
+		t.Fatalf("status %d after %d calls, want 400 and none: the realm is the operator's, never the body's (NR-009)", rec.Code, len(f.catalog.Calls()))
+	}
+}
+
+func TestAnAddressSetTheEngineRefusesIs422WithItsReason(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct {
+		err  error
+		want string
+	}{
+		"a channel nobody registered":  {&domain.ValidationError{Problems: []domain.Problem{{Field: "Channel", Message: `channel "fax" is not registered`, Err: domain.ErrUnknownChannel}}}, "fax"},
+		"an address the engine cannot": {&domain.ValidationError{Problems: []domain.Problem{{Field: "Addresses[0].Timezone", Message: "is not an IANA time zone"}}}, "Timezone"},
+		"an identity with no tenant":   {domain.ErrEmptyIdentity, "empty component"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newFixture(t)
+			f.catalog.OnPutAddresses = func(context.Context, domain.Identity, domain.ChannelKind, []domain.Address) ([]domain.Address, error) {
+				return nil, c.err
+			}
+			rec := f.do("PUT", "/admin/recipients/addresses", "operator-secret", `{"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"u1"},"channel":"email","addresses":[{"value":"a"}]}`)
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), c.want) {
+				t.Fatalf("status %d %s, want 422 saying %q", rec.Code, rec.Body, c.want)
+			}
+		})
+	}
+}
+
+func TestAnAddressFaultIsReportedAndShownAsOne(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	f.catalog.OnPutAddresses = func(context.Context, domain.Identity, domain.ChannelKind, []domain.Address) ([]domain.Address, error) {
+		return nil, errors.New(`ERROR: relation "recipient_addresses" does not exist`)
+	}
+	rec := f.do("PUT", "/admin/recipients/addresses", "operator-secret", `{"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"u1"},"channel":"email","addresses":[]}`)
+	if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "relation") || len(f.reported()) != 1 {
+		t.Fatalf("status %d %s with %d reports, want a 500 that says nothing of the fault, and the fault reported", rec.Code, rec.Body, len(f.reported()))
 	}
 }
