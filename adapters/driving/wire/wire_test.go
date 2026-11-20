@@ -104,10 +104,21 @@ func TestDataSurvivesAsTheSameJSONDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NotificationToProto: %v", err)
 	}
-	got, _ := json.Marshal(wire.NotificationFromProto(p).Data)
-	want, _ := json.Marshal(n.Data)
-	if string(got) != string(want) {
-		t.Fatalf("data after the round trip\n got %s\nwant %s", got, want)
+	// Compared as documents: a JSON object has no key order, and a struct's fields marshal in
+	// declaration order while a map's marshal sorted.
+	decode := func(v any) any {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc any
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc
+	}
+	if got, want := decode(wire.NotificationFromProto(p).Data), decode(n.Data); !reflect.DeepEqual(got, want) {
+		t.Fatalf("data after the round trip\n got %v\nwant %v", got, want)
 	}
 }
 
@@ -197,6 +208,19 @@ func TestABroadcastCrossesTheWireWithEitherSource(t *testing.T) {
 	}
 }
 
+// The wire's source is one of two, so a request naming both cannot be said. The client refuses it as
+// the library does, and does not quietly send one: that would accept a request the library rejects.
+func TestABroadcastNamingBothSourcesIsRefusedNotNarrowed(t *testing.T) {
+	t.Parallel()
+	b := domain.BroadcastRequest{Tenant: domain.Tenant{Kind: "workspace", ID: "w1"}, Topic: "t", IdemKey: "k",
+		Audience: "all", Recipients: []domain.Recipient{{Kind: "user", ID: "u1"}}}
+	p, err := wire.BroadcastToProto(b)
+	var ve *domain.ValidationError
+	if !errors.As(err, &ve) {
+		t.Fatalf("BroadcastToProto = %v, %v, want a *domain.ValidationError", p, err)
+	}
+}
+
 func TestCancelStatusAndTheirRequestCrossTheWire(t *testing.T) {
 	t.Parallel()
 	ref := domain.CancelRequest{Tenant: domain.Tenant{Kind: "workspace", ID: "w1"}, Recipient: domain.Recipient{Kind: "user", ID: "u1"}, IdemKey: "k1"}
@@ -228,13 +252,15 @@ func TestAnErrorCrossesTheWireAsItsCodeAndReason(t *testing.T) {
 		code   codes.Code
 		reason string
 		is     error // what the client's error must match
+		// validation is whether the library returns this as a *domain.ValidationError, so the client must.
+		validation bool
 	}{
-		{"no idempotency key", fmt.Errorf("notify: %w", domain.ErrMissingIdem), codes.InvalidArgument, "MISSING_IDEM_KEY", domain.ErrMissingIdem},
-		{"an empty identity", fmt.Errorf("notify: %w", domain.ErrEmptyIdentity), codes.InvalidArgument, "EMPTY_IDENTITY", domain.ErrEmptyIdentity},
-		{"an unregistered topic", fmt.Errorf("broadcast: %w: %q", domain.ErrUnknownTopic, "x"), codes.InvalidArgument, "UNKNOWN_TOPIC", domain.ErrUnknownTopic},
-		{"too many recipients", fmt.Errorf("broadcast: %w", domain.ErrTooManyRecipients), codes.InvalidArgument, "TOO_MANY_RECIPIENTS", domain.ErrTooManyRecipients},
-		{"no audience resolver", fmt.Errorf("broadcast: %w", domain.ErrAudienceUnsupported), codes.FailedPrecondition, "AUDIENCE_UNSUPPORTED", domain.ErrAudienceUnsupported},
-		{"a request that breaks a rule with no sentinel", fmt.Errorf("notify: %w", invalid), codes.InvalidArgument, "INVALID_REQUEST", nil},
+		{"no idempotency key", fmt.Errorf("notify: %w", domain.ErrMissingIdem), codes.InvalidArgument, "MISSING_IDEM_KEY", domain.ErrMissingIdem, true},
+		{"an empty identity", fmt.Errorf("notify: %w", domain.ErrEmptyIdentity), codes.InvalidArgument, "EMPTY_IDENTITY", domain.ErrEmptyIdentity, true},
+		{"an unregistered topic", fmt.Errorf("broadcast: %w: %q", domain.ErrUnknownTopic, "x"), codes.InvalidArgument, "UNKNOWN_TOPIC", domain.ErrUnknownTopic, true},
+		{"too many recipients", fmt.Errorf("broadcast: %w", domain.ErrTooManyRecipients), codes.InvalidArgument, "TOO_MANY_RECIPIENTS", domain.ErrTooManyRecipients, true},
+		{"no audience resolver", fmt.Errorf("broadcast: %w", domain.ErrAudienceUnsupported), codes.FailedPrecondition, "AUDIENCE_UNSUPPORTED", domain.ErrAudienceUnsupported, false},
+		{"a request that breaks a rule with no sentinel", fmt.Errorf("notify: %w", invalid), codes.InvalidArgument, "INVALID_REQUEST", nil, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -259,8 +285,8 @@ func TestAnErrorCrossesTheWireAsItsCodeAndReason(t *testing.T) {
 				t.Errorf("FromStatus(%v) does not match %v", got, tc.is)
 			}
 			var ve *domain.ValidationError
-			if !errors.As(got, &ve) {
-				t.Errorf("FromStatus(%v) is not a *domain.ValidationError, which is what the library returns for a request that breaks a rule", got)
+			if errors.As(got, &ve) != tc.validation {
+				t.Errorf("FromStatus(%v) is a *domain.ValidationError = %v, want %v: the library's error is one exactly when the request broke a rule", got, !tc.validation, tc.validation)
 			}
 			if !strings.Contains(got.Error(), strings.TrimPrefix(tc.err.Error(), "notify: ")) {
 				t.Errorf("the client's error %q lost the server's message %q", got, tc.err)
@@ -295,7 +321,11 @@ func TestAContextEndingCrossesTheWireAsItself(t *testing.T) {
 	for _, tc := range []struct {
 		err  error
 		code codes.Code
-	}{{context.Canceled, codes.Canceled}, {fmt.Errorf("notify: %w", context.DeadlineExceeded), codes.DeadlineExceeded}} {
+		is   error // the context's own error: a wrapper made on the far side is not a value that can cross
+	}{
+		{context.Canceled, codes.Canceled, context.Canceled},
+		{fmt.Errorf("notify: %w", context.DeadlineExceeded), codes.DeadlineExceeded, context.DeadlineExceeded},
+	} {
 		var reported error
 		st, _ := status.FromError(wire.ToStatus(tc.err, func(err error) { reported = err }))
 		if st.Code() != tc.code {
@@ -304,8 +334,8 @@ func TestAContextEndingCrossesTheWireAsItself(t *testing.T) {
 		if reported != nil {
 			t.Errorf("%v was reported as a fault: a caller who gave up is not one", tc.err)
 		}
-		if got := wire.FromStatus(wire.ToStatus(tc.err, nil)); !errors.Is(got, tc.err) {
-			t.Errorf("FromStatus gave %v, which is not %v", got, tc.err)
+		if got := wire.FromStatus(wire.ToStatus(tc.err, nil)); !errors.Is(got, tc.is) {
+			t.Errorf("FromStatus gave %v, which is not %v", got, tc.is)
 		}
 	}
 }
