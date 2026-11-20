@@ -438,3 +438,32 @@ func TestRunReloadsOnEveryTickAndReportsAFailure(t *testing.T) {
 		t.Fatal("Run did not return when its context ended")
 	}
 }
+
+// A constructor that refuses a wiring mistake by panicking (email.New does) is a provider that cannot be
+// built, and not a service that is down.
+func TestAFactoryThatPanicsMakesItsProviderUnavailableAndNothingElse(t *testing.T) {
+	t.Parallel()
+	store := &fakeStore{rows: []domain.ChannelProvider{
+		row("alpha", domain.Tenant{}, "email", "panics", 0, ""),
+		row("alpha", domain.Tenant{}, "email", "fine", 1, ""),
+	}}
+	mgr := providers.NewManager(store, fakeSecrets{}, map[string]providers.Factory{
+		"panics": func(providers.Spec) (ports.Channel, error) { panic("email: New needs a Mailer") },
+		"fine": func(s providers.Spec) (ports.Channel, error) {
+			return notifytest.NewScripted(s.Channel, emailCaps), nil
+		},
+	})
+	if err := mgr.Reload(t.Context()); err != nil {
+		t.Fatalf("Reload = %v, want nil: a panicking constructor is one provider's problem", err)
+	}
+	statuses := map[string]providers.Status{}
+	for _, s := range mgr.Report() {
+		statuses[s.Provider] = s
+	}
+	if s := statuses["panics"]; s.Available || !strings.Contains(s.Reason, "Mailer") {
+		t.Fatalf("report of the panicking provider = %+v, want it unavailable with what it said", s)
+	}
+	if s := statuses["fine"]; !s.Available {
+		t.Fatalf("report of the other provider = %+v, want it available", s)
+	}
+}
