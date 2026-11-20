@@ -217,3 +217,12 @@ func connTo(t *testing.T, n *notifytest.ScriptedNotifier) grpc.ClientConnInterfa
 	t.Helper()
 	return notifytest.NewBufconn(t, grpcserver.New(n).Register)
 }
+
+func TestNotifyBatchOverTheLimitIsRefusedWithoutACall(t *testing.T) {
+	t.Parallel()
+	conn := &countingConn{}
+	_, err := grpcclient.New(conn).NotifyBatch(t.Context(), make([]domain.Notification, grpcclient.MaxBatch+1))
+	if !errors.Is(err, grpcclient.ErrBatchTooLarge) || conn.calls.Load() != 0 {
+		t.Fatalf("NotifyBatch(501) = %v after %d calls, want ErrBatchTooLarge and no call", err, conn.calls.Load())
+	}
+}
