@@ -38,6 +38,9 @@ type Config struct {
 	DirectoryTLS      bool
 	GRPCTLS           TLSFiles
 	NATSURL           string
+	// NATSReplicas is the replication of the ingest stream. JetStream with a replicated stream (R3) is what
+	// makes an acknowledged publish survive a node (bus-subjects.md); one replica is for development.
+	NATSReplicas int
 
 	// Role is which loops this process runs: "all", "api" (the surfaces only) or "worker" (the dispatcher
 	// and the jobs only). Any number of each is safe: claims are leased and fenced.
@@ -151,6 +154,11 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	c.RecipientAud = str("NOTIFY_RECIPIENT_AUDIENCE", "")
 	c.ProducerAud = str("NOTIFY_PRODUCER_AUDIENCE", "")
 	c.NATSURL = str("NOTIFY_INGEST_NATS_URL", "")
+	c.NATSReplicas = 1
+	num("NOTIFY_INGEST_REPLICAS", &c.NATSReplicas)
+	if c.NATSReplicas < 1 || c.NATSReplicas > 5 {
+		bad("NOTIFY_INGEST_REPLICAS", "%d is not between 1 and 5", c.NATSReplicas)
+	}
 	c.GRPCTLS = TLSFiles{Cert: str("NOTIFY_GRPC_TLS_CERT", ""), Key: str("NOTIFY_GRPC_TLS_KEY", ""), ClientCA: str("NOTIFY_GRPC_TLS_CLIENT_CA", "")}
 	if (c.GRPCTLS.Cert == "") != (c.GRPCTLS.Key == "") {
 		bad("NOTIFY_GRPC_TLS_CERT", "the certificate and the key are set together or not at all")

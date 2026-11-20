@@ -22,6 +22,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	natscontainer "github.com/testcontainers/testcontainers-go/modules/nats"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -104,11 +107,24 @@ const emailKey = "re_live_the-providers-api-key"
 
 // startService starts a service for one test. withEmail seeds the provider row that makes the email channel
 // exist; without it the service has the in-app channel alone.
-func startService(t *testing.T, withEmail bool) *world { return startServiceOf(t, withEmail, false) }
+func startService(t *testing.T, withEmail bool) *world {
+	return startServiceWith(t, serviceOpts{email: withEmail})
+}
 
-// startServiceOf is startService, optionally serving a second realm, "other", with a producer bound to it.
 func startServiceOf(t *testing.T, withEmail, secondRealm bool) *world {
+	return startServiceWith(t, serviceOpts{email: withEmail, secondRealm: secondRealm})
+}
+
+// serviceOpts says what a test's service is started with: the email provider's row, a second realm "other"
+// with a producer bound to it, and a JetStream to ingest from.
+type serviceOpts struct {
+	email, secondRealm bool
+	natsURL            string
+}
+
+func startServiceWith(t *testing.T, o serviceOpts) *world {
 	t.Helper()
+	withEmail, secondRealm := o.email, o.secondRealm
 	w := &world{t: t, db: pgtest.New(t), mail: newMailbox(t), signer: notifytest.NewTokenSigner("host-key-1")}
 	dir := t.TempDir()
 	write := func(name, content string) string {
@@ -150,6 +166,7 @@ VALUES ('local', 'email', 'resend', 0, $1::jsonb, $2)`,
 			"NOTIFY_UNSUBSCRIBE_KEYS":    "k1=" + write("unsub-key", strings.Repeat("u", 40)),
 			"NOTIFY_OPERATOR_TOKENS":     operatorTokens,
 			"NOTIFY_POLL_INTERVAL":       "50ms",
+			"NOTIFY_INGEST_NATS_URL":     o.natsURL,
 		}[k]
 	})
 	if err != nil {
@@ -516,5 +533,61 @@ func TestTwoRealmsInOneProcessNeverMeet(t *testing.T) {
 	_ = w.db.Admin.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE realm = 'other'`).Scan(&left)
 	if left != 0 {
 		t.Fatalf("%d notifications left in realm other after its own operator erased the recipient", left)
+	}
+}
+
+// T052, D23. A producer that publishes instead of calling: a message on the realm's subject becomes a
+// notification in that realm, acknowledged after the commit, with the service as the only thing between the
+// bus and the database.
+func TestTheServiceIngestsFromJetStreamInTheRealmOfTheSubject(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	defer cancel()
+	ctr, err := natscontainer.Run(ctx, "nats:2.11-alpine")
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(context.Background()) })
+	url, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := startServiceWith(t, serviceOpts{natsURL: url})
+	if _, err := w.catalog.UpsertTopic(ctx, "invoice_overdue", domain.TopicDef{DefaultChannels: []domain.ChannelKind{"in_app"}, DefaultPriority: domain.PriorityInfo}); err != nil {
+		t.Fatal(err)
+	}
+
+	nc, err := nats.Connect(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nc.Close)
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := "notify.ingest.local." + domain.TenantToken(wsTenant)
+	publish := func(body string) {
+		t.Helper()
+		if _, err := js.Publish(ctx, subject, []byte(body)); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+	// The body names another realm, which is not read; and the same key twice, which is one notification.
+	good := `{"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"ada"},"topic":"invoice_overdue","idem_key":"invoice:42:overdue","title":"Overdue","realm":"other"}`
+	publish(good)
+	publish(good)
+	publish(`{"tenant":{"kind":"workspace","id":"w1"},"recipient":{"kind":"user","id":"ada"},"topic":"invoice_overdue"}`) // no idem_key: poison
+
+	err = eventually(30*time.Second, func() error {
+		var notified, parked int
+		_ = w.db.Admin.QueryRow(ctx, `SELECT count(*) FROM notifications WHERE realm = 'local'`).Scan(&notified)
+		_ = w.db.Admin.QueryRow(ctx, `SELECT count(*) FROM dead_letters WHERE source = 'bus' AND realm = 'local'`).Scan(&parked)
+		if notified != 1 || parked != 1 {
+			return fmt.Errorf("%d notifications and %d parked, want 1 and 1", notified, parked)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

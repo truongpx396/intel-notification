@@ -60,6 +60,10 @@ type fakeMsg struct {
 	delivered uint64
 	seq       uint64
 	ackErr    error
+	// ackFailures is how many acknowledgements are lost before one gets through: a process that dies, or a
+	// network that drops, between the commit and the ack.
+	ackFailures int
+	settled     string // "ack" or "term" once the bus has been told the message is done
 }
 
 func (m *fakeMsg) Subject() string { return m.subject }
@@ -69,15 +73,26 @@ func (m *fakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
 }
 func (m *fakeMsg) Headers() nats.Header { return nil }
 func (m *fakeMsg) Reply() string        { return "" }
-func (m *fakeMsg) Ack() error           { m.log.add("ack"); return m.ackErr }
+func (m *fakeMsg) Ack() error           { return m.doubleAck() }
 func (m *fakeMsg) DoubleAck(context.Context) error {
+	return m.doubleAck()
+}
+
+func (m *fakeMsg) doubleAck() error {
 	m.log.add("ack")
+	if m.ackFailures > 0 {
+		m.ackFailures--
+		return errors.New("the acknowledgement was lost")
+	}
+	if m.ackErr == nil {
+		m.settled = "ack"
+	}
 	return m.ackErr
 }
 func (m *fakeMsg) Nak() error                       { m.log.add("nak"); return nil }
 func (m *fakeMsg) NakWithDelay(time.Duration) error { m.log.add("nak"); return nil }
 func (m *fakeMsg) InProgress() error                { return nil }
-func (m *fakeMsg) Term() error                      { m.log.add("term"); return nil }
+func (m *fakeMsg) Term() error                      { m.log.add("term"); m.settled = "term"; return nil }
 func (m *fakeMsg) TermWithReason(string) error      { m.log.add("term"); return nil }
 
 type fakeSink struct {
