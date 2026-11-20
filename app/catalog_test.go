@@ -233,7 +233,7 @@ func TestCatalogPutAddressesKeysThemByTheChannelsNormalization(t *testing.T) {
 	t.Parallel()
 	fx := newCatalogFx(t)
 	got, err := fx.cat.PutAddresses(t.Context(), catID, "email", []domain.Address{
-		{Value: "Ada@EXAMPLE.test", Locale: "en"}, {Value: "ada@example.TEST"}, {Value: "ada@work.test"},
+		{Value: "Ada@EXAMPLE.test", Locale: "en"}, {Value: "Ada@example.TEST"}, {Value: "ada@work.test"},
 	})
 	if err != nil {
 		t.Fatal(err)
