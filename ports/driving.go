@@ -75,6 +75,36 @@ type Admin interface {
 	SetTenantPreference(ctx context.Context, realm domain.Realm, p domain.TenantPreference) error
 }
 
+// Catalog is the management surface of service mode (D31): what a producer in any language does through
+// the Catalog service instead of compiling it into the process. Topics, templates and addresses are
+// data a producer registers, so a service started from this repository needs no host code (NR-017,
+// NR-019, NR-028, NS-011).
+//
+// The realm is an argument and never part of what is registered. A transport derives it from the
+// authenticated producer principal (D31, NR-009), so a producer cannot write into another product's key
+// space. An address set carries its realm in the identity it is for, for the same reason.
+type Catalog interface {
+	// UpsertTopic registers topic in realm with its defaults, replacing any earlier registration whole. A
+	// channel it names that is not registered is domain.ErrUnknownChannel, and a registration that does
+	// not validate is a *domain.ValidationError; nothing is stored in either case.
+	UpsertTopic(ctx context.Context, realm domain.Realm, topic domain.Topic, def domain.TopicDef) error
+
+	// PutTemplate stores t as a new, inactive version and returns it with its number. A template that
+	// reaches outside the restricted function map wraps domain.ErrInvalidTemplate, and a channel that is
+	// not registered is domain.ErrUnknownChannel; nothing is stored in either case (D55).
+	PutTemplate(ctx context.Context, realm domain.Realm, t domain.Template) (domain.Template, error)
+
+	// ActivateTemplate makes one stored version the one that renders and returns it. A version nobody
+	// stored is domain.ErrUnknownTemplate.
+	ActivateTemplate(ctx context.Context, realm domain.Realm, v domain.TemplateVersion) (domain.Template, error)
+
+	// PutAddresses replaces id's addresses on ch with addrs and returns what was stored: two spellings
+	// of one address are one, and the first is kept. A channel that is not registered is
+	// domain.ErrUnknownChannel, and a set the engine cannot use is a *domain.ValidationError; nothing is
+	// stored in either case (NR-028).
+	PutAddresses(ctx context.Context, id domain.Identity, ch domain.ChannelKind, addrs []domain.Address) ([]domain.Address, error)
+}
+
 // Webhook is one provider's callback endpoint, served at /webhooks/{channel}/{provider}: a bounce, a
 // complaint or a delivery status the provider reports about a message the engine sent (NR-032, D14). It
 // is a driving port implemented beside the provider's channel, so the HTTP surface depends on no provider.

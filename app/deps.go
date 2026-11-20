@@ -18,18 +18,23 @@ import (
 // only the fields it uses, so a host that has built the notifier alone can say so
 // and leave the dispatcher's ports empty.
 type Deps struct {
-	Channels     ports.ChannelRegistry
-	Topics       ports.TopicRegistry
-	Renderer     ports.TemplateRenderer
-	Addresses    ports.AddressBook
-	Audience     ports.AudienceResolver // nil: Broadcast accepts inline recipients only
-	Store        ports.Store
-	Inbox        ports.InboxStore
-	Queue        ports.Queue
-	Digests      ports.Digests
-	Maintenance  ports.Maintenance
-	Prefs        ports.PreferenceStore
-	Suppressions ports.SuppressionStore
+	Channels  ports.ChannelRegistry
+	Topics    ports.TopicRegistry
+	Renderer  ports.TemplateRenderer
+	Addresses ports.AddressBook
+	// TopicWriter, TemplateWriter and AddressWriter are what the Catalog writes: the data-backed side of
+	// Topics, Renderer and Addresses. A library host that implements those in code has no use for them.
+	TopicWriter    ports.TopicWriter
+	TemplateWriter ports.TemplateWriter
+	AddressWriter  ports.AddressWriter
+	Audience       ports.AudienceResolver // nil: Broadcast accepts inline recipients only
+	Store          ports.Store
+	Inbox          ports.InboxStore
+	Queue          ports.Queue
+	Digests        ports.Digests
+	Maintenance    ports.Maintenance
+	Prefs          ports.PreferenceStore
+	Suppressions   ports.SuppressionStore
 	// UnsubscribeSigner verifies the one-click unsubscribe tokens the email channel signed (D34). Nil:
 	// the engine issued none, so Inbox.Unsubscribe refuses every token it is shown.
 	UnsubscribeSigner *domain.UnsubscribeSigner
