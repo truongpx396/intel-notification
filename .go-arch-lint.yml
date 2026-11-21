@@ -37,7 +37,7 @@ components:
 deps:
   config:     { mayDependOn: [ domain ] }                          # Config.Realm is a domain.Realm
   ports:      { mayDependOn: [ domain ] }
-  driven:     { mayDependOn: [ domain, ports, migrations ] }       # implements ports; NOT app
+  driven:     { mayDependOn: [ domain, ports, migrations, driven ] }   # implements ports; NOT app. Itself: the provider manager builds on the failover channel
   testing:    { mayDependOn: [ migrations ] }
   notifytest: { mayDependOn: [ config, domain, ports, migrations, driven, testing, app ] }   # Env wires the PostgreSQL adapter over pgtest and the use-cases over both
   app:        { mayDependOn: [ config, domain, ports ] }       # app.NewNotifier takes a Config
