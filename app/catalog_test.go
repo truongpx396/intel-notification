@@ -33,36 +33,36 @@ type writes struct {
 	lastID    domain.Identity
 }
 
-type countingTopics struct {
+type recordingTopics struct {
 	*notifytest.Topics
 	w *writes
 }
 
-func (c countingTopics) UpsertTopic(ctx context.Context, r domain.Realm, t domain.Topic, d domain.TopicDef) error {
+func (c recordingTopics) UpsertTopic(ctx context.Context, r domain.Realm, t domain.Topic, d domain.TopicDef) error {
 	c.w.mu.Lock()
 	c.w.topics++
 	c.w.mu.Unlock()
 	return c.Topics.UpsertTopic(ctx, r, t, d)
 }
 
-type countingTemplates struct {
+type recordingTemplates struct {
 	*notifytest.Templates
 	w *writes
 }
 
-func (c countingTemplates) PutTemplate(ctx context.Context, r domain.Realm, t domain.Template) (domain.Template, error) {
+func (c recordingTemplates) PutTemplate(ctx context.Context, r domain.Realm, t domain.Template) (domain.Template, error) {
 	c.w.mu.Lock()
 	c.w.templates++
 	c.w.mu.Unlock()
 	return c.Templates.PutTemplate(ctx, r, t)
 }
 
-type countingAddresses struct {
+type recordingAddresses struct {
 	*notifytest.AddressBook
 	w *writes
 }
 
-func (c countingAddresses) PutAddresses(ctx context.Context, id domain.Identity, ch domain.ChannelKind, a []domain.Address, keys []string) error {
+func (c recordingAddresses) PutAddresses(ctx context.Context, id domain.Identity, ch domain.ChannelKind, a []domain.Address, keys []string) error {
 	c.w.mu.Lock()
 	c.w.addresses++
 	c.w.lastKeys = slices.Clone(keys)
@@ -98,9 +98,9 @@ func newCatalogFx(t *testing.T) *catalogFx {
 	fx := &catalogFx{topics: notifytest.NewTopics(), templates: notifytest.NewTemplates("en"), book: notifytest.NewAddressBook(), w: &writes{}}
 	cat, err := app.NewCatalog(app.Deps{
 		Channels:       channels,
-		TopicWriter:    countingTopics{fx.topics, fx.w},
-		TemplateWriter: countingTemplates{fx.templates, fx.w},
-		AddressWriter:  countingAddresses{fx.book, fx.w},
+		TopicWriter:    recordingTopics{fx.topics, fx.w},
+		TemplateWriter: recordingTemplates{fx.templates, fx.w},
+		AddressWriter:  recordingAddresses{fx.book, fx.w},
 	})
 	if err != nil {
 		t.Fatalf("NewCatalog: %v", err)
