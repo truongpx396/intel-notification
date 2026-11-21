@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -65,8 +66,8 @@ func TestLoadConfigNamesEveryProblemAtOnce(t *testing.T) {
 		"NOTIFY_REALM_BINDINGS": "p=Not_A_Realm", "NOTIFY_OPERATOR_TOKENS": "re_live_pasted_key",
 		"NOTIFY_UNSUBSCRIBE_KEYS": "nonsense", "NOTIFY_GRPC_TLS_CERT": "/c.pem",
 	}))
-	ce, ok := err.(*ConfigError)
-	if !ok {
+	var ce *ConfigError
+	if !errors.As(err, &ce) {
 		t.Fatalf("err = %v, want a *ConfigError", err)
 	}
 	all := strings.Join(ce.Problems, "\n")

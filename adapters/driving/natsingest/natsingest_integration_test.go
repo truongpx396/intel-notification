@@ -78,6 +78,7 @@ func (w *ingestWorld) message(key string) *fakeMsg {
 // notification. The commit fails here, as a process dying inside the transaction leaves it: nothing was
 // written, and the message is redelivered.
 func TestAKillBeforeTheCommitIsARedeliveryAndNotifiesOnce(t *testing.T) {
+	t.Parallel()
 	w := newIngestWorld(t)
 	w.e.Store.FailNextCommit()
 	m := w.message("invoice:42:overdue")
@@ -95,6 +96,7 @@ func TestAKillBeforeTheCommitIsARedeliveryAndNotifiesOnce(t *testing.T) {
 // NR-035: a kill after the commit and before the acknowledgement is a redelivery that Notify replays: the
 // message is acknowledged on the next delivery, and there is still one notification.
 func TestALostAcknowledgementIsAReplayAndNotifiesOnce(t *testing.T) {
+	t.Parallel()
 	w := newIngestWorld(t)
 	m := w.message("invoice:42:overdue")
 	m.ackFailures = 2 // the acknowledgement is lost twice
@@ -111,6 +113,7 @@ func TestALostAcknowledgementIsAReplayAndNotifiesOnce(t *testing.T) {
 
 // bus-subjects.md: a message without idem_key reaches dead_letters as poison, and the stream goes on.
 func TestAMessageWithoutAnIdemKeyReachesDeadLettersAsPoisonAndTheStreamGoesOn(t *testing.T) {
+	t.Parallel()
 	w := newIngestWorld(t)
 	bad := &fakeMsg{log: w.log, subject: subjectFor(ingestRealm, tenant), seq: 1, data: body(func(p map[string]any) { delete(p, "idem_key") })}
 	if w.redeliver(t, bad); bad.settled != "term" {
@@ -134,6 +137,7 @@ func TestAMessageWithoutAnIdemKeyReachesDeadLettersAsPoisonAndTheStreamGoesOn(t 
 // poison one told on the DLQ subject, and a notification whose acknowledgement was lost redelivered by the
 // server, and notified once.
 func TestOverARealJetStreamAMessageDeliveredTwiceNotifiesOnceAndPoisonDoesNotBlock(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
 	ctr, err := natscontainer.Run(ctx, "nats:2.11-alpine")

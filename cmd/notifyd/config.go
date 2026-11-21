@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -242,13 +243,7 @@ var engineEnv = map[string]string{
 	"MaxInlineRecipients": "NOTIFY_MAX_INLINE_RECIPIENTS",
 }
 
-func asConfigError(err error, target **notify.ConfigError) bool {
-	ce, ok := err.(*notify.ConfigError)
-	if ok {
-		*target = ce
-	}
-	return ok
-}
+func asConfigError(err error, target **notify.ConfigError) bool { return errors.As(err, target) }
 
 func splitList(s string) []string {
 	var out []string

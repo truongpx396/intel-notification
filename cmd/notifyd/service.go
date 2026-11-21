@@ -102,7 +102,7 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*Service, error) 
 	s.pool = pool
 	s.closers = append(s.closers, pool.Close)
 	if err := pool.Ping(ctx); err != nil {
-		return nil, fmt.Errorf("PostgreSQL does not answer: %w", err)
+		return nil, fmt.Errorf("no answer from PostgreSQL: %w", err)
 	}
 	if err := s.checkRole(ctx); err != nil {
 		return nil, err
@@ -114,7 +114,7 @@ func Build(ctx context.Context, cfg Config, log *slog.Logger) (*Service, error) 
 	s.rdb = goredis.NewClient(redisOpt)
 	s.closers = append(s.closers, func() { _ = s.rdb.Close() })
 	if err := s.rdb.Ping(ctx).Err(); err != nil {
-		return nil, fmt.Errorf("Redis does not answer: %w", err)
+		return nil, fmt.Errorf("no answer from Redis: %w", err)
 	}
 
 	engine := cfg.Engine.WithDefaults()
@@ -541,7 +541,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	<-ctx.Done()
-	stopCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
+	stopCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 	defer stop()
 	if s.httpSrv != nil {
 		_ = s.httpSrv.Shutdown(stopCtx)
