@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D55. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D57. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -1585,6 +1585,48 @@ Held by `TestCheckTemplateRefusesAFunctionOutsideTheMap`, `TestCheckTemplateRefu
 `TestExecuteTemplateRefusesAMissingKey`, `TestExecuteTemplateBoundsItsOutput`, and, against the fake and the
 PostgreSQL adapter alike, `TemplateRendererContract` (the version, tenant and locale cases) and
 `TestActivationNeverLeavesAWindowWithNoActiveVersion`, `TestConcurrentActivationsAreTakenInTurn`.
+
+## D56 — Who is calling, and which realm they act in, is derived and bound, and never read from the request · *built*
+
+**Decision.** In service mode the realm of a call is not in any message, header or query. A producer
+authenticates with the SAN of a client certificate the TLS layer verified, or a bearer token whose **subject** is
+its principal, and a binding (`domain.RealmBindings`, which `NOTIFY_REALM_BINDINGS` sets) maps each principal to
+exactly one realm. The realm a call acts in is the binding's; one engine is built per bound realm and a call is
+routed to the engine of its realm; a principal with no binding is refused before any handler runs, and a realm
+with no engine is a fault and never another realm's engine.
+
+**Alternative.** A realm in the request, or a service per realm.
+
+**What goes wrong without it.** A producer that names its realm can write into another product's key space and
+read its status, and a shared idempotency key space swallows another product's notifications (D1).
+
+Held by `TestARealmTheCallerNamesIsNeverRead`, `TestAnUnboundPrincipalIsRefusedBeforeTheHandler`,
+`TestEachCallActsInTheRealmOfItsProducer` and `TestARoutedNotifierSendsInTheRealmOfTheCaller`.
+
+## D57 — Channels are built from rows, and a credential is a reference that reaches one function · *built*
+
+**Decision.** A service has no host code, so its channels are `channel_providers` rows (D31). A manager reads them,
+resolves each `secret_ref` (`env:` and `file:` are built in), builds the provider with the factory registered under
+its name, groups the providers of a channel in a scope (a realm, or a tenant that brings its own, which replaces the
+realm's for that tenant) into a failover chain in priority order, and registers one channel per kind that routes
+each delivery by the realm and tenant it belongs to, declaring the weakest dedup of everything it may route to
+(D32). A provider whose credential cannot be resolved, whose constructor fails or panics, or that builds the wrong
+kind of channel is marked **unavailable**, with the reference it was told to use and why, and the service carries
+on; a kind with no usable provider is not registered, so a topic that names it is refused when it is registered and
+not delivered into the void. The credential reaches the factory and nothing else: no report, error, log or
+delivery result carries it, including when a provider's own constructor writes it into its error, which is
+redacted. The configuration is swapped whole on reload, and a failed read keeps the old one.
+
+**Alternative.** Channels constructed at start from environment variables.
+
+**What goes wrong without it.** A key in an error message lands in a log aggregator and a dead letter. One missing
+secret that crashes the service takes the channels that work down with it. One realm's provider key used for
+another's mail is a billing and a deliverability incident. A database that blinks emptying the registry stops a
+healthy service delivering.
+
+Held by `TestACredentialIsHandedToTheFactoryAndAppearsNowhereElse`, `TestAnUnresolvableSecretMarksTheProviderUnavailableAndTheRestCarryOn`,
+`TestARealmIsNeverServedByAnotherRealmsProvider`, `TestATenantsOwnProvidersReplaceTheRealmsForThatTenantOnly`,
+`TestReloadSwapsTheWholeConfigurationAndAFailedReadKeepsTheOld`, `TestAFactoryThatPanicsMakesItsProviderUnavailableAndNothingElse`.
 
 ## Open decisions
 

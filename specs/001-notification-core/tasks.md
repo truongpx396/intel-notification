@@ -1149,12 +1149,29 @@ rule above.
       stub in its own commit (89 failing cases). The tenant default of the task's wording is read as the tenant's own
       template, and the ladder is walked before the tenant ([D55](design-decisions.md#d55)). A version is immutable and
       activated explicitly. The write side is three new driven ports (`TopicWriter`, `TemplateWriter`, `AddressWriter`) and `postgres.NewAll`. 37 rows in the ledger for T048, three of which survived once and were closed.*
-- [ ] **T049** *red → green* `Catalog` gRPC service; realm bindings from producer principals; channels
+- [x] **T049** *red → green* `Catalog` gRPC service; realm bindings from producer principals; channels
       constructed from `channel_providers` with credentials resolved from `secret_ref`.
       **Red first:** a producer authenticated for realm A cannot register or send in realm B (NR-009); no
       call returns a credential, only the `secret_ref`; an unresolvable `secret_ref` marks the provider
       unavailable and does not crash the service.
       **Mutate:** take the realm from the request body; echo the resolved secret
+      *`app.Catalog` (the checks a registration must pass before it is written: a channel nobody registered, a template
+      outside the map, an address set the engine cannot use), as `ports.Catalog`. The `Catalog` service (`grpcserver.CatalogServer` and the Go client `grpcclient.Catalog`, over the wire mappings
+      and four new refusal reasons), `domain.RealmBindings`, realm interceptors for unary and stream calls
+      (`auth.RealmInterceptors`: no credentials is Unauthenticated, a credential that is not good is Unauthenticated
+      and repeats nothing of why, a principal with no binding is PermissionDenied, none reaching a handler), mTLS
+      principals (a verified chain only), `auth.Route` and a producer server that picks an engine per call, so one
+      process serves several realms ([D56](design-decisions.md#d56)). Channels from rows: `postgres.Providers`,
+      `secrets.Resolver` (`env:`, `file:`, others registered), and `providers.Manager`
+      ([D57](design-decisions.md#d57)). **Red, witnessed on stubs:** `realm_test.go:67: producer-a: reached=true realm="",
+      err=<nil>, want realm "alpha"`; `catalog_test.go:72: ... Unimplemented desc = method UpsertTopic not implemented`;
+      `providers_test.go:204: Reload = not implemented, want nil: a provider that cannot be built is reported, and does
+      not stop the service` (the first run of that file hung, and every send in it is now bound by a deadline). **The
+      two named mutants are killed:** the realm taken from a metadata key the caller sets dies on
+      `TestARealmTheCallerNamesIsNeverRead` (`realm="beta" ... want alpha`), and the resolved secret echoed (in the report,
+      and in a factory's own error) dies on `TestACredentialIsHandedToTheFactoryAndAppearsNowhereElse`. **A reading of the
+      task:** there is no gRPC call that returns a provider, since the contract's `Catalog` has none, so "no call returns
+      a credential" is held where a credential could escape: the manager's report, its errors and a delivery's detail. 58 ledger rows for T049, seven of which survived once (a realm hard-coded to the one value a test used, an empty file the reader reported as an error, a relative path refused for another reason, and others) and were closed.*
 - [ ] **T050** *red → green* Recipient token verification (JWKS per realm); `Directory` callback client.
       **Red first:** a table over tokens — expired, wrong audience, signed by another realm's key,
       `alg: none`, tampered, an unknown `kid` (refetched once, bounded) — and the recipient identity comes
@@ -1232,7 +1249,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031 (done), T033 (done) |
 | NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032 (done), T033 (done) |
 | NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the REST handlers (the recipient is the session, a 404 and never a 403); the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T028 (done), T044 (done), T047 (done), T047a |
-| NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case (also over gRPC: no message carries a realm); an operator body that names a realm is refused; realm bindings | T009 (done), T022a (done), T024 (done), T044 (done), T047 (done), T049 |
+| NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case (also over gRPC: no message carries a realm); an operator body that names a realm is refused; realm bindings | T009 (done), T022a (done), T024 (done), T044 (done), T047 (done), T049 (done) |
 | NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 (done) |
 | NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021 (done), T024 (done) |
 | NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021 (done), T024 (done) |
