@@ -1025,22 +1025,26 @@ rule above.
       committed code was stale) and `make proto-breaking` (against the base branch; it says so, and passes, where the
       base has no proto yet). CI has a `proto` job that installs the Makefile's pinned versions; the `api` and
       `driving` components are switched on in `.go-arch-lint.yml`.*
-- [ ] **T047a** *red* Enable the Playwright suite: remove `test.describe.fixme` from the `e2e/` specs as
+- [x] **T047a** *red* Enable the Playwright suite: remove `test.describe.fixme` from the `e2e/` specs as
       the routes they drive land, implement `/healthz` and `/readyz`, and switch on the `e2e` CI job
       ([docs/testing.md](../../docs/testing.md)). This is the standing outer loop and stays open until
       T049 lands. Take one spec at a time: remove its `fixme`, see it fail because the route or the
       service is missing, then land the route
-      *Progress, and why the box stays open. **Done:** `/healthz` and `/readyz` (T047a's first step); the service
-      exists (T049a), so the **isolation**, **preferences** and **unsubscribe** specs are enabled, and the new producer spec
-      (T051) runs, against the real compose stack: from clean volumes the `api` project is 11 passed, 2 skipped. The
-      `e2e` CI job, parked behind `if: false`, is switched on; **it has not been seen to run on GitHub's runners**, only
-      its commands locally (`up --build` from clean volumes, then `playwright test --project=api`, on Node 22 where the
-      project asks for 24). Running them showed real things: the stack as it stood ran the service as a superuser, which the
-      service now refuses (D57); the key a host rotated in place was refused (T050); and the specs assumed topics and copy
-      that no catalog had, which the compose init now seeds as a producer would through the Catalog. The unsubscribe spec
-      called the admin route with no credential, which the contract says is refused, so it now carries the operator's.
-      **Not done:** the `webhooks` spec (the Resend decoder, T044a) and the `stream` browser spec (it needs Chromium, which
-      was not installed here, so it was not run and its `fixme` stays). The box closes with those two.*
+      *Every spec is on and passes against the real compose stack, and the `e2e` job has been seen to run on GitHub's runners.
+      **Done:** `/healthz` and `/readyz`; the **isolation**, **preferences**, **unsubscribe**, **webhooks** and **producer** (T051)
+      specs in the `api` project (16 tests), and the **stream** spec in a real Chromium (2 tests), which `make e2e` installs.
+      The job passed on the Stage 11 service PR (the `api` specs then enabled) and, with the whole suite, on the follow-up that
+      enabled the last two. Running them showed real things, in order: the stack as it stood ran the service as a superuser,
+      which the service now refuses (D57); a key a host rotated in place was refused (T050), and, found by the browser spec,
+      a request that lost the race for the refetch was refused with a valid token (fixed: `TestManyRequestsAtOnce…`); the specs
+      assumed topics and copy that no catalog had, which the compose init seeds as a producer would through the Catalog; the
+      unsubscribe spec called the admin route with no credential, which the contract says is refused; the stream spec opened its
+      `EventSource` from `about:blank`, another origin, and the service does not offer CORS, so it now starts from the relay's own
+      origin; and `playwright.config.ts` ran `docker compose up --wait` as its webServer, a command that exits, which Playwright
+      reads as a server that died whenever the exit beats its next probe (it did, once, on a runner). **Limits:** the job's
+      runs on GitHub were on Node 24 as the project asks, but the local runs were on Node 22; the stream spec asserts isolation
+      that `StreamIsolationContract` already holds with rows of its own, and was not mutated through the browser (Docker failed
+      on the machine that would have run the check).*
 - [x] **T047** *red* **Contract tests** `NotifierContract` through gRPC, and `StreamIsolationContract`
       against the relay (NS-001). The gRPC run is the same suite as T024 with a different `Env`, built on
       T045's generated code; until T046 lands its `Notifier` is a stub returning
@@ -1094,7 +1098,7 @@ rule above.
       registered. **Split out, so the box can be ticked honestly:** [T044a](#t044a) and [T044b](#t044b), because their
       ports do not exist. `NotifierContract` and the relay run over a fake IdentityFunc: how a recipient token is
       verified is T050.*
-- [ ] <a id="t044a"></a>**T044a** *red → green* The Resend webhook: the `ports.Webhook` for
+- [x] <a id="t044a"></a>**T044a** *red → green* The Resend webhook: the `ports.Webhook` for
       `/webhooks/email/resend` and the policy it applies (NR-032, [D14](design-decisions.md#d14)). The route, the
       verify-before-parse order and the port exist (T044); what does not is the provider's end.
       **Red first:** a svix-style signature over the raw body (a frozen vector, a stale timestamp, a body altered by
@@ -1103,6 +1107,29 @@ rule above.
       status updates `notification_deliveries.provider_status`; a callback for a message not yet recorded is
       `ErrUnknownDelivery`. The `webhooks` spec turns on with it.
       **Mutate:** apply a bounce without verifying; suppress for the wrong realm
+      *`email.ResendWebhook` (`resendhook.go`, beside the Resend mailer). **Verify** checks Svix's signature (HMAC-SHA256 over
+      `<svix-id>.<svix-timestamp>.<raw body>`) against every configured secret and every `v1` signature the request carries, so a
+      secret is rotated by overlap, and inside five minutes either way; its frozen vector is Svix's own documentation example,
+      whose signature was recomputed with Python's `hmac`. **Handle** applies what the event says, in the realm the decoder was
+      built for and never one a body names: a `Permanent` bounce or a complaint suppresses the address (hashed in the channel's
+      own normal form) for ever; a soft or undetermined bounce, or one that says nothing, for a cooldown (an hour,
+      `WithSoftBounceCooldown`); every delivery event records its status against the delivery it names. The suppression is written
+      first, so a callback that beat its delivery's own record suppresses all the same and is answered `ErrUnknownDelivery` (a
+      404, so the provider retries) and the retry finishes it. An event nobody asked for is acknowledged and ignored; a verified
+      body that makes no sense is a `ValidationError`, which the route answers 400 and does not report as a fault.
+      **Red, witnessed on a stub that verifies nothing and applies nothing:** `resendhook_test.go:168: Verify = email: not
+      implemented, want nil: a signature computed by another tool verifies`; `:285: statuses = [], want one on email with
+      "bounced"`; `:319: Handle = <nil>, want ErrUnknownDelivery`. **The two named mutants are killed:** Verify accepting
+      everything dies on `TestAResendBounceSuppressesTheAddressOnlyWhenItIsSigned` (through the real service and PostgreSQL:
+      `unsigned: status 204, want 401`), and the wrong realm on `TestResendWebhookSuppressesInItsOwnRealm` and
+      `TestEachRealmHasItsOwnResendWebhookAndSuppressesOnlyInItsOwnRealm`.
+      **The service** (`NOTIFY_RESEND_WEBHOOK_SECRETS`, realm=ref, a reference like every credential): a callback names no realm, so
+      each realm has a route of its own, `/webhooks/email/resend-<realm>`, and a service that serves one realm also answers the
+      plain `/webhooks/email/resend`; a realm with no secret has no route. Through the real service: forged, mismatched and old
+      callbacks are each a 401 with no body and suppress nothing; a signed bounce suppresses the address and records the
+      delivery's status, a replay changes nothing, and the next notification to that address is suppressed and never mailed.
+      The `webhooks` spec runs the same end to end against the compose stack, with a producer over gRPC and Mailpit. 31 rows in the ledger
+      for T044a, one of which survived once (the secrets' rotation, which the config tests do not reach) and was closed.*
 - [ ] <a id="t044b"></a>**T044b** *red → green* The operator's reads: `GET /admin/notifications/dead-letters`
       (the list T032 left to the REST surface), `GET /admin/notifications/deliveries`, and `GET` of a tenant's
       defaults. Each needs a read port that does not exist, so each starts as a *setup* of that port and its
@@ -1131,11 +1158,16 @@ rule above.
       Before then, show it can fail: run it against a service started with one channel only and against
       one where the template registration is skipped; each must fail the scenario at the step it removes
       *`e2e/tests/producer.api.spec.ts`, a TypeScript producer over the gRPC surface, against the real compose
-      stack (`notifyd`, PostgreSQL as the application role, Redis, Mailpit). **The client is not generated:** it is
-      `e2e/support/grpc.ts`, Node's built-in HTTP/2 and a protobuf encoder small enough to read, with no dependency,
-      because a gRPC package would change `package-lock.json`, which this repository does not let a change touch by
-      hand. What it shows is that nothing Go is needed to call the service; it does not show that a protoc-generated
-      client in another language works, which a later task could add with a lockfile change made by `npm`.
+      stack (`notifyd`, PostgreSQL as the application role, Redis, Mailpit). **The client is a library's, over the contract's own proto:** `e2e/support/grpc.ts` is
+      `@grpc/grpc-js` and `@grpc/proto-loader` reading `api/proto/notify/v1/notify.proto` at run time, so it holds no copy of the
+      contract that could drift from what `buf` guards and no code generated from Go. (It began as a hand-rolled HTTP/2 and
+      protobuf encoder, because a gRPC package changes `package-lock.json`, which is regenerated with `npm` and never by hand; the
+      packages were then added with `npm`, at exact versions, and the lockfile changed by additions only.) What it shows is that
+      nothing Go is needed to call the service and that a stock gRPC library speaks the contract's proto; it does not show that
+      code generated by `protoc` for another language works, since the loader reads the proto and generates nothing. One thing
+      is written by hand: `google.rpc.Status`, which the contract's proto does not import and whose `ErrorInfo` carries the reason a
+      producer branches on. Running it showed what a hand-written encoder had hidden: the well-known `Struct`'s fields are
+      camelCase (`stringValue`) in the loader's definition, and protobufjs decodes camelCase.
       The scenario registers a topic on `in_app` and `email`, an email and an in-app template (each stored inactive
       and then activated), an address, sends one notification with `Data`, and sees it where it landed and not from
       what the service says of itself: the message at Mailpit (subject rendered from the template, the body, RFC
@@ -1146,7 +1178,7 @@ rule above.
       `see it delivered on two channels`, the email `rejected` for want of copy
       (`TestTheScenarioFailsWhenTheTemplateRegistrationIsSkipped`, and the spec's own case). The same scenario runs in
       Go as `TestNS011AProducerThatKnowsOnlyTheAPIGetsOneNotificationDeliveredOnTwoChannels`, over real sockets.
-      Against a clean stack the `api` project is 11 passed, 2 skipped.*
+      Against a clean stack the `api` project is 16 passed (11 when this task landed, before the webhooks spec).*
 - [x] **T048** *red → green* `postgres/topics.go`, `postgres/templates.go` (Go templates, restricted
       function map, locale fallback), `postgres/addresses.go` — the data-backed ports
       ([D31](design-decisions.md#d31)).
@@ -1229,7 +1261,13 @@ rule above.
       (`TestADirectoryTimeoutFailsThePageAndTheBroadcastResumesAtIt`). **A defect found by the e2e suite on the real stack**,
       written red first: a host that rotates a key in place under one key id was refused until the cache expired. HS256 is not
       implemented (D56), which the REST contract permitted "in development" and now says it does not offer. 41 ledger rows for
-      T050, three of which survived once and were closed.*
+      T050, three of which survived once and were closed. **A second defect, found by the browser stream spec against the real
+      stack**, where each run mints a new key under one key id and requests arrive together: only one request may fetch the host's keys in an
+      interval, and the others, which had read the old set before it did, were throttled and refused although their tokens were valid. The
+      cache now hands out a generation with its set, and a throttled request whose generation is older than the cache's tries once more with
+      the cache's set (one that finds the same generation has nothing new to try, so a forged token still costs one verification and no fetch).
+      Written red first (`refetch_internal_test.go:66: verify = "", ... want accepted`, and `tokens_test.go:316: 21 of 32 simultaneous requests ...
+      were refused`, 4 and 9 on other runs); 4 more ledger rows.*
 - [x] **T052** [P] *red → green* `driving/natsingest`: optional JetStream ingest, acknowledged after
       commit ([D23](design-decisions.md#d23)).
       **Red first:** a kill after the message is handled and before the commit means redelivery, with no
@@ -1246,8 +1284,20 @@ rule above.
       redelivery that notifies once) and against a **real JetStream** in a container (a process killed between the commit and the
       acknowledgement is followed by one that replays it; a poison message is parked and told on the DLQ subject exactly once and
       the messages around it are delivered), and through the whole service. The stream is created with the replicas the
-      configuration says (`NOTIFY_INGEST_REPLICAS`); R3 needs a cluster, which no test here started, so replicated durability is
-      the deployment's to verify and is not claimed by a test.*
+      configuration says (`NOTIFY_INGEST_REPLICAS`). **R3 durability is tested on a real three-node JetStream cluster**
+      (`TestAnIngestStreamOfThreeReplicasSurvivesTheLossOfItsLeader`, through the whole service on a real PostgreSQL): the stream is
+      created with three replicas, 20 messages are ingested, the container that leads the stream is destroyed with its disk, a new
+      leader holds all 20, 10 more are accepted by the two that remain, and there are exactly 30 notifications. It was written
+      without being run (Docker's storage failed on the machine) and its first run was CI. **Shown to be able to fail, by accident:** on
+      that first run the harness had not passed the replica count to the service, which therefore created its stream with one, which
+      is the mutant "the service ignores `NOTIFY_INGEST_REPLICAS`", and the test stopped on its precondition,
+      `ingest_cluster_integration_test.go:169: the ingest stream = {… Replicas:1 …}, want one of three replicas`. With the variable set it
+      passed on PostgreSQL 16 and 17. **What that does not show:** that the durability assertion (a leader destroyed, nothing lost)
+      fails when the stream has one replica; that was not run. **The NATS client moved four indirect modules,
+      and none of it is discretionary:** `go get` raised `golang.org/x/crypto` (v0.54.0 → v0.57.0) and
+      `github.com/klauspost/compress` (v1.18.6 → v1.20.0) because `nats.go` v1.54.0 requires those versions, and `net`, `text` and
+      `sync` followed because `crypto` requires them (`go mod graph` shows each edge). `govulncheck` has not been run on the new
+      versions.*
 
 ## Stage 12 — Boundary gates
 
@@ -1284,10 +1334,10 @@ that lists no red task has no test scheduled.
 
 | Criterion | Proven by | Written (red) in |
 |---|---|---|
-| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024 (done), T028 (done), T047 (done), T047a |
+| NS-001 recipient scoping | schema tests 4, 5 and 14 (`make verify-schema`); `StoreContract` (same id in two tenants, read as owner); `NotifierContract`; `StreamIsolationContract`; the `isolation` and `stream` Playwright specs | T005 (done), T020 (done), T024 (done), T028 (done), T047 (done), T047a (done) |
 | NS-002 exactly once, per channel | schema tests 3 and 15 (`make verify-schema`); `StoreContract` and `NotifierContract` replay cases; `ChannelContract` at each declared `Dedup` | T005 (done), T020 (done), T024 (done), T029 (done) |
 | NS-003 no delivery lost to a crash | `StoreContract` crash after commit; `DispatcherContract` at every crash point | T020 (done), T033 (done) |
-| NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a, T055 |
+| NS-004 in-app under 5 s at p95 | the `stream` Playwright spec (arrives without a reload); the load test | T047a (done), T055 |
 | NS-005 digest burst | burst test | T035 (done) |
 | NS-006 poison terminates | `DispatcherContract` (worker panic, attempt ceiling); dead-letter inspect and replay | T033 (done), T032 (done) |
 | NS-007 tenant fairness | noisy-neighbour test in dispatcher passes; the load test's fairness row in wall time | T037 (done), T055 |
@@ -1312,14 +1362,14 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-005 channel idempotency at its declared level | frozen delivery-key vector; `ChannelContract`; per-channel tests | T008 (done), T025 (done), T026 (done), T027 (done), T029 (done) |
 | NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031 (done), T033 (done) |
 | NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032 (done), T033 (done) |
-| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the REST handlers (the recipient is the session, a 404 and never a 403); the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T028 (done), T044 (done), T047 (done), T047a |
+| NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the REST handlers (the recipient is the session, a 404 and never a 403); the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T028 (done), T044 (done), T047 (done), T047a (done) |
 | NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case (also over gRPC: no message carries a realm); an operator body that names a realm is refused; realm bindings | T009 (done), T022a (done), T024 (done), T044 (done), T047 (done), T049 (done), T049a (done), T050 (done) |
 | NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 (done) |
 | NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021 (done), T024 (done) |
 | NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021 (done), T024 (done) |
 | NR-013 quiet hours and cadence | planner rows including `DeliverySchedule.Validate`; critical override; schedule round-trip | T018 (done), T021 (done), T024 (done) |
 | NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021 (done), T034a (done), T035 (done) |
-| NR-015 unsubscribe | email golden files; the token's vector and tamper table; `Inbox.Unsubscribe`; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T026a (done), T044 (done), T047a |
+| NR-015 unsubscribe | email golden files; the token's vector and tamper table; `Inbox.Unsubscribe`; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T026a (done), T044 (done), T047a (done) |
 | NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a (done), T053 (done) |
 | NR-017 a topic is a registration | topics integration table, no migration | T048 (done) |
 | NR-018 re-anchoring identity is a host binding | structural: `Identity` is opaque strings with frozen vectors; `domain` imports nothing | T007 (done), T053 (done) |
@@ -1336,10 +1386,10 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021 (done), T024 (done), T033 (done) |
 | NR-030 cancel | `NotifierContract` cancel cases; the queue's `Cancel` | T016 (done), T022a (done), T024 (done) |
 | NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021 (done), T033 (done) |
-| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the webhook route (verified before parsed); the Resend decoder; the `webhooks` spec | T020 (done), T022a (done), T024 (done), T044 (done), T044a, T047a |
+| NR-032 delivery status and callback correlation | `Status` and `RecordProviderStatus` in `StoreContract`; `NotifierContract`; the webhook route (verified before parsed); the Resend decoder; the `webhooks` spec | T020 (done), T022a (done), T024 (done), T044 (done), T044a (done), T047a (done) |
 | NR-033 seen, read, archived | inbox table, independent flags | T017 (done) |
 | NR-034 erasure | catalog-wide scan; suppression survives and holds no plaintext; `Admin.Erase`'s own table (`TestErase…` in `app`); the pre-check's entries for the recipient's keys forgotten before the erasure (`TestEraseForgets…`, the `Forget` cases of `PreCheckContract`, `TestIdemKeys`) | T019 (done), T040, T040b |
-| NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack, over a real JetStream (`TestOverARealJetStream…`) | T020 (done), T052 (done) |
+| NR-035 accepted when committed; ack after commit | `StoreContract` crash after commit; ingest kill-before-ack, over a real JetStream (`TestOverARealJetStream…`) and, replicated, over a real three-node cluster (`TestAnIngestStreamOfThreeReplicasSurvivesTheLossOfItsLeader`) | T020 (done), T052 (done) |
 | NR-036 capacity envelope stated | stated in [plan.md § Capacity model](plan.md#capacity-model); the load-test thresholds | T055 |
 | NR-037 preflight warnings | `TestAssessDatabase` and `TestWALRate`; `TestPreflight…` in `app`; `TestDatabaseConditions…` against PostgreSQL 16 and 17 (`make test-pg-next`; CI runs both), `TestDatabaseConditionsCountsOnlyClientBackends` for the filter | T040a |
 

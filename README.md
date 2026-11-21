@@ -21,8 +21,8 @@
 > built from `channel_providers` rows whose credentials are references, recipient and producer tokens verified against each
 > realm's JWKS, a realm derived from the caller and never read from a request, and an optional JetStream ingest that
 > acknowledges after the commit. A producer written in TypeScript registers, stores, sends and sees a delivery on two
-> channels against the real compose stack (NS-011). What is **not built**: the one-call `New`, the Resend webhook decoder
-> and a few operator reads, the load test and the release (Stage 13), and the browser run of the live-stream spec. `Broadcast`
+> channels against the real compose stack (NS-011); Resend's signed webhooks suppress a bounced address; and the whole Playwright suite runs
+> against that stack. What is **not built**: the one-call `New`, a few operator reads, and the load test and the release (Stage 13). `Broadcast`
 > (Stage 9) and the maintenance jobs and `Admin.Erase` (Stage 8) are **built and proven against PostgreSQL**. You can adopt it
 > as a Go library and wire the pieces by hand (see [Wiring it as a library](#-wiring-it-as-a-library)), or run `notifyd`
 > (`docker compose -f deploy/docker-compose.yml up`).
@@ -539,26 +539,18 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | 8 | Maintenance — leased retention jobs, `Admin.Erase`, startup preflight, a record of each job's last clean finish | ✅ built |
 | 9 | Broadcast — a durable record, expanded a page at a time under a lease, resumable at the next page | ✅ built |
 | 10 | Transports — gRPC, REST, SSE relay, in-process port | ✅ built |
-| 11 | Service mode — data-backed topics, templates and addresses; the service binary; recipient and producer token verification; the Directory callback; NATS ingest | ✅ built (T047a, the Playwright switch-on, stays open for two specs) |
+| 11 | Service mode — data-backed topics, templates and addresses; the service binary; recipient and producer token verification; the Directory callback; NATS ingest; the Resend webhook | ✅ built |
 | 12 | Boundary gates — arch-lint, depguard, builds with no host present | ✅ built |
 | 13 | Load test and release — capacity harness, integration-guide samples, tag `v0.1.0` | 🚧 not built |
 
 **Not built, and what that means today**
 
-- **Two e2e specs are still `fixme`, and the CI job is unproven.** The `webhooks` spec waits for the Resend decoder and
-  its suppression policy ([T044a](specs/001-notification-core/tasks.md)), and the `stream` spec needs a browser run. The
-  other REST and producer specs run against the compose stack (11 passed, 2 skipped from clean volumes); the `e2e` CI
-  job is switched on and has not been seen to run on GitHub's runners.
 - **Some operator reads wait on their ports.** The dead-letter and delivery lists and the read of a tenant's defaults
   are not served ([T044b](specs/001-notification-core/tasks.md)).
 - **No one-call `New`.** A host assembles `app.Deps` by hand, as above.
 - **PostgreSQL 16 is the supported version, and 17 is tested.** The checkpoint counters moved views in 17 and the code
   reads each where it is, so CI runs the schema and integration suites on both (`make test-pg-next` is the second by hand).
   PostgreSQL 18 is not run.
-- **The producer client in another language is hand-rolled, not generated.** The TypeScript producer in `e2e/` speaks
-  gRPC over Node's HTTP/2 with a small protobuf encoder; a protoc-generated client in another language is not shown to work.
-- **Replicated ingest durability is not tested.** The JetStream ingest is proved against a single-node server; R3
-  (which NS-003 asks of an ingest bus) is a deployment setting no test here started.
 - **No tag.** `extraction-baseline-intel-agent` is not a release. Migrations are rewritten in place until
   the first `v*` tag and are immutable after it.
 

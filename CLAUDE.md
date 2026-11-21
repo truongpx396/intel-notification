@@ -61,7 +61,7 @@ has the rules):
   catalog: topics, versioned templates (a closed function map, checked when saved) and addresses, as data.
 - `adapters/driven/redis/`: the pre-check, a fast path that only ever misses, and the live stream
   (sharded pub/sub on hash-tagged keys), and the quota counter (two fixed UTC windows, taken in one script).
-- `adapters/driven/channel/`: `inapp` (a nudge naming a notification), `email` (SMTP and Resend mailers),
+- `adapters/driven/channel/`: `inapp` (a nudge naming a notification), `email` (SMTP and Resend mailers, and Resend's webhook decoder),
   `webhook` and `failover` (ordered providers, the weakest `Dedup` of its members). Each depends on `domain` and
   `ports` only, and each is held to `notifytest.ChannelContract`. `channel/providers` is the service's channel
   registry: it builds channels from `channel_providers` rows, resolves each credential from its reference

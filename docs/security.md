@@ -124,6 +124,14 @@ an attacker's payload has already been through your parser, and a forged bounce 
 — a denial of notification that looks like normal operation. An unverified request returns 401 with an
 empty body and mutates nothing.
 
+Resend signs with Svix: HMAC-SHA256 over the message id, the timestamp and the raw body, with the endpoint's secret.
+The decoder checks every configured secret and every `v1` signature the request carries (a secret is rotated by
+overlap), inside a five-minute window either way, so a captured callback is not replayable for ever. The secret is a
+reference like every credential (`NOTIFY_RESEND_WEBHOOK_SECRETS`, `env:` or `file:`). A callback names no realm, so each
+realm has a route of its own and the suppressions it writes are under that realm and no other (NR-009): a bounce that
+says another realm in its body is not read as saying it. Only a bounce the provider calls `Permanent`, or a
+complaint, suppresses an address for ever; a bounce that says less is a cooldown (D14).
+
 ## Personal data
 
 - **Erasure.** `Maintenance.Erase` removes a recipient from every table in one transaction and

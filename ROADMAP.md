@@ -58,7 +58,7 @@ are properties of the schema, checkable by a test, rather than a vendor's assura
 
 ## Phase 1 — Notification core
 
-**Status: designed and normative; implementation nearly through (Stages 1–12 built, with three Stage 10 follow-ups open: T044a, T044b and T047a; Stage 13 open).** Built so far: the schema, the domain
+**Status: designed and normative; implementation nearly through (Stages 1–12 built, with one Stage 10 follow-up open: T044b; Stage 13 open).** Built so far: the schema, the domain
 types and rules, every port in the contract, the configuration and its validation, the test kit
 (`internal/notifytest`), and the PostgreSQL adapter for the delivery queue, digests, maintenance jobs,
 the store's persist and read paths, the inbox, preferences and suppressions, with the CI boundary gates;
@@ -91,9 +91,8 @@ missing secret costing that provider and nothing else; a realm that is derived f
 whose subject is bound to it) and never read from a request, with an engine per realm in one process; recipient and
 producer tokens verified against each realm's JWKS; the host's `Directory` callback for audiences; and an optional JetStream
 ingest that acknowledges only after the commit. A producer written in TypeScript registers a topic and templates, stores an
-address, sends one notification and sees it delivered on two channels against the real compose stack (NS-011). Not built: the
-one-call `New`, the Resend webhook decoder and a few operator reads, the browser run of the live-stream spec, and Stage 13's
-load test and release; and replicated (R3) durability of the ingest stream is a deployment setting no test started.
+address, sends one notification and sees it delivered on two channels against the real compose stack (NS-011). And Resend's webhook (Svix-signed, verified before it is read), which suppresses a bounced address in the realm of its endpoint. Not built: the
+one-call `New`, a few operator reads (T044b), and Stage 13's load test and release.
 Task-level status is in
 [tasks.md](specs/001-notification-core/tasks.md).
 → [specs/001-notification-core](specs/001-notification-core/)

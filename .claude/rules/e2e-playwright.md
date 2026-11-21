@@ -17,7 +17,7 @@ service exists; see [docs/testing.md](../../docs/testing.md#end-to-end-playwrigh
   in two tenants" shape: it is the one that exposes an isolation bug.
 - **The run is the host.** Global setup generates a signing key, serves its JWKS and mints recipient
   tokens. Never commit a key or token. Drive producers through the operator broadcast route so no test
-  needs a gRPC client, except `producer.api.spec.ts` (NS-011), which is the producer and uses `support/grpc.ts`;
+  needs a gRPC client, except `producer.api.spec.ts` (NS-011) and the webhooks spec, which are producers and use `support/grpc.ts` (`@grpc/grpc-js` over the contract's own proto);
   read outgoing mail back from Mailpit.
 - **Specs stay `test.describe.fixme` until their service task lands, and come off when you have seen them pass against the compose stack.** Each one opens with a requirement
   comment (NS-001...) and a `Pending:` line naming the tasks that enable it (T044, T049; T047a switches

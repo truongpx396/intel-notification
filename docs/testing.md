@@ -210,20 +210,22 @@ a host's front end does:
   test is visible in the report.
 
 The service exists (`cmd/notifyd`, T049a) and the compose stack runs it as the application role, with the local realm's
-topics, templates and an SMTP provider seeded (`deploy/initdb`). Against a clean stack the `api` project is 11 passed and
-2 skipped: the isolation, preferences and unsubscribe specs, and `producer.api.spec.ts`, NS-011 with a producer in
-TypeScript over gRPC. That producer is the one spec that is not driven through the operator route: it is the point of it.
-Its client is `e2e/support/grpc.ts`, Node's HTTP/2 and a small protobuf encoder with no dependency (so the lockfile is
-untouched), and it sees what it did where it landed: Mailpit for the mail, the REST inbox with a token the run's host
-signed, and the delivery status. It is shown to fail at the step taken away (a channel the service lacks fails at the
-topic, skipped templates at the delivery). Two specs are still `test.describe.fixme`: `webhooks` (the Resend decoder,
-T044a) and the `stream` browser spec (a browser run seen passing). The `e2e` CI job is switched on; its commands were
-run locally and it has not been seen on GitHub's runners (T047a).
+topics, templates, an SMTP provider and a throwaway Resend webhook secret seeded (`deploy/initdb`, `deploy/docker-compose.yml`).
+Against a clean stack the `api` project is 16 passed: the isolation, preferences, unsubscribe and webhooks specs, and
+`producer.api.spec.ts`, NS-011 with a producer in TypeScript over gRPC. The producer and the webhooks spec are the two that are not
+driven through the operator route: a producer is the point of them. Their client is `e2e/support/grpc.ts`, `@grpc/grpc-js` over the
+contract's own proto, read at run time, so the producer speaks what `buf` guards and nothing generated from Go; it sees what it did
+where it landed: Mailpit for the mail, the REST inbox with a token the run's host signed, and the delivery status. The webhooks spec
+signs a bounce the way Svix does, with the secret the stack gives realm local, and sees the address suppressed and the next
+notification to it never reach Mailpit. The `chromium` project runs the stream spec in a real browser, from the relay's own origin
+(an `EventSource` from another origin would need CORS, which the service does not offer; a host behind its gateway is same-origin).
+All of it runs in the `e2e` CI job, which `make e2e` also runs locally and which installs Chromium.
 
 Run them with a stack up: `docker compose -f deploy/docker-compose.yml --profile e2e up --build -d`, then
-`NOTIFY_E2E_BASE_URL=http://localhost:8080 npx playwright test --project=api` from `e2e/`. Each run mints a new key under
-one key id, and the compose stack looks at the host's keys again within seconds (`NOTIFY_JWKS_MIN_REFETCH`). A stack
-started before the init scripts existed has a volume the schema was built into as a superuser: `down -v` first.
+`NOTIFY_E2E_BASE_URL=http://localhost:8080 npx playwright test` from `e2e/` (`npx playwright install chromium` once, for the
+browser project). Each run mints a new key under one key id, and the compose stack looks at the host's keys again within
+seconds (`NOTIFY_JWKS_MIN_REFETCH`); requests that arrive together after that are all followed by the one fetch (D56). A
+stack started before the init scripts existed has a volume the schema was built into as a superuser: `down -v` first.
 
 ## Benchmarks
 
