@@ -74,7 +74,9 @@ has the rules):
   Testcontainers. All are test support only.
 - `adapters/driving/`: the transports. `inprocess` (the engine's ports as a library host holds them), `httpapi`
   (REST, the SSE relay, one-click unsubscribe, provider webhooks, operator routes, health), `grpcserver` and
-  `grpcclient` (both stand on `wire`, which maps messages and errors). `api/proto` is the contract's
+  `grpcclient` (both stand on `wire`, which maps messages and errors; the client side also holds the host's
+  `Directory` callback) and `auth` (who is calling: realm interceptors from a producer principal, token verification
+  against each realm's JWKS, operator tokens, `Route` to the engine of the caller's realm). `api/proto` is the contract's
   proto and `api/notifyv1` its committed generated Go: edit the proto, then `make proto`.
 - Not created yet: `cmd/`. Its line in `.go-arch-lint.yml` is commented out and is uncommented in the change
   that creates the directory.

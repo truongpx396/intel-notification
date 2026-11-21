@@ -1172,12 +1172,26 @@ rule above.
       and in a factory's own error) dies on `TestACredentialIsHandedToTheFactoryAndAppearsNowhereElse`. **A reading of the
       task:** there is no gRPC call that returns a provider, since the contract's `Catalog` has none, so "no call returns
       a credential" is held where a credential could escape: the manager's report, its errors and a delivery's detail. 58 ledger rows for T049, seven of which survived once (a realm hard-coded to the one value a test used, an empty file the reader reported as an error, a relative path refused for another reason, and others) and were closed.*
-- [ ] **T050** *red → green* Recipient token verification (JWKS per realm); `Directory` callback client.
+- [x] **T050** *red → green* Recipient token verification (JWKS per realm); `Directory` callback client.
       **Red first:** a table over tokens — expired, wrong audience, signed by another realm's key,
       `alg: none`, tampered, an unknown `kid` (refetched once, bounded) — and the recipient identity comes
       only from verified claims; a `Directory` timeout fails the page and leaves the broadcast to resume at
       it (T042).
       **Mutate:** accept `alg: none`; trust the unverified `sub`
+      *`domain.VerifyRecipientToken` and `VerifyProducerToken` (the signature first, with the algorithm the key allows; 32
+      refusal cases and the JWKS rules), `auth.Keys` (lazy, cached, kept through an outage, one refetch per interval for an unknown
+      key id **or a signature that stops verifying**, an endless answer not read to the end), `auth.Recipients` (an
+      `httpapi.IdentityFunc`) and `auth.ProducerTokens` (the gRPC principal), and `grpcclient.Directory`, bounded in time and in
+      size, a page whole or an error. **Red, witnessed on a stub that accepts every token on its unverified claims:**
+      `token_test.go:321: VerifyRecipientToken = {Tenant:{Kind:workspace ID:w1} ...}, <nil>, want ErrInvalidToken: the key decides the
+      algorithm, not the header`. **Both named mutants are killed:** `alg: none` accepted dies on `TestATokenIsRefused`
+      (`alg_none_with_a_signature`), and taking the identity from the unverified payload dies on `tampered_payload`. A
+      Directory timeout is shown through the real expander over PostgreSQL: the first page is committed, the broadcast sits
+      pending at cursor 2, and after the lease lapses it resumes there with every recipient notified once
+      (`TestADirectoryTimeoutFailsThePageAndTheBroadcastResumesAtIt`). **A defect found by the e2e suite on the real stack**,
+      written red first: a host that rotates a key in place under one key id was refused until the cache expired. HS256 is not
+      implemented (D56), which the REST contract permitted "in development" and now says it does not offer. 41 ledger rows for
+      T050, three of which survived once and were closed.*
 - [ ] **T052** [P] *red → green* `driving/natsingest`: optional JetStream ingest, acknowledged after
       commit ([D23](design-decisions.md#d23)).
       **Red first:** a kill after the message is handled and before the commit means redelivery, with no
@@ -1249,7 +1263,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-006 suppressed and unresolvable are terminal | suppression table; `DispatcherContract` | T019 (done), T031 (done), T033 (done) |
 | NR-007 backoff, ceiling, dead letters, alarm | backoff distribution; queue suite; `DispatcherContract` (poison, `notify.dlq.dead.count`); replay | T011 (done), T016 (done), T032 (done), T033 (done) |
 | NR-008 scoped at the data layer and on the live path | schema tests 4, 5 and 14; `StoreContract`; `NotifierContract`; `StreamIsolationContract`; the REST handlers (the recipient is the session, a 404 and never a 403); the `isolation` and `stream` specs | T005 (done), T020 (done), T024 (done), T028 (done), T044 (done), T047 (done), T047a |
-| NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case (also over gRPC: no message carries a realm); an operator body that names a realm is refused; realm bindings | T009 (done), T022a (done), T024 (done), T044 (done), T047 (done), T049 (done) |
+| NR-009 identity from the producer, realm never from a request | `Notification.Identity`; `NotifierContract` realm case (also over gRPC: no message carries a realm); an operator body that names a realm is refused; realm bindings | T009 (done), T022a (done), T024 (done), T044 (done), T047 (done), T049 (done), T050 (done) |
 | NR-010 realm and tenant in the key space | frozen key vectors; schema tests; two tenants and two realms in `StoreContract` | T005 (done), T007 (done), T008 (done), T020 (done) |
 | NR-011 preference precedence | resolution matrix; planner rows; locked tenant case | T018 (done), T021 (done), T024 (done) |
 | NR-012 all channels off still persists; inbox visibility | planner rows; inbox table; `NotifierContract` | T017 (done), T021 (done), T024 (done) |

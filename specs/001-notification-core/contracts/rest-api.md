@@ -15,7 +15,7 @@ aspirational.
 | Mode | How the identity is established |
 |---|---|
 | Library | The host mounts the handler with an `IdentityFunc(*http.Request) (notify.Identity, error)` over its own session |
-| Service | A **recipient token**: a JWT the host signs (ES256, EdDSA or RS256; `HS256` only in development) and verifies against the realm's JWKS. Claims: `iss` (bound to one realm), `tenant` `{kind,id}`, `recipient` `{kind,id}`, `exp` ≤ 1 hour. The host mints it for the signed-in user; the service never sees the host's session |
+| Service | A **recipient token**: a JWT the host signs (ES256, EdDSA or RS256; `HS256` is not accepted: a secret both sides hold lets either mint a token for any recipient, [D56](../design-decisions.md#d56)) and verifies against the realm's JWKS. Claims: `iss` (bound to one realm), `tenant` `{kind,id}`, `recipient` `{kind,id}`, `exp` ≤ 1 hour. The host mints it for the signed-in user; the service never sees the host's session |
 
 Administrative routes require an operator credential — mTLS or an operator token — never a recipient
 token.
