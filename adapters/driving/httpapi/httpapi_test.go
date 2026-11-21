@@ -1200,6 +1200,24 @@ func TestAWebhookForADeliveryNotRecordedYetAsksTheProviderToRetry(t *testing.T) 
 	}
 }
 
+// T044a. A callback that verified but that the provider's decoder cannot read is the provider's to fix: a 400 that
+// says so and is not a fault to report.
+func TestAVerifiedWebhookTheDecoderCannotReadIs400AndNotAFault(t *testing.T) {
+	t.Parallel()
+	var reported []error
+	f := newFixture(t, httpapi.WithErrorHandler(func(err error) { reported = append(reported, err) }))
+	f.hook.handle = func([]byte) error {
+		return &domain.ValidationError{Problems: []domain.Problem{{Field: "body", Message: "not a Resend event"}}}
+	}
+	rec := f.do("POST", "/webhooks/email/resend", "", `{}`, "X-Signature", "good")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400", rec.Code)
+	}
+	if len(reported) != 0 {
+		t.Errorf("reported %v, want nothing: a body the provider sent is not a fault of this service", reported)
+	}
+}
+
 func TestAWebhookForAProviderNobodyRegisteredIs404(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

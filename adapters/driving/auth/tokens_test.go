@@ -278,6 +278,48 @@ func TestAProducerPrincipalFuncFindsNoCredentialsWhereThereAreNone(t *testing.T)
 // A host that rotates a key in place, under the same key id, is followed like one that adds a key: the old key
 // no longer verifies its tokens, which is as good a sign as an unknown key id that the keys moved, and a
 // refetch, once and bounded, finds the new one. Without it every token is refused until the cache expires.
+// Found by running the e2e suite against the real stack, where every run mints a new key under one key id and a
+// dozen requests arrive in the same instant: only one may fetch the host's keys, and the others, which read the old
+// set before it did, were refused although their tokens were valid.
+func TestManyRequestsAtOnceAfterAKeyIsRotatedInPlaceAreAllFollowed(t *testing.T) {
+	t.Parallel()
+	w := newTokenWorld(t)
+	if _, err := w.recips.Identify(bearer(w.recipientToken(w.alpha, "alpha"))); err != nil {
+		t.Fatal(err)
+	}
+	rotated := notifytest.NewTokenSigner("alpha-1") // the same key id, a new key
+	w.h.serve("/alpha.json", notifytest.JWKS(rotated))
+	w.clk.Advance(2 * time.Minute)
+
+	const requests = 32
+	tokens := make([]string, requests)
+	for i := range tokens {
+		tokens[i] = rotated.Recipient("alpha", tenantW1, userU1, w.clk.Now(), time.Minute)
+	}
+	start := make(chan struct{})
+	errs := make(chan error, requests)
+	for _, token := range tokens {
+		go func() {
+			<-start
+			_, err := w.recips.Identify(bearer(token))
+			errs <- err
+		}()
+	}
+	close(start)
+	refused := 0
+	for range requests {
+		if err := <-errs; err != nil {
+			refused++
+		}
+	}
+	if refused != 0 {
+		t.Fatalf("%d of %d simultaneous requests with tokens signed by the host's new key were refused, want none: one fetch serves them all", refused, requests)
+	}
+	if n := w.h.fetches("/alpha.json"); n > 3 {
+		t.Fatalf("%d fetches for %d requests, want the one the rotation needed (and the first use's): the bound still holds", n, requests)
+	}
+}
+
 func TestAKeyRotatedInPlaceUnderTheSameKeyIDIsFollowedAndStillBounded(t *testing.T) {
 	t.Parallel()
 	w := newTokenWorld(t)

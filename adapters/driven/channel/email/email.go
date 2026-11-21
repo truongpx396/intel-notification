@@ -166,7 +166,11 @@ func (c *Channel) Capabilities() domain.ChannelCapabilities {
 // case-insensitive and its local part is not assumed to be, so only the domain is
 // lowercased, after the surrounding space is trimmed. The address key and the
 // suppression hash are made over this form.
-func (*Channel) NormalizeAddress(v string) string {
+func (*Channel) NormalizeAddress(v string) string { return normalizeEmail(v) }
+
+// normalizeEmail is the form an address is keyed in, whoever asks: the channel, and the webhook that
+// suppresses an address a provider reports.
+func normalizeEmail(v string) string {
 	v = strings.TrimSpace(v)
 	at := strings.LastIndexByte(v, '@')
 	if at < 0 {

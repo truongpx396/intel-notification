@@ -32,6 +32,8 @@ type Keys struct {
 // realmKeys is one realm's cached set. Its mutex is held across a fetch, so simultaneous first uses make
 // one request and not one each.
 type realmKeys struct {
+	// gen counts the sets this has held: a caller that verified against one generation can tell a later one is there.
+	gen       uint64
 	url       string
 	mu        sync.Mutex
 	set       domain.KeySet
@@ -154,6 +156,7 @@ func (k *Keys) refresh(ctx context.Context, rk *realmKeys) {
 		return
 	}
 	rk.set, rk.have, rk.lastError = set, true, nil
+	rk.gen++
 }
 
 // For returns realm's key set: the cached one while it is fresh, else a fetch. A fetch that fails keeps
@@ -161,9 +164,15 @@ func (k *Keys) refresh(ctx context.Context, rk *realmKeys) {
 // not tried again until the refetch interval has passed. A realm that has never been fetched has no keys,
 // which is an error and not an empty set.
 func (k *Keys) For(ctx context.Context, realm domain.Realm) (domain.KeySet, error) {
+	set, _, err := k.forGen(ctx, realm)
+	return set, err
+}
+
+// forGen is For with the generation of the set it returns.
+func (k *Keys) forGen(ctx context.Context, realm domain.Realm) (domain.KeySet, uint64, error) {
 	rk, ok := k.realms[realm]
 	if !ok {
-		return domain.KeySet{}, fmt.Errorf("no JWKS is configured for realm %q", realm)
+		return domain.KeySet{}, 0, fmt.Errorf("no JWKS is configured for realm %q", realm)
 	}
 	rk.mu.Lock()
 	defer rk.mu.Unlock()
@@ -174,30 +183,36 @@ func (k *Keys) For(ctx context.Context, realm domain.Realm) (domain.KeySet, erro
 		k.refresh(ctx, rk)
 	}
 	if rk.have {
-		return rk.set, nil
+		return rk.set, rk.gen, nil
 	}
 	if rk.lastError != nil {
-		return domain.KeySet{}, fmt.Errorf("the keys of realm %q could not be fetched: %w", realm, rk.lastError)
+		return domain.KeySet{}, 0, fmt.Errorf("the keys of realm %q could not be fetched: %w", realm, rk.lastError)
 	}
-	return domain.KeySet{}, fmt.Errorf("the keys of realm %q are not available", realm)
+	return domain.KeySet{}, 0, fmt.Errorf("the keys of realm %q are not available", realm)
 }
 
 // Refetch fetches realm's set again because a token named a key id it did not hold. It does so at most
 // once per refetch interval, counted from the last fetch of any kind: within it, it reports
 // refetched=false and the set it has.
 func (k *Keys) Refetch(ctx context.Context, realm domain.Realm) (set domain.KeySet, refetched bool, err error) {
+	set, _, refetched, err = k.refetchGen(ctx, realm)
+	return set, refetched, err
+}
+
+// refetchGen is Refetch with the generation of the set it returns.
+func (k *Keys) refetchGen(ctx context.Context, realm domain.Realm) (set domain.KeySet, gen uint64, refetched bool, err error) {
 	rk, ok := k.realms[realm]
 	if !ok {
-		return domain.KeySet{}, false, fmt.Errorf("no JWKS is configured for realm %q", realm)
+		return domain.KeySet{}, 0, false, fmt.Errorf("no JWKS is configured for realm %q", realm)
 	}
 	rk.mu.Lock()
 	defer rk.mu.Unlock()
 	if !rk.lastTry.IsZero() && k.now().Sub(rk.lastTry) < k.minRefetch {
-		return rk.set, false, nil
+		return rk.set, rk.gen, false, nil
 	}
 	k.refresh(ctx, rk)
 	if rk.lastError != nil {
-		return rk.set, true, fmt.Errorf("the keys of realm %q could not be fetched: %w", realm, rk.lastError)
+		return rk.set, rk.gen, true, fmt.Errorf("the keys of realm %q could not be fetched: %w", realm, rk.lastError)
 	}
-	return rk.set, true, nil
+	return rk.set, rk.gen, true, nil
 }

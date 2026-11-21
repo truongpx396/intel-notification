@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,12 +34,15 @@ type Config struct {
 	AllowInsecureHTTP bool
 	RecipientAud      string
 	ProducerAud       string
-	OperatorTokens    []OperatorToken
-	UnsubscribeKeys   []KeyRef // the first signs; all verify
-	DirectoryAddrs    map[domain.Realm]string
-	DirectoryTLS      bool
-	GRPCTLS           TLSFiles
-	NATSURL           string
+	OperatorTokens    []RealmRef
+	// ResendWebhookSecrets are the secrets Resend signs each realm's webhooks with: more than one for a realm
+	// while a secret is rotated.
+	ResendWebhookSecrets []RealmRef
+	UnsubscribeKeys      []KeyRef // the first signs; all verify
+	DirectoryAddrs       map[domain.Realm]string
+	DirectoryTLS         bool
+	GRPCTLS              TLSFiles
+	NATSURL              string
 	// JWKSTTL and JWKSMinRefetch are how long a realm's keys are used, and the shortest interval between two
 	// fetches of them (an unknown key id, a signature that stops verifying, a retry after a failure).
 	JWKSTTL, JWKSMinRefetch time.Duration
@@ -55,8 +59,9 @@ type Config struct {
 	AllowPrivilegedRole bool
 }
 
-// OperatorToken is a bearer token accepted on /admin routes for one realm, as a reference to the secret.
-type OperatorToken struct {
+// RealmRef is a reference to a secret that belongs to one realm: a bearer token accepted on /admin routes, or
+// the key a provider signs its webhooks with.
+type RealmRef struct {
 	Realm domain.Realm
 	Ref   string
 }
@@ -196,7 +201,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		}
 	}
 
-	c.OperatorTokens = parseOperatorTokens(str("NOTIFY_OPERATOR_TOKENS", ""), c.Bindings.Realms(), func(msg string) { bad("NOTIFY_OPERATOR_TOKENS", "%s", msg) })
+	c.OperatorTokens = parseRealmRefs(str("NOTIFY_OPERATOR_TOKENS", ""), c.Bindings.Realms(), func(msg string) { bad("NOTIFY_OPERATOR_TOKENS", "%s", msg) })
+	c.ResendWebhookSecrets = parseRealmRefs(str("NOTIFY_RESEND_WEBHOOK_SECRETS", ""), c.Bindings.Realms(), func(msg string) { bad("NOTIFY_RESEND_WEBHOOK_SECRETS", "%s", msg) })
 	for _, pair := range splitList(str("NOTIFY_UNSUBSCRIBE_KEYS", "")) {
 		id, ref, ok := strings.Cut(pair, "=")
 		if !ok || strings.TrimSpace(id) == "" || strings.TrimSpace(ref) == "" {
@@ -255,18 +261,24 @@ func splitList(s string) []string {
 	return out
 }
 
-// parseOperatorTokens reads "realm=ref" entries, or a bare "ref" when exactly one realm is served: a bare
-// token administers the one realm there is, and with several a token must say which, so an operator of one
-// product never holds the other's.
-func parseOperatorTokens(s string, realms []domain.Realm, bad func(string)) []OperatorToken {
-	var out []OperatorToken
+// parseRealmRefs reads "realm=ref" entries, or a bare "ref" when exactly one realm is served: a bare reference
+// belongs to the one realm there is, and with several each says which, so an operator of one product never
+// holds another's token and a webhook secret is never taken for another realm's. A realm nobody serves is a
+// mistake and not a setting to carry.
+func parseRealmRefs(s string, realms []domain.Realm, bad func(string)) []RealmRef {
+	served := func(r domain.Realm) bool { return slices.Contains(realms, r) }
+	var out []RealmRef
 	for _, entry := range splitList(s) {
 		if name, ref, ok := strings.Cut(entry, "="); ok && domain.Realm(name).Validate() == nil {
 			if _, _, err := domain.ParseSecretRef(ref); err != nil {
-				bad(fmt.Sprintf("the token of realm %q: %v", name, err))
+				bad(fmt.Sprintf("the reference of realm %q: %v", name, err))
 				continue
 			}
-			out = append(out, OperatorToken{Realm: domain.Realm(name), Ref: ref})
+			if !served(domain.Realm(name)) {
+				bad(fmt.Sprintf("realm %q is not one this service serves", name))
+				continue
+			}
+			out = append(out, RealmRef{Realm: domain.Realm(name), Ref: ref})
 			continue
 		}
 		if _, _, err := domain.ParseSecretRef(entry); err != nil {
@@ -274,10 +286,10 @@ func parseOperatorTokens(s string, realms []domain.Realm, bad func(string)) []Op
 			continue
 		}
 		if len(realms) != 1 {
-			bad(fmt.Sprintf("%d realms are served, so each operator token says which: realm=ref", len(realms)))
+			bad(fmt.Sprintf("%d realms are served, so each reference says which: realm=ref", len(realms)))
 			continue
 		}
-		out = append(out, OperatorToken{Realm: realms[0], Ref: entry})
+		out = append(out, RealmRef{Realm: realms[0], Ref: entry})
 	}
 	return out
 }

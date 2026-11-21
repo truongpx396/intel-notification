@@ -129,9 +129,8 @@ jobs:
   e2e:
     name: e2e (Playwright)
     runs-on: ubuntu-latest
-    # T047a: the service exists (cmd/notifyd), so the specs whose routes have landed run against the compose
-    # stack: the REST inbox and preferences, one-click unsubscribe, and NS-011's producer over gRPC. The two
-    # that wait on the Resend decoder (T044a) and on a browser run seen passing stay test.describe.fixme.
+    # T047a: every spec runs against the compose stack: the REST inbox and preferences, one-click unsubscribe, the
+    # Resend webhook, NS-011's producer over gRPC, and the live stream in a real Chromium (`make e2e` installs it).
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

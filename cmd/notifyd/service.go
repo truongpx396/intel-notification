@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -421,6 +422,11 @@ func (s *Service) surfaces(ctx context.Context, pg *postgres.All, channels ports
 	if len(tokens) > 0 {
 		httpDeps.Operator = operators.Authenticate
 	}
+	webhooks, err := s.resendWebhooks(ctx, resolver, pg, clock)
+	if err != nil {
+		return err
+	}
+	httpDeps.Webhooks = webhooks
 	handler, err := httpapi.New(httpDeps, httpapi.WithErrorHandler(fault("http")))
 	if err != nil {
 		return fmt.Errorf("build the REST surface: %w", err)
@@ -606,4 +612,39 @@ func (s *Service) ingest(ctx context.Context, notifiers map[domain.Realm]ports.N
 		s.loops = append(s.loops, namedLoop{"nats ingest " + string(realm), func(ctx context.Context) error { return in.Run(ctx, consumer) }})
 	}
 	return nil
+}
+
+// resendWebhooks builds the decoder of each realm that has a Resend webhook secret, and the routes they are
+// served at (T044a). A callback names no realm, so each realm has a route of its own,
+// /webhooks/email/resend-<realm>, whose secrets are that realm's and whose suppressions are written under it;
+// a service that serves exactly one realm also answers the plain /webhooks/email/resend. A realm with no
+// secret has no route, because a route that cannot verify would have to accept or refuse everything.
+func (s *Service) resendWebhooks(ctx context.Context, resolver ports.SecretResolver, pg *postgres.All, clock ports.Clock) (map[string]ports.Webhook, error) {
+	byRealm := map[domain.Realm][]string{}
+	var realms []domain.Realm
+	for _, ref := range s.cfg.ResendWebhookSecrets {
+		secret, err := resolver.Resolve(ctx, ref.Ref)
+		if err != nil {
+			return nil, fmt.Errorf("the Resend webhook secret of realm %q: %w", ref.Realm, err)
+		}
+		if _, seen := byRealm[ref.Realm]; !seen {
+			realms = append(realms, ref.Realm)
+		}
+		byRealm[ref.Realm] = append(byRealm[ref.Realm], strings.TrimSpace(secret))
+	}
+	if len(realms) == 0 {
+		return nil, nil
+	}
+	hooks := map[string]ports.Webhook{}
+	for _, realm := range realms {
+		hook, err := email.NewResendWebhook(realm, byRealm[realm], pg.Store, pg.Suppressions, email.WithWebhookClock(clock.Now))
+		if err != nil {
+			return nil, fmt.Errorf("the Resend webhook of realm %q: %w", realm, err)
+		}
+		hooks["email/resend-"+string(realm)] = hook
+		if len(s.cfg.Bindings.Realms()) == 1 {
+			hooks["email/resend"] = hook
+		}
+	}
+	return hooks, nil
 }

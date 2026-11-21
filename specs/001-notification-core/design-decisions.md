@@ -1613,14 +1613,16 @@ as the secret, and be accepted. A service that refetches on every unknown key id
 and one that never refetches signs everyone out when the host rotates. A host that rotates a key **in place**,
 under the same key id, was refused until the cache expired: found by running the e2e suite against the real
 stack, where every run mints a new key under one id, and fixed by treating a signature that stops verifying as a
-reason to refetch once.
+reason to refetch once. When several requests arrive together after such a rotation only one may fetch, and the others are
+given the set it fetched and not refused with the old one (found by the browser stream spec, whose first test failed in two of four consecutive runs).
 
 Held by `TestARealmTheCallerNamesIsNeverRead`, `TestAnUnboundPrincipalIsRefusedBeforeTheHandler`,
 `TestEachCallActsInTheRealmOfItsProducer`, `TestARoutedNotifierSendsInTheRealmOfTheCaller`,
 `TestTwoRealmsInOneProcessNeverMeet`, `TestATokenIsRefused` (alg none, HS256 over the public key, the algorithm
 the header asks for, another realm's key under the same key id, expiry, lifetime, audience, an empty tenant),
 `TestOneRealmsKeysNeverOpenAnotherRealmsInbox`, `TestAnUnknownKeyIDCausesAtMostOneRefetchPerInterval`,
-`TestAKeyRotatedInPlaceUnderTheSameKeyIDIsFollowedAndStillBounded`.
+`TestAKeyRotatedInPlaceUnderTheSameKeyIDIsFollowedAndStillBounded`,
+`TestManyRequestsAtOnceAfterAKeyIsRotatedInPlaceAreAllFollowed`.
 
 ## D57 — Channels are built from rows, a credential is a reference that reaches one function, and the service refuses a role that skips the schema · *built*
 

@@ -146,3 +146,49 @@ func TestTheKeyCacheIsConfigurable(t *testing.T) {
 		t.Fatal("a zero refetch interval was accepted: it would refetch on every unknown key")
 	}
 }
+
+// T044a. A provider's webhook secret is a credential, so the service holds a reference to it and never the
+// secret; and a callback names no realm, so each reference is the realm's it is given for.
+func TestResendWebhookSecretsAreReferencesPerRealm(t *testing.T) {
+	t.Parallel()
+	kv := good()
+	kv["NOTIFY_RESEND_WEBHOOK_SECRETS"] = "env:RESEND_WEBHOOK"
+	c, err := LoadConfig(env(kv))
+	if err != nil || len(c.ResendWebhookSecrets) != 1 || c.ResendWebhookSecrets[0] != (RealmRef{Realm: "local", Ref: "env:RESEND_WEBHOOK"}) {
+		t.Fatalf("secrets = %+v, %v: a bare reference is the one realm there is's", c.ResendWebhookSecrets, err)
+	}
+	kv["NOTIFY_RESEND_WEBHOOK_SECRETS"] = "local=env:OLD,local=env:NEW"
+	if c, err = LoadConfig(env(kv)); err != nil || len(c.ResendWebhookSecrets) != 2 {
+		t.Fatalf("secrets = %+v, %v, want both: a secret is rotated by overlap", c.ResendWebhookSecrets, err)
+	}
+	if c, err = LoadConfig(env(good())); err != nil || len(c.ResendWebhookSecrets) != 0 {
+		t.Fatalf("secrets = %+v, %v, want none when none is set: the route is then not served", c.ResendWebhookSecrets, err)
+	}
+}
+
+func TestResendWebhookSecretsAreRefusedWhenTheyWouldBeWrong(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct{ value, bindings, why string }{
+		"a bare reference with two realms": {"env:BARE", "a=alpha,b=beta", "which realm is it for"},
+		"a realm nobody serves":            {"gamma=env:X", "a=alpha,b=beta", "a webhook for a realm with no engine"},
+		"a secret pasted as the reference": {"whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", "", "the secret itself where its reference belongs"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			kv := good()
+			if c.bindings != "" {
+				kv["NOTIFY_REALM_BINDINGS"] = c.bindings
+				kv["NOTIFY_RECIPIENT_JWKS"] = "alpha=https://h/a,beta=https://h/b"
+				kv["NOTIFY_OPERATOR_TOKENS"] = "alpha=env:A,beta=env:B"
+			}
+			kv["NOTIFY_RESEND_WEBHOOK_SECRETS"] = c.value
+			_, err := LoadConfig(env(kv))
+			if err == nil || !strings.Contains(err.Error(), "NOTIFY_RESEND_WEBHOOK_SECRETS") {
+				t.Fatalf("err = %v, want one that names NOTIFY_RESEND_WEBHOOK_SECRETS: %s", err, c.why)
+			}
+			if strings.Contains(err.Error(), "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw") {
+				t.Fatalf("err = %v repeats the secret", err)
+			}
+		})
+	}
+}

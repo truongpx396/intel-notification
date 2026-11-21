@@ -4,6 +4,9 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -122,6 +125,13 @@ func startServiceOf(t *testing.T, withEmail, secondRealm bool) *world {
 type serviceOpts struct {
 	email, secondRealm bool
 	natsURL            string
+	// natsReplicas is NOTIFY_INGEST_REPLICAS; empty is the default of one.
+	natsReplicas string
+	// webhookSecret and otherWebhookSecret are what Resend signs realm "local"'s and realm "other"'s webhooks
+	// with; empty serves no webhook for that realm.
+	webhookSecret, otherWebhookSecret string
+	// previousWebhookSecret is the secret realm "local" is rotating away from: still accepted, beside the new one.
+	previousWebhookSecret string
 }
 
 func startServiceWith(t *testing.T, o serviceOpts) *world {
@@ -155,20 +165,32 @@ VALUES ('local', 'email', 'resend', 0, $1::jsonb, $2)`,
 		bindings, jwksSetting = "local-producer=local,other-producer=other", "local="+jwks.URL+",other="+jwks.URL
 		operatorTokens = "local=" + write("operator", "operator-secret") + ",other=" + write("operator-other", "other-operator-secret")
 	}
+	var webhookSecrets []string
+	if o.webhookSecret != "" {
+		webhookSecrets = append(webhookSecrets, "local="+write("resend-webhook-secret", o.webhookSecret))
+	}
+	if o.previousWebhookSecret != "" {
+		webhookSecrets = append(webhookSecrets, "local="+write("resend-webhook-secret-previous", o.previousWebhookSecret))
+	}
+	if o.otherWebhookSecret != "" {
+		webhookSecrets = append(webhookSecrets, "other="+write("resend-webhook-secret-other", o.otherWebhookSecret))
+	}
 	cfg, err := LoadConfig(func(k string) string {
 		return map[string]string{
-			"NOTIFY_PG_DSN":              dsnOf(w.db.Owner),
-			"NOTIFY_REDIS_URL":           fmt.Sprintf("redis://%s/%d", redisOpt.Addr, redisOpt.DB),
-			"NOTIFY_REALM_BINDINGS":      bindings,
-			"NOTIFY_RECIPIENT_JWKS":      jwksSetting,
-			"NOTIFY_ALLOW_INSECURE_HTTP": "true",
-			"NOTIFY_HTTP_ADDR":           "127.0.0.1:0",
-			"NOTIFY_GRPC_ADDR":           "127.0.0.1:0",
-			"NOTIFY_PUBLIC_URL":          "http://notify.example.test",
-			"NOTIFY_UNSUBSCRIBE_KEYS":    "k1=" + write("unsub-key", strings.Repeat("u", 40)),
-			"NOTIFY_OPERATOR_TOKENS":     operatorTokens,
-			"NOTIFY_POLL_INTERVAL":       "50ms",
-			"NOTIFY_INGEST_NATS_URL":     o.natsURL,
+			"NOTIFY_RESEND_WEBHOOK_SECRETS": strings.Join(webhookSecrets, ","),
+			"NOTIFY_PG_DSN":                 dsnOf(w.db.Owner),
+			"NOTIFY_REDIS_URL":              fmt.Sprintf("redis://%s/%d", redisOpt.Addr, redisOpt.DB),
+			"NOTIFY_REALM_BINDINGS":         bindings,
+			"NOTIFY_RECIPIENT_JWKS":         jwksSetting,
+			"NOTIFY_ALLOW_INSECURE_HTTP":    "true",
+			"NOTIFY_HTTP_ADDR":              "127.0.0.1:0",
+			"NOTIFY_GRPC_ADDR":              "127.0.0.1:0",
+			"NOTIFY_PUBLIC_URL":             "http://notify.example.test",
+			"NOTIFY_UNSUBSCRIBE_KEYS":       "k1=" + write("unsub-key", strings.Repeat("u", 40)),
+			"NOTIFY_OPERATOR_TOKENS":        operatorTokens,
+			"NOTIFY_POLL_INTERVAL":          "50ms",
+			"NOTIFY_INGEST_NATS_URL":        o.natsURL,
+			"NOTIFY_INGEST_REPLICAS":        o.natsReplicas,
 		}[k]
 	})
 	if err != nil {
@@ -597,5 +619,229 @@ func TestTheServiceIngestsFromJetStreamInTheRealmOfTheSubject(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// T044a, NR-032, D14. The Resend webhook through the service, over real sockets: the route exists only when
+// the realm has a secret, a callback is verified before it is read, and one that verifies applies what it says
+// in the realm of the endpoint, which is the provider's own configuration and not the callback's.
+
+const webhookSecret = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw"
+
+// svixHeaders is what Resend's sender puts on a callback: the Svix id, timestamp and signature over the body.
+func svixHeaders(secret, id string, at time.Time, body string) http.Header {
+	key, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, "whsec_"))
+	if err != nil {
+		panic(err)
+	}
+	mac := hmac.New(sha256.New, key)
+	fmt.Fprintf(mac, "%s.%d.%s", id, at.Unix(), body)
+	h := http.Header{}
+	h.Set("Svix-Id", id)
+	h.Set("Svix-Timestamp", strconv.FormatInt(at.Unix(), 10))
+	h.Set("Svix-Signature", "v1,"+base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+	return h
+}
+
+// callback posts body to the service's Resend webhook with header, and returns the status code.
+func (w *world) callback(body string, header http.Header) int {
+	w.t.Helper()
+	return w.callbackAt("/webhooks/email/resend", body, header)
+}
+
+func (w *world) callbackAt(path, body string, header http.Header) int {
+	w.t.Helper()
+	req, err := http.NewRequestWithContext(w.t.Context(), http.MethodPost, "http://"+w.svc.HTTPAddr()+path, strings.NewReader(body))
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	for k, v := range header {
+		req.Header[k] = v
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if b, _ := io.ReadAll(resp.Body); len(b) != 0 && resp.StatusCode == http.StatusUnauthorized {
+		w.t.Errorf("a refused callback was answered with a body of %d bytes, want none", len(b))
+	}
+	return resp.StatusCode
+}
+
+func TestAResendBounceSuppressesTheAddressOnlyWhenItIsSigned(t *testing.T) {
+	t.Parallel()
+	w := startServiceWith(t, serviceOpts{email: true, webhookSecret: webhookSecret})
+	if failedAt, err := w.scenario(false); err != nil {
+		t.Fatalf("the scenario failed at %q: %v", failedAt, err)
+	}
+	messages := w.mail.messages()
+	if len(messages) != 1 {
+		t.Fatalf("%d messages reached the provider, want 1", len(messages))
+	}
+	hash := domain.SuppressionHash("email", "ada@example.test")
+	suppressions := func() (reasons []string) {
+		rows, err := w.db.Admin.Query(t.Context(), `SELECT reason FROM channel_suppressions WHERE realm = 'local' AND channel = 'email' AND address_hash = $1`, hash)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r string
+			if err := rows.Scan(&r); err != nil {
+				t.Fatal(err)
+			}
+			reasons = append(reasons, r)
+		}
+		return reasons
+	}
+	providerStatus := func() string {
+		var st *string
+		if err := w.db.Admin.QueryRow(t.Context(), `SELECT provider_status FROM notification_deliveries WHERE channel = 'email' AND provider_message_id = 're_1'`).Scan(&st); err != nil {
+			t.Fatal(err)
+		}
+		if st == nil {
+			return ""
+		}
+		return *st
+	}
+	bounce := `{"type":"email.bounced","data":{"email_id":"re_1","to":["ada@example.test"],"bounce":{"type":"Permanent"}}}`
+	now := time.Now()
+
+	// Unsigned, signed with another endpoint's secret, and signed a day ago: each is refused with no body, and
+	// nothing is suppressed, because a forged bounce is a denial of notification that looks like operation.
+	other := "whsec_" + base64.StdEncoding.EncodeToString([]byte("another endpoint's secret"))
+	for name, header := range map[string]http.Header{
+		"unsigned":                            nil,
+		"another secret":                      svixHeaders(other, "msg_1", now, bounce),
+		"a day old":                           svixHeaders(webhookSecret, "msg_1", now.Add(-24*time.Hour), bounce),
+		"signed over a body but sent another": svixHeaders(webhookSecret, "msg_1", now, strings.Replace(bounce, "Permanent", "Transient", 1)),
+	} {
+		if code := w.callback(bounce, header); code != http.StatusUnauthorized {
+			t.Errorf("%s: status %d, want 401", name, code)
+		}
+	}
+	if got := suppressions(); len(got) != 0 || providerStatus() != "" {
+		t.Fatalf("after callbacks that did not verify: suppressions %v and status %q, want neither", got, providerStatus())
+	}
+
+	// Signed: applied, in realm local's, and a replay of it changes nothing.
+	for i := 0; i < 2; i++ {
+		if code := w.callback(bounce, svixHeaders(webhookSecret, "msg_2", now, bounce)); code != http.StatusNoContent {
+			t.Fatalf("a signed bounce: status %d, want 204 (attempt %d)", code, i+1)
+		}
+	}
+	if got := suppressions(); len(got) != 1 || got[0] != "hard_bounce" {
+		t.Fatalf("suppressions = %v, want one hard_bounce for ada's address in realm local", got)
+	}
+	if got := providerStatus(); got != "bounced" {
+		t.Fatalf("the delivery's provider status = %q, want bounced", got)
+	}
+
+	// And the next notification to that address is not sent: the suppression is what the dispatcher reads.
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	if _, err := w.sender.Notify(ctx, domain.Notification{Tenant: wsTenant, Recipient: ada, Topic: "invoice_overdue", IdemKey: "invoice:43:overdue", Data: map[string]any{"number": "INV-43", "name": "Ada"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := eventually(20*time.Second, func() error {
+		st, err := w.sender.Status(ctx, domain.StatusRequest{Tenant: wsTenant, Recipient: ada, IdemKey: "invoice:43:overdue"})
+		if err != nil {
+			return err
+		}
+		for _, d := range st.Deliveries {
+			if d.Channel == "email" && d.State == "suppressed" {
+				return nil
+			}
+		}
+		return fmt.Errorf("deliveries = %+v, want email suppressed", st.Deliveries)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(w.mail.messages()); n != 1 {
+		t.Fatalf("%d messages reached the provider, want still 1: the bounced address must not be mailed again", n)
+	}
+
+	// A signed callback naming a message nobody sent is a 404, so the provider tries again later.
+	unknown := `{"type":"email.delivered","data":{"email_id":"re_999","to":["x@example.test"]}}`
+	if code := w.callback(unknown, svixHeaders(webhookSecret, "msg_3", now, unknown)); code != http.StatusNotFound {
+		t.Fatalf("a delivery callback for an unknown message: status %d, want 404", code)
+	}
+	// A signed body that makes no sense is the provider's to fix, not a fault.
+	garbage := `{"type":"email.bounced","data":"x"}`
+	if code := w.callback(garbage, svixHeaders(webhookSecret, "msg_4", now, garbage)); code != http.StatusBadRequest {
+		t.Fatalf("a signed body that is not an event: status %d, want 400", code)
+	}
+}
+
+func TestWithoutAWebhookSecretTheRouteIsNotServed(t *testing.T) {
+	t.Parallel()
+	w := startService(t, true)
+	body := `{"type":"email.bounced","data":{"email_id":"re_1","to":["a@example.test"],"bounce":{"type":"Permanent"}}}`
+	if code := w.callback(body, svixHeaders(webhookSecret, "msg_1", time.Now(), body)); code != http.StatusNotFound {
+		t.Fatalf("status %d, want 404: a service with no secret to verify with serves no webhook, and does not accept what it cannot check", code)
+	}
+}
+
+// Two realms in one process each have their own webhook and their own secret, and a callback's suppression is
+// written under the realm of the endpoint it arrived at, whatever it says.
+func TestEachRealmHasItsOwnResendWebhookAndSuppressesOnlyInItsOwnRealm(t *testing.T) {
+	t.Parallel()
+	const otherSecret = "whsec_" + "b3RoZXItcmVhbG1zLXdlYmhvb2stc2VjcmV0LTAxMjM0NTY3ODk="
+	w := startServiceWith(t, serviceOpts{secondRealm: true, webhookSecret: webhookSecret, otherWebhookSecret: otherSecret})
+	body := `{"type":"email.bounced","data":{"email_id":"re_nobody","to":["ada@example.test"],"bounce":{"type":"Permanent"}}}`
+	now := time.Now()
+	hash := domain.SuppressionHash("email", "ada@example.test")
+	suppressedIn := func(realm string) int {
+		var n int
+		if err := w.db.Admin.QueryRow(t.Context(), `SELECT count(*) FROM channel_suppressions WHERE realm = $1 AND channel = 'email' AND address_hash = $2`, realm, hash).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	// With two realms served there is no plain route: which realm would it be?
+	if code := w.callback(body, svixHeaders(webhookSecret, "msg_1", now, body)); code != http.StatusNotFound {
+		t.Fatalf("the plain route with two realms served: status %d, want 404", code)
+	}
+	// Another realm's secret opens nothing here.
+	if code := w.callbackAt("/webhooks/email/resend-other", body, svixHeaders(webhookSecret, "msg_2", now, body)); code != http.StatusUnauthorized {
+		t.Fatalf("realm other's route with realm local's secret: status %d, want 401", code)
+	}
+	if suppressedIn("local")+suppressedIn("other") != 0 {
+		t.Fatal("an address was suppressed by a callback that did not verify")
+	}
+	// Its own secret does: the message is nobody's yet (404, so the provider retries), but the address is dead,
+	// in the realm of the endpoint and in no other.
+	if code := w.callbackAt("/webhooks/email/resend-other", body, svixHeaders(otherSecret, "msg_3", now, body)); code != http.StatusNotFound {
+		t.Fatalf("realm other's route with its own secret: status %d, want 404 (an unknown delivery, asked to retry)", code)
+	}
+	if got, other := suppressedIn("local"), suppressedIn("other"); got != 0 || other != 1 {
+		t.Fatalf("suppressions in local = %d and in other = %d, want 0 and 1: the realm is the endpoint's", got, other)
+	}
+	if code := w.callbackAt("/webhooks/email/resend-local", body, svixHeaders(webhookSecret, "msg_4", now, body)); code != http.StatusNotFound {
+		t.Fatalf("realm local's route with its own secret: status %d, want 404", code)
+	}
+	if got, other := suppressedIn("local"), suppressedIn("other"); got != 1 || other != 1 {
+		t.Fatalf("suppressions in local = %d and in other = %d, want 1 and 1", got, other)
+	}
+}
+
+// A secret is rotated by overlap: both the new one and the one being retired verify until the old is dropped.
+func TestAResendWebhookSecretIsRotatedByOverlap(t *testing.T) {
+	t.Parallel()
+	const previous = "whsec_" + "cHJldmlvdXMtc2VjcmV0LWJlaW5nLXJldGlyZWQtMDEyMzQ1Njc="
+	w := startServiceWith(t, serviceOpts{webhookSecret: webhookSecret, previousWebhookSecret: previous})
+	// A delivery event for a message nobody sent: a 404 means it verified and was read, and a 401 that it did not.
+	body := `{"type":"email.delivered","data":{"email_id":"re_none","to":["x@example.test"]}}`
+	now := time.Now()
+	for name, secret := range map[string]string{"the new secret": webhookSecret, "the secret being retired": previous} {
+		if code := w.callback(body, svixHeaders(secret, "msg_1", now, body)); code != http.StatusNotFound {
+			t.Errorf("signed with %s: status %d, want 404 (verified)", name, code)
+		}
+	}
+	unknown := "whsec_" + base64.StdEncoding.EncodeToString([]byte("a secret nobody configured"))
+	if code := w.callback(body, svixHeaders(unknown, "msg_2", now, body)); code != http.StatusUnauthorized {
+		t.Errorf("signed with a secret nobody configured: status %d, want 401", code)
 	}
 }

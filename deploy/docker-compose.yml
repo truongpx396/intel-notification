@@ -71,6 +71,10 @@ services:
       # Local development and e2e only; production uses mTLS on /admin.
       NOTIFY_OPERATOR_TOKENS: env:NOTIFY_OPERATOR_TOKEN
       NOTIFY_OPERATOR_TOKEN: e2e-operator
+      # Resend's webhook for realm local is verified with this Svix secret (whsec_ and base64), a throwaway one for
+      # the e2e stack; a deployment references its own (D31).
+      NOTIFY_RESEND_WEBHOOK_SECRETS: env:NOTIFY_RESEND_WEBHOOK_SECRET
+      NOTIFY_RESEND_WEBHOOK_SECRET: whsec_ZTJlLXJlc2VuZC13ZWJob29rLXNlY3JldC0wMTIzNDU2Nzg5
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

@@ -28,12 +28,19 @@ func bearerToken(header string) (string, bool) {
 // way that would help forge another.
 var errBadToken = fmt.Errorf("%w: not accepted", domain.ErrInvalidToken)
 
+// keySource is what verifyWithRefetch needs of the key cache: a realm's set and its generation, and a bounded
+// fetch of it again. *Keys is one; a test is another.
+type keySource interface {
+	forGen(ctx context.Context, realm domain.Realm) (domain.KeySet, uint64, error)
+	refetchGen(ctx context.Context, realm domain.Realm) (set domain.KeySet, gen uint64, refetched bool, err error)
+}
+
 // verifyWithRefetch runs verify against realm's keys and, when the token names a key id the set does not hold
 // or does not verify under the one it names, fetches the set once more (bounded by Keys) and runs it again:
 // the host may have added a key, or replaced one under the same id.
-func verifyWithRefetch[T any](ctx context.Context, keys *Keys, realm domain.Realm, verify func(domain.KeySet) (T, error)) (T, error) {
+func verifyWithRefetch[T any](ctx context.Context, keys keySource, realm domain.Realm, verify func(domain.KeySet) (T, error)) (T, error) {
 	var zero T
-	set, err := keys.For(ctx, realm)
+	set, gen, err := keys.forGen(ctx, realm)
 	if err != nil {
 		return zero, err
 	}
@@ -41,8 +48,15 @@ func verifyWithRefetch[T any](ctx context.Context, keys *Keys, realm domain.Real
 	if !errors.Is(err, domain.ErrUnknownKeyID) && !errors.Is(err, domain.ErrBadSignature) {
 		return got, err
 	}
-	set, refetched, ferr := keys.Refetch(ctx, realm)
-	if !refetched || ferr != nil {
+	set, now, refetched, ferr := keys.refetchGen(ctx, realm)
+	if ferr != nil {
+		return zero, err
+	}
+	// Only one request may fetch in an interval, and when several arrive together after a rotation the
+	// others are throttled. A throttled one that read the set before the fetch still has a try left: the set
+	// is newer than the one it failed with. One that finds the same set has nothing new to try, so a forged
+	// token costs one verification and no fetch.
+	if !refetched && now == gen {
 		return zero, err
 	}
 	return verify(set)
