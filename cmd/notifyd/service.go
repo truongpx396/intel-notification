@@ -462,10 +462,11 @@ func (s *Service) surfaces(ctx context.Context, pg *postgres.All, channels ports
 }
 
 func (s *Service) keyOptions() []auth.KeysOption {
+	opts := []auth.KeysOption{auth.WithTTL(s.cfg.JWKSTTL), auth.WithMinRefetch(s.cfg.JWKSMinRefetch)}
 	if s.cfg.AllowInsecureHTTP {
-		return []auth.KeysOption{auth.AllowInsecureHTTP()}
+		opts = append(opts, auth.AllowInsecureHTTP())
 	}
-	return nil
+	return opts
 }
 
 // grpcCredentials is the server's TLS, or nil for a plaintext listener on an internal network. With a
