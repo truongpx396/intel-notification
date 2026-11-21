@@ -97,8 +97,9 @@ func (k jwk) publicKey() any {
 		if k.Crv != "P-256" || errX != nil || errY != nil || len(x) != 32 || len(y) != 32 {
 			return nil
 		}
-		pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-		if _, err := pub.ECDH(); err != nil { // refuses a point that is not on the curve
+		// The uncompressed point, which the standard library refuses when it is not on the curve.
+		pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, x...), y...))
+		if err != nil {
 			return nil
 		}
 		return pub
@@ -324,7 +325,7 @@ func recipientClaims(raw []byte, p TokenPolicy) (RecipientClaims, error) {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return RecipientClaims{}, invalidToken("the claims are not a JSON object of the expected shape")
 	}
-	exp, err := c.registered.check(p)
+	exp, err := c.check(p)
 	if err != nil {
 		return RecipientClaims{}, err
 	}

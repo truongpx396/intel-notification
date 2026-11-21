@@ -34,10 +34,11 @@ func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
 // JWK is the signer's public key as a JWKS entry.
 func (s *TokenSigner) JWK() map[string]any {
-	return map[string]any{
-		"kty": "EC", "crv": "P-256", "kid": s.Kid, "use": "sig", "alg": "ES256",
-		"x": b64(s.key.X.FillBytes(make([]byte, 32))), "y": b64(s.key.Y.FillBytes(make([]byte, 32))),
+	point, err := s.key.PublicKey.Bytes() // 0x04 || X || Y
+	if err != nil {
+		panic("notifytest: " + err.Error())
 	}
+	return map[string]any{"kty": "EC", "crv": "P-256", "kid": s.Kid, "use": "sig", "alg": "ES256", "x": b64(point[1:33]), "y": b64(point[33:65])}
 }
 
 // JWKS is a JWKS document holding the public keys of signers.

@@ -6,16 +6,10 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"google.golang.org/grpc"
-
-	"github.com/truongpx396/intel-notification/adapters/driving/grpcclient"
-	"github.com/truongpx396/intel-notification/api/notifyv1"
 	"github.com/truongpx396/intel-notification/app"
-	"github.com/truongpx396/intel-notification/domain"
 	"github.com/truongpx396/intel-notification/internal/notifytest"
 )
 
@@ -24,38 +18,13 @@ import (
 // pages before it stand, and the broadcast resumes at the page and not at the start, with every recipient
 // notified once.
 
-// hostDirectory is a host's Directory service, answering from the Env's audiences, and stalling on the
-// cursor it is told to, as a host that hangs on one query would.
-type hostDirectory struct {
-	notifyv1.UnimplementedDirectoryServer
-	e       *notifytest.Env
-	stallAt atomic.Value // string: the cursor to hang on; "-" for none
-}
-
-func (h *hostDirectory) ResolveAudience(ctx context.Context, req *notifyv1.ResolveAudienceRequest) (*notifyv1.ResolveAudienceResponse, error) {
-	if stall, _ := h.stallAt.Load().(string); stall == req.GetCursor() {
-		<-ctx.Done()
-		return nil, ctx.Err()
-	}
-	got, next, err := h.e.Audiences.Resolve(ctx, notifytest.Realm, domain.Tenant{Kind: req.GetTenant().GetKind(), ID: req.GetTenant().GetId()}, req.GetAudience(), req.GetCursor())
-	if err != nil {
-		return nil, err
-	}
-	resp := &notifyv1.ResolveAudienceResponse{NextCursor: next}
-	for _, r := range got {
-		resp.Recipients = append(resp.Recipients, &notifyv1.Recipient{Kind: r.Kind, Id: r.ID})
-	}
-	return resp, nil
-}
-
 func TestADirectoryTimeoutFailsThePageAndTheBroadcastResumesAtIt(t *testing.T) {
 	t.Parallel()
 	e, rs := broadcastEnv(t, 5)
-	host := &hostDirectory{e: e}
-	host.stallAt.Store("2") // the host hangs on the second page
-	conn := notifytest.NewBufconn(t, func(reg grpc.ServiceRegistrar) { notifyv1.RegisterDirectoryServer(reg, host) })
+	host, directory := notifytest.NewHostDirectory(t, e, 50*time.Millisecond)
+	host.Stall("2") // the host hangs on the second page
 	deps := e.BroadcastDeps()
-	deps.Audience = grpcclient.NewDirectory(map[domain.Realm]grpc.ClientConnInterface{notifytest.Realm: conn}, grpcclient.WithDirectoryTimeout(50*time.Millisecond))
+	deps.Audience = directory
 	worker, err := app.NewBroadcastExpander(e.Config, deps)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +42,7 @@ func TestADirectoryTimeoutFailsThePageAndTheBroadcastResumesAtIt(t *testing.T) {
 		t.Fatalf("broadcast row = %+v, want pending at cursor 2 with 2 fanned: it resumes at the page, not at the start", got)
 	}
 
-	host.stallAt.Store("-") // the host recovers; the dead pass's lease lapses
+	host.Stall("-") // the host recovers; the dead pass's lease lapses
 	lapseBroadcasts(t, e)
 	if pages, err := worker.Expand(t.Context()); err != nil || pages != 2 {
 		t.Fatalf("the next pass: Expand = %d, %v, want the other 2 pages", pages, err)

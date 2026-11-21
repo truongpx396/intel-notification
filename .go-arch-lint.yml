@@ -39,7 +39,7 @@ deps:
   ports:      { mayDependOn: [ domain ] }
   driven:     { mayDependOn: [ domain, ports, migrations, driven ] }   # implements ports; NOT app. Itself: the provider manager builds on the failover channel
   testing:    { mayDependOn: [ migrations ] }
-  notifytest: { mayDependOn: [ config, domain, ports, migrations, driven, testing, app ] }   # Env wires the PostgreSQL adapter over pgtest and the use-cases over both
+  notifytest: { mayDependOn: [ config, domain, ports, migrations, driven, testing, app, driving, api ] }   # Env wires the PostgreSQL adapter over pgtest and the use-cases over both; HostDirectory is a host's Directory over gRPC, so a test in the core can reach the client without importing grpc
   app:        { mayDependOn: [ config, domain, ports ] }       # app.NewNotifier takes a Config
   driving:    { mayDependOn: [ domain, ports, api, driving ] }     # implements and calls ports; NOT app, NOT driven. Itself: the transports share driving/wire
   # The generated code imports nothing of this module. The deep scan (dependency injections) reads the gRPC
