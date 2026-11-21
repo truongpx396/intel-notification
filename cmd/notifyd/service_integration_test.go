@@ -125,6 +125,8 @@ func startServiceOf(t *testing.T, withEmail, secondRealm bool) *world {
 type serviceOpts struct {
 	email, secondRealm bool
 	natsURL            string
+	// natsReplicas is NOTIFY_INGEST_REPLICAS; empty is the default of one.
+	natsReplicas string
 	// webhookSecret and otherWebhookSecret are what Resend signs realm "local"'s and realm "other"'s webhooks
 	// with; empty serves no webhook for that realm.
 	webhookSecret, otherWebhookSecret string
