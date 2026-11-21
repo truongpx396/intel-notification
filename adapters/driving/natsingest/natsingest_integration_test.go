@@ -227,15 +227,19 @@ func TestOverARealJetStreamAMessageDeliveredTwiceNotifiesOnceAndPoisonDoesNotBlo
 	if n := w.count(t, `SELECT count(*) FROM notifications WHERE realm = $1`, string(ingestRealm)); n != 2 {
 		t.Fatalf("%d notifications after redeliveries, want exactly 2 (k1 and k2, once each)", n)
 	}
-	msgs, err := dlq.Fetch(1, jetstream.FetchMaxWait(5*time.Second))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// The poison is parked first and told after, so the DLQ message is waited for until a deadline and not for
+	// a fixed time: a loaded machine told it late once, and a regression must fail and not hang.
 	var told int
-	for msg := range msgs.Messages() {
-		told++
-		if msg.Subject() != natsingest.DLQPrefix+"."+string(ingestRealm) {
-			t.Errorf("the DLQ message is on %q, want the realm's DLQ subject", msg.Subject())
+	for told == 0 && time.Now().Before(deadline.Add(60*time.Second)) {
+		msgs, err := dlq.Fetch(1, jetstream.FetchMaxWait(2*time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for msg := range msgs.Messages() {
+			told++
+			if msg.Subject() != natsingest.DLQPrefix+"."+string(ingestRealm) {
+				t.Errorf("the DLQ message is on %q, want the realm's DLQ subject", msg.Subject())
+			}
 		}
 	}
 	if told != 1 {
