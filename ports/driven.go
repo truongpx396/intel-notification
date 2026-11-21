@@ -411,6 +411,22 @@ type Subscription interface {
 	Close() error
 }
 
+// ProviderStore reads which provider backs each channel: the rows of channel_providers a deployment has
+// enabled, across every realm it serves (D29, D31). It is configuration an operator writes, and what the
+// channel registry of service mode is built from.
+type ProviderStore interface {
+	// Providers lists every enabled provider, ordered by realm, tenant, channel and priority. A row's
+	// credential is its reference and never the credential.
+	Providers(ctx context.Context) ([]domain.ChannelProvider, error)
+}
+
+// SecretResolver turns a secret reference (env:NAME, file:/run/secrets/key, a secret-manager URI) into
+// the credential it names. An error never carries the credential, nor anything read from where it lives
+// beyond what the reference itself says.
+type SecretResolver interface {
+	Resolve(ctx context.Context, ref string) (string, error)
+}
+
 // Channel is one delivery target. Adding one is implementing this and
 // registering it, never an edit to fan-out, persistence, preferences,
 // deduplication or the schema (NR-016).

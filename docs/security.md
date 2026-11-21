@@ -51,8 +51,20 @@ it is derived from the authenticated producer principal through `NOTIFY_REALM_BI
 cannot name a realm, so it cannot write into another product's key space or read another product's
 status.
 
-In service mode, producers authenticate with mTLS or a signed token. The service is a capability to send
-messages as your product, so an unauthenticated producer path is an open relay.
+In service mode, producers authenticate with mTLS or a signed token ([D56](../specs/001-notification-core/design-decisions.md#d56)).
+With mTLS the principal is the first URI SAN (else the first DNS SAN) of a client certificate the TLS layer
+verified: a certificate that was presented and not verified is no principal. A principal with no
+binding is refused before any handler runs; a caller is told only that it is not bound, and a credential that
+fails is told only that it was not accepted, never why. The service is a capability to send messages as your
+product, so an unauthenticated producer path is an open relay.
+
+## Credentials of providers
+
+`channel_providers.secret_ref` is a reference (`env:`, `file:`, or a secret manager's URI) and the schema refuses a
+value with no scheme. The service resolves it when a channel is built and hands the result to the provider's
+constructor and to nothing else: it appears in no report, error, log or delivery result, and an error a provider's
+own constructor writes with the key in it is redacted. A reference that cannot be resolved makes that provider
+unavailable, with the reference and the reason, and does not stop the others.
 
 ## Recipients in service mode
 

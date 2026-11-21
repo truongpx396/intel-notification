@@ -215,3 +215,63 @@ func TestConcurrentActivationsAreTakenInTurn(t *testing.T) {
 		t.Fatalf("%d versions are active, %v, want exactly 1", active, err)
 	}
 }
+
+// D29, D31. The providers a deployment has configured, in the order a channel tries them, and never a
+// credential: a row holds a reference to one.
+func TestProvidersAreTheEnabledRowsInTheOrderTheyAreTried(t *testing.T) {
+	t.Parallel()
+	db := pgtest.New(t)
+	insert := func(realm, tk, tid, channel, provider string, priority int, config, secretRef string, enabled bool) {
+		t.Helper()
+		if _, err := db.Admin.Exec(t.Context(), `
+INSERT INTO channel_providers (realm, tenant_kind, tenant_id, channel, provider, priority, config, secret_ref, enabled)
+VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)`, realm, tk, tid, channel, provider, priority, config, secretRef, enabled); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// smtp is tried first although "resend" sorts first: priority orders them, not the name.
+	insert("alpha", "", "", "email", "smtp", 10, `{"addr":"relay.internal:587","from":"n@x.test"}`, "", true)
+	insert("alpha", "", "", "email", "resend", 20, `{"from":"n@x.test"}`, "env:RESEND_KEY", true)
+	insert("alpha", "workspace", "w1", "email", "resend", 0, `{}`, "file:/run/secrets/w1", true)
+	insert("alpha", "", "", "email", "ses", 5, `{}`, "env:SES", false) // disabled: nobody uses it
+	insert("beta", "", "", "webhook", "webhook", 0, `{}`, "env:HOOK", true)
+
+	got, err := postgres.NewProviders(db.Owner).Providers(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	type row struct {
+		realm, tenant, channel, provider, ref string
+		priority                              int
+	}
+	var seen []row
+	for _, p := range got {
+		seen = append(seen, row{string(p.Realm), p.Tenant.ID, string(p.Channel), p.Provider, p.SecretRef, p.Priority})
+	}
+	want := []row{
+		{"alpha", "", "email", "smtp", "", 10},
+		{"alpha", "", "email", "resend", "env:RESEND_KEY", 20},
+		{"alpha", "w1", "email", "resend", "file:/run/secrets/w1", 0},
+		{"beta", "", "webhook", "webhook", "env:HOOK", 0},
+	}
+	if !slices.Equal(seen, want) {
+		t.Fatalf("Providers = %+v, want %+v: enabled rows only, each scope's in priority order, a reference and never a credential", seen, want)
+	}
+	if got[0].Config["addr"] != "relay.internal:587" || got[1].Config["from"] != "n@x.test" {
+		t.Fatalf("config = %v and %v, want each row's own settings", got[0].Config, got[1].Config)
+	}
+	if got[2].Tenant != (domain.Tenant{Kind: "workspace", ID: "w1"}) || got[0].Tenant != (domain.Tenant{}) {
+		t.Fatalf("tenants = %+v and %+v, want the realm-wide row's empty and the tenant's own", got[0].Tenant, got[2].Tenant)
+	}
+}
+
+// The schema is what keeps a credential out of the table: a bare value is refused, so it cannot be read
+// back by anything.
+func TestAProviderRowCannotHoldABareCredential(t *testing.T) {
+	t.Parallel()
+	db := pgtest.New(t)
+	_, err := db.Owner.Exec(t.Context(), `INSERT INTO channel_providers (realm, channel, provider, secret_ref) VALUES ('alpha', 'email', 'resend', 're_live_AbCdEf123456')`)
+	if err == nil {
+		t.Fatal("a row whose secret_ref is a bare key was stored, want the schema to refuse it")
+	}
+}

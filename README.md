@@ -596,7 +596,7 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | [specs/001-notification-core/](specs/001-notification-core/) | the normative specification |
 | [constitution](.specify/memory/constitution.md) | the principles every decision is held to; first in the order of authority |
 | [contracts/notification-ports.md](specs/001-notification-core/contracts/notification-ports.md) | every port, the 16 invariants, the dispatcher algorithm, contract tests, the gRPC surface |
-| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 55 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D55 from building the stages |
+| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 57 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D57 from building the stages |
 | [data-model.md](specs/001-notification-core/data-model.md) | tables, keys, RLS, state transitions, retention |
 | [plan.md](specs/001-notification-core/plan.md) | build order and the capacity model |
 | [tasks.md](specs/001-notification-core/tasks.md) | the task list, how a task is worked, and traceability |

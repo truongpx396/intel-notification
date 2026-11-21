@@ -330,6 +330,10 @@ var refusals = []struct {
 	{domain.ErrUnknownTopic, codes.InvalidArgument, ReasonUnknownTopic},
 	{domain.ErrTooManyRecipients, codes.InvalidArgument, ReasonTooManyRecipients},
 	{domain.ErrAudienceUnsupported, codes.FailedPrecondition, ReasonAudienceUnsupported},
+	{domain.ErrUnknownChannel, codes.InvalidArgument, ReasonUnknownChannel},
+	{domain.ErrInvalidTemplate, codes.InvalidArgument, ReasonInvalidTemplate},
+	{domain.ErrUnknownTemplate, codes.NotFound, ReasonUnknownTemplate},
+	{domain.ErrPreferenceLocked, codes.FailedPrecondition, ReasonPreferenceLocked},
 }
 
 // Reject is a status of code with the reason a producer reads beside it.
