@@ -1,8 +1,8 @@
 <div align="center">
 
-**Multi-Channel Notification Engine**
-
 # 🔔 Intel Notification
+
+**Multi-Channel Notification Engine**
 
 ### Persist once, fan out everywhere, deliver exactly once — and prove it never told the wrong person
 
