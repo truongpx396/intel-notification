@@ -2,8 +2,6 @@ package email_test
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -37,21 +35,6 @@ const (
 )
 
 var svixNow = time.Unix(1614265330, 0).UTC()
-
-// signedAs is what a Svix sender puts on a request for body, with secret, id and timestamp.
-func signedAs(secret, id string, ts time.Time, body string) map[string][]string {
-	key, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, "whsec_"))
-	if err != nil {
-		panic(err)
-	}
-	mac := hmac.New(sha256.New, key)
-	fmt.Fprintf(mac, "%s.%d.%s", id, ts.Unix(), body)
-	return map[string][]string{
-		"Svix-Id":        {id},
-		"Svix-Timestamp": {strconv.FormatInt(ts.Unix(), 10)},
-		"Svix-Signature": {"v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil))},
-	}
-}
 
 func hdr(kv ...string) map[string][]string {
 	h := http.Header{}
