@@ -40,6 +40,10 @@ func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, domain.ErrUnknownDelivery):
 		// The callback can beat the delivery's own record. A non-2xx makes the provider try again.
 		w.WriteHeader(http.StatusNotFound)
+	case isValidation(err):
+		// It verified, so it is the provider's; a body its decoder cannot read is the provider's to fix, and is
+		// not a fault of this service to report.
+		w.WriteHeader(http.StatusBadRequest)
 	default:
 		s.onError(err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -48,3 +52,8 @@ func (s *server) webhook(w http.ResponseWriter, r *http.Request) {
 
 // unauthorizedEmpty is a 401 with no body and no challenge: a provider is not a user agent.
 func unauthorizedEmpty(w http.ResponseWriter) { w.WriteHeader(http.StatusUnauthorized) }
+
+func isValidation(err error) bool {
+	var bad *domain.ValidationError
+	return errors.As(err, &bad)
+}
