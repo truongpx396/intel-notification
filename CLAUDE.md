@@ -108,6 +108,9 @@ Test-driven, as defined in [tasks.md](specs/001-notification-core/tasks.md#how-a
 - Assert each guarantee at the lowest layer that can hold it ([docs/testing.md](docs/testing.md)).
 - Task IDs are stable; never renumber, new tasks take an `a` suffix.
 - Work on a branch (`feat/`, `fix/`, `test/`, `docs/`, `perf/`) and open a PR into `main`.
+- Open findings from the engineering review are a backlog in
+  [docs/reviews/2026-11-21-engineering-review.md](docs/reviews/2026-11-21-engineering-review.md). Read a
+  finding's whole entry (and whether it needs a decision first) before fixing it, and tick its row in the PR.
 
 ## Things that are easy to get wrong
 
