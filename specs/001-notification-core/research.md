@@ -2,7 +2,7 @@
 
 Carried from the originating product's `research.md`, sliced to the notification-relevant
 sections and kept with its real commit lineage — `git log --follow` on this file reaches back to
-that project's `make plan`. See [PROVENANCE.md](../../PROVENANCE.md).
+that project's `make plan`.
 
 Section numbers are the originating document's, kept so the cross-references between them still
 resolve. The sections here are the ones the notification design rests on: §23 is the transactional

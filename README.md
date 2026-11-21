@@ -503,8 +503,7 @@ Run `make help` for the live list.
 ├── design-system/       reference inbox and preferences UI a host builds on the REST contract
 ├── .specify/            the constitution
 ├── .github/workflows/   ci.yml, provider.yml
-├── ROADMAP.md           scope, phases, and when to use something else
-└── PROVENANCE.md        where this came from and what changed in the lift and the review
+└── ROADMAP.md           scope, phases, and when to use something else
 ```
 
 ---
@@ -591,7 +590,6 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | [docs/security.md](docs/security.md) | isolation, the live stream, producer and recipient auth, personal data |
 | [docs/testing.md](docs/testing.md) | the test layers and the conventions every new test follows |
 | [docs/mutations.md](docs/mutations.md) | the mutation ledger: each guarantee, the break that proves its test |
-| [PROVENANCE.md](PROVENANCE.md) | where this came from and what changed in the lift and the review |
 
 ---
 

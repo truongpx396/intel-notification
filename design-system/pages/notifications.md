@@ -6,7 +6,7 @@
 > delivery-preference control surface. Covers NR-001, NR-002, NR-008, NR-011, NR-024.
 >
 > Carried from the product this engine was extracted from, where it was a page override
-> in that product's design system; see [PROVENANCE.md](../../PROVENANCE.md).
+> in that product's design system.
 >
 > **The topic list below is that product's**, kept deliberately as a worked example
 > rather than genericized into nothing. Your topics will differ; the structure — a bell
