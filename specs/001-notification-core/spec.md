@@ -5,9 +5,8 @@
 **Decisions**: [design-decisions.md](design-decisions.md) · **Build order**: [tasks.md](tasks.md)
 
 This specification describes the engine as a product. Requirements carry `NR-0NN` ids and success
-criteria `NS-0NN`; the mapping from the originating project's `FR-032`–`FR-039` / `SC-011`–`SC-013`
-is recorded in [PROVENANCE.md](../../PROVENANCE.md). NR-027 onward, and the amended wording of
-several earlier requirements, come from the architecture review recorded as D16–D37.
+criteria `NS-0NN`. NR-027 onward, and the amended wording of several earlier requirements, come
+from the architecture review recorded as D16–D37.
 
 ---
 

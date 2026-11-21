@@ -5,7 +5,6 @@ paths:
   - ".specify/**"
   - "README.md"
   - "ROADMAP.md"
-  - "PROVENANCE.md"
   - "migrations/README.md"
 ---
 
