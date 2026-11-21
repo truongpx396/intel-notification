@@ -190,6 +190,7 @@ VALUES ('local', 'email', 'resend', 0, $1::jsonb, $2)`,
 			"NOTIFY_OPERATOR_TOKENS":        operatorTokens,
 			"NOTIFY_POLL_INTERVAL":          "50ms",
 			"NOTIFY_INGEST_NATS_URL":        o.natsURL,
+			"NOTIFY_INGEST_REPLICAS":        o.natsReplicas,
 		}[k]
 	})
 	if err != nil {
