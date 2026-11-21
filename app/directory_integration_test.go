@@ -21,7 +21,10 @@ import (
 func TestADirectoryTimeoutFailsThePageAndTheBroadcastResumesAtIt(t *testing.T) {
 	t.Parallel()
 	e, rs := broadcastEnv(t, 5)
-	host, directory := notifytest.NewHostDirectory(t, e, 250*time.Millisecond)
+	// The timeout is what the hung page costs, and it must be long enough that a healthy first page on a loaded
+	// runner (the race detector, PostgreSQL and many tests at once) is not mistaken for a host that did not
+	// answer: 250 ms was exceeded there once, on PostgreSQL 17's job, by the first page.
+	host, directory := notifytest.NewHostDirectory(t, e, 3*time.Second)
 	host.Stall("2") // the host hangs on the second page
 	deps := e.BroadcastDeps()
 	deps.Audience = directory
