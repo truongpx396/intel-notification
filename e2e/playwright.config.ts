@@ -37,7 +37,10 @@ export default defineConfig({
   webServer: external
     ? undefined
     : {
-        command: 'docker compose -f ../deploy/docker-compose.yml --profile e2e up --build --wait',
+        // `up --wait` returns when the stack is healthy, and Playwright treats a webServer command that exits as a
+        // server that died if it has not yet seen the URL answer: a race that was lost once on GitHub's runners. So
+        // the command stays alive after the stack is up, and Playwright ends it when the run is over.
+        command: 'docker compose -f ../deploy/docker-compose.yml --profile e2e up --build --wait && exec tail -f /dev/null',
         url: `${baseURL}/readyz`,
         reuseExistingServer: !ci,
         timeout: 240_000,
