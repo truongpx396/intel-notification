@@ -15,7 +15,7 @@ interface StreamEvent {
 // into window.__events. EventSource cannot set headers, so the token travels as
 // a query parameter, which the relay accepts only on this route.
 async function openStream(page: Page, id: Identity): Promise<void> {
-  await page.goto('about:blank');
+  await page.goto('/healthz'); // the relay's own origin: an EventSource from another origin would need CORS, which the service does not offer
   await page.evaluate(
     ({ base, token }) => {
       const events: StreamEvent[] = [];
@@ -32,8 +32,7 @@ async function openStream(page: Page, id: Identity): Promise<void> {
 const events = (page: Page) =>
   page.evaluate(() => (window as unknown as { __events: StreamEvent[] }).__events);
 
-// Pending: enable when the SSE relay (T044) and service mode (T049) exist.
-test.describe.fixme('live stream isolation', () => {
+test.describe('live stream isolation', () => {
   test('the same recipient id in two tenants each sees only its own stream', async ({ browser, request, recipients }) => {
     const w1 = recipients.tenant('w1');
     const w2 = recipients.tenant('w2');
