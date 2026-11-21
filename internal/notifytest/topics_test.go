@@ -134,3 +134,13 @@ func TestTopicsListIsSortedAndScopedToARealm(t *testing.T) {
 		t.Errorf("List(empty) = %v, want none", none)
 	}
 }
+
+// T048: the in-memory registry runs the table the PostgreSQL one runs, so neither can drift from
+// what the other decided where the port leaves room.
+func TestTopicsFakeRunsTheRegistryContract(t *testing.T) {
+	t.Parallel()
+	TopicRegistryContract(t, func(*testing.T) TopicsWorld {
+		topics := NewTopics()
+		return TopicsWorld{Registry: topics, Writer: topics}
+	})
+}

@@ -318,3 +318,52 @@ func TestNotificationIdentity(t *testing.T) {
 		t.Fatalf("Identity(other) = %+v: the realm must come from the argument", other)
 	}
 }
+
+// NR-017. A registration is refused for the same reasons wherever it is written.
+func TestValidateTopicRegistration(t *testing.T) {
+	t.Parallel()
+	ok := TopicDef{DefaultChannels: []ChannelKind{"in_app"}, DefaultPriority: PriorityInfo}
+	cases := []struct {
+		name  string
+		realm Realm
+		topic Topic
+		def   TopicDef
+		bad   []string // the fields a problem must name
+	}{
+		{"valid", "aisat", "invoice", ok, nil},
+		{"no channels is a topic that only reaches the inbox", "aisat", "invoice", TopicDef{DefaultPriority: PriorityInfo}, nil},
+		{"no realm", "", "invoice", ok, []string{"Realm"}},
+		{"a realm that is not a realm", "Not A Realm", "invoice", ok, []string{"Realm"}},
+		{"no topic", "aisat", "", ok, []string{"Topic"}},
+		{"a topic with a newline", "aisat", "a\nb", ok, []string{"Topic"}},
+		{"a topic too long", "aisat", Topic(strings.Repeat("a", MaxTopicBytes+1)), ok, []string{"Topic"}},
+		{"a topic of the longest length", "aisat", Topic(strings.Repeat("a", MaxTopicBytes)), ok, nil},
+		{"a definition that does not validate", "aisat", "invoice", TopicDef{DefaultPriority: "urgent"}, []string{"DefaultPriority"}},
+		{"everything wrong is named at once", "", "", TopicDef{DefaultPriority: "urgent"}, []string{"Realm", "Topic", "DefaultPriority"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateTopicRegistration(tc.realm, tc.topic, tc.def)
+			if len(tc.bad) == 0 {
+				if err != nil {
+					t.Fatalf("ValidateTopicRegistration = %v, want nil", err)
+				}
+				return
+			}
+			var v *ValidationError
+			if !errors.As(err, &v) {
+				t.Fatalf("ValidateTopicRegistration = %v, want a *ValidationError naming %v", err, tc.bad)
+			}
+			named := map[string]bool{}
+			for _, p := range v.Problems {
+				named[p.Field] = true
+			}
+			for _, f := range tc.bad {
+				if !named[f] {
+					t.Errorf("no problem names %s: %v", f, v.Problems)
+				}
+			}
+		})
+	}
+}

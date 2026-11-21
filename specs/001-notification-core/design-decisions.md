@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D53. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D55. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -1555,6 +1555,36 @@ and the handler tables in `httpapi`, `grpcserver`, `grpcclient` and `wire`. **No
 and its suppression policy (T044a), the operator reads (T044b), and `cmd/notifyd`; so `make e2e` still has no service.
 
 ---
+
+## D55 — A template is code a producer wrote, so its function map is closed and it is refused when it is saved · *built*
+
+**Decision.** Service mode stores templates as data (D31), and a template is Go `text/template` text that the
+engine runs. What it may call is a closed list: `upper`, `lower`, `title`, `trim`, `join`, `default`, `truncate`,
+and the builtins that compute over their arguments (`and`, `or`, `not`, `eq` and the comparisons, `len`, `index`,
+`slice`, `print`, `printf`, `println`, `html`, `urlquery`, `js`). `call` is not one of them, because it runs a
+function the data carries; `printf` is allowed only with a format written in the template whose widths and
+precisions are short literals. A template is parsed against that list when it is **saved** (`PutTemplate`), and
+the structured data's strings are checked as the templates they are; a refused template stores nothing and takes
+no version number. At render, a variable the producer did not send is an error and not `<no value>`, and the
+output is bounded at 256 KiB. A version is immutable and is activated by an explicit call, in one transaction
+that locks the template's versions, so a render finds the old version or the new one and never neither. The
+locale ladder (tag, language, default) is walked first, and at each rung a tenant's own template beats the
+realm-wide one, so a recipient reads their language before they see a tenant's branding in another.
+
+**Alternative.** A rich function library (the usual Sprig set), and errors found when a message is sent.
+
+**What goes wrong without it.** Sprig's `env`, `readFile` and `exec` family read the service's environment and
+file system, which is where its credentials are, into an email that goes to a stranger. A template that fails
+when it is sent fails five times, backs off and dead-letters, hours after the producer who saved it has gone
+home, and the notification it was for is lost; a `{{ .name }}` with no `name` in the data becomes an email that
+says `Dear <no value>`. A `printf "%999999999d"` allocates a gigabyte before anything can stop it. An edit
+that applies the moment it is stored changes a delivery already being retried half-way. None of this is a sandbox
+against a hostile author: producers are authenticated and bound to a realm, and these rules bound mistakes.
+
+Held by `TestCheckTemplateRefusesAFunctionOutsideTheMap`, `TestCheckTemplateRefusesWhatTheBuiltinsWouldAllow`,
+`TestExecuteTemplateRefusesAMissingKey`, `TestExecuteTemplateBoundsItsOutput`, and, against the fake and the
+PostgreSQL adapter alike, `TemplateRendererContract` (the version, tenant and locale cases) and
+`TestActivationNeverLeavesAWindowWithNoActiveVersion`, `TestConcurrentActivationsAreTakenInTurn`.
 
 ## Open decisions
 

@@ -57,6 +57,10 @@ var (
 	// tenant locked (D30). It is refused with its reason and never ignored, so a settings screen cannot
 	// show a switch that does nothing.
 	ErrPreferenceLocked = errors.New("notify: this preference cannot be changed")
+	// ErrUnknownTemplate is returned when a template version is activated that nobody stored in the realm:
+	// a ref, channel, locale, tenant or version number that names no row. A producer fixes the call, so it
+	// says which of them it was (D55).
+	ErrUnknownTemplate = errors.New("notify: no such template version")
 	// ErrPermanent is wrapped by a driven port to say a fault is one no retry can fix:
 	// a Redis that refuses the command for this user, or does not have it. A channel
 	// that meets it reports Rejected rather than Retry, so the delivery is dead-lettered

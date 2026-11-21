@@ -1,9 +1,12 @@
 package domain
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // The three priorities. A critical notification ignores quiet hours (D9) and is
@@ -163,4 +166,44 @@ func (t TopicDef) EffectivePriority(p Priority) Priority {
 // unset priority on a topic that defaults to critical is critical.
 func (t TopicDef) Digestible(p Priority) bool {
 	return !t.Essential && t.EffectivePriority(p) != PriorityCritical
+}
+
+// MaxTopicBytes is the longest topic name a registration accepts.
+const MaxTopicBytes = 128
+
+// ValidateTopicRegistration reports every rule a registration of topic in realm breaks, as a
+// *ValidationError, or nil: a realm that is no realm, a name that is empty, too long, not text or
+// holding a control character, and a definition that does not validate (NR-017). Every TopicWriter calls
+// it, so a topic registered through the fake and through the table is refused for the same reasons.
+func ValidateTopicRegistration(realm Realm, topic Topic, def TopicDef) error {
+	var v ValidationError
+	if err := realm.Validate(); err != nil {
+		v.add("Realm", err.Error(), nil)
+	}
+	switch {
+	case topic == "":
+		v.add("Topic", "is required", nil)
+	case len(topic) > MaxTopicBytes:
+		v.add("Topic", fmt.Sprintf("is %d bytes, the limit is %d", len(topic), MaxTopicBytes), nil)
+	case !validText(string(topic)):
+		v.add("Topic", "must be text with no control character", nil)
+	}
+	var defErr *ValidationError
+	if errors.As(def.Validate(), &defErr) {
+		v.Problems = append(v.Problems, defErr.Problems...)
+	}
+	return v.err()
+}
+
+// validText reports whether s is valid UTF-8 with no control character.
+func validText(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }

@@ -42,10 +42,11 @@ var (
 
 // settings are what every store in this package is built with.
 type settings struct {
-	clock      ports.Clock
-	ids        ports.IDSource
-	notify     bool
-	retireLock time.Duration
+	clock         ports.Clock
+	ids           ports.IDSource
+	notify        bool
+	retireLock    time.Duration
+	defaultLocale string
 }
 
 // Option configures a store of this package.
@@ -75,6 +76,12 @@ func WithNotify() Option {
 	return func(s *settings) { s.notify = true }
 }
 
+// WithDefaultLocale sets where the template renderer's locale ladder ends: the tag, its language, then
+// this (Config.DefaultLocale). The default is "en".
+func WithDefaultLocale(locale string) Option {
+	return func(s *settings) { s.defaultLocale = locale }
+}
+
 // defaultRetireLockTimeout is how long RetirePartitions waits for the lock a drop needs.
 const defaultRetireLockTimeout = 5 * time.Second
 
@@ -87,7 +94,7 @@ func WithRetireLockTimeout(d time.Duration) Option {
 }
 
 func newSettings(opts []Option) settings {
-	s := settings{clock: systemClock{}, retireLock: defaultRetireLockTimeout}
+	s := settings{clock: systemClock{}, retireLock: defaultRetireLockTimeout, defaultLocale: "en"}
 	for _, opt := range opts {
 		opt(&s)
 	}
