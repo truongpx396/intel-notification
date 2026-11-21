@@ -53,10 +53,14 @@ status.
 
 In service mode, producers authenticate with mTLS or a signed token ([D56](../specs/001-notification-core/design-decisions.md#d56)).
 With mTLS the principal is the first URI SAN (else the first DNS SAN) of a client certificate the TLS layer
-verified: a certificate that was presented and not verified is no principal. A principal with no
+verified: a certificate that was presented and not verified is no principal. With a token the principal is its
+**subject**, and the token is verified with the keys of the realm that subject is bound to, so a subject bound to
+one realm cannot be claimed with another realm's keys, and its `iss` must be that realm. A principal with no
 binding is refused before any handler runs; a caller is told only that it is not bound, and a credential that
 fails is told only that it was not accepted, never why. The service is a capability to send messages as your
-product, so an unauthenticated producer path is an open relay.
+product, so an unauthenticated producer path is an open relay. An operator's token (for `/admin` routes)
+administers the one realm it was issued for, and the realm of an administrative call is that token's and never a
+request's.
 
 ## Credentials of providers
 
@@ -70,8 +74,9 @@ unavailable, with the reference and the reason, and does not stop the others.
 
 The recipient REST surface accepts a **recipient token**: a JWT the host signs for its signed-in user,
 verified against the realm's JWKS, carrying the tenant and recipient, expiring within an hour. The
-service never sees the host's session, and a token for one realm cannot be used in another. `HS256` is
-accepted only in development: a shared secret held by both sides means either can mint tokens for any
+service never sees the host's session, and a token for one realm cannot be used in another. ES256, EdDSA and
+RS256 are accepted, with the algorithm the key allows and not the one the header asks for; `alg: none` and
+`HS256` are not accepted at all, not even in development: a shared secret held by both sides means either can mint tokens for any
 recipient.
 
 ## Tokens in delivered content

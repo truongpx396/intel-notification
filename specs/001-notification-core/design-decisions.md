@@ -1590,18 +1590,36 @@ PostgreSQL adapter alike, `TemplateRendererContract` (the version, tenant and lo
 
 **Decision.** In service mode the realm of a call is not in any message, header or query. A producer
 authenticates with the SAN of a client certificate the TLS layer verified, or a bearer token whose **subject** is
-its principal, and a binding (`domain.RealmBindings`, which `NOTIFY_REALM_BINDINGS` sets) maps each principal to
-exactly one realm. The realm a call acts in is the binding's; one engine is built per bound realm and a call is
-routed to the engine of its realm; a principal with no binding is refused before any handler runs, and a realm
-with no engine is a fault and never another realm's engine.
+its principal, and `NOTIFY_REALM_BINDINGS` maps each principal to exactly one realm. A token is verified with the
+keys of the realm its subject is bound to, so it cannot be claimed with another realm's keys; the realm a call acts
+in is the binding's; one engine is built per bound realm and a call is routed to the engine of its realm; a
+principal with no binding is refused before any handler runs, and a realm with no engine is a fault and never
+another realm's engine. An operator's token administers the one realm it was issued for, and a recipient's token is
+verified against the keys of the realm its `iss` names, which must be that realm. A token's signature is checked with the algorithm the **key** allows and not the one the header asks
+for: ES256, EdDSA and RS256 are accepted, and `alg: none` and HS256 are not implemented at all (a secret both
+sides hold lets either mint a token for any recipient, so it is not accepted even for development). The identity is
+the verified `tenant` and `recipient` objects; a subject or a realm claim the token also carries is not one. The
+keys are the host's JWKS, fetched when first needed, kept for a while, kept through an outage, and fetched again
+once per interval when a token names a key id the set does not hold **or does not verify under the one it names**.
 
-**Alternative.** A realm in the request, or a service per realm.
+**Alternative.** A realm in the request, or a service per realm; HS256 for development; a refetch on an unknown key
+id only.
 
 **What goes wrong without it.** A producer that names its realm can write into another product's key space and
-read its status, and a shared idempotency key space swallows another product's notifications (D1).
+read its status, and a shared idempotency key space swallows another product's notifications (D1). A token whose
+header is believed lets an attacker present an RS256 header over an EC public key, or sign HS256 with a public key
+as the secret, and be accepted. A service that refetches on every unknown key id is a way to make it flood a host,
+and one that never refetches signs everyone out when the host rotates. A host that rotates a key **in place**,
+under the same key id, was refused until the cache expired: found by running the e2e suite against the real
+stack, where every run mints a new key under one id, and fixed by treating a signature that stops verifying as a
+reason to refetch once.
 
 Held by `TestARealmTheCallerNamesIsNeverRead`, `TestAnUnboundPrincipalIsRefusedBeforeTheHandler`,
-`TestEachCallActsInTheRealmOfItsProducer` and `TestARoutedNotifierSendsInTheRealmOfTheCaller`.
+`TestEachCallActsInTheRealmOfItsProducer`, `TestARoutedNotifierSendsInTheRealmOfTheCaller`,
+`TestATokenIsRefused` (alg none, HS256 over the public key, the algorithm
+the header asks for, another realm's key under the same key id, expiry, lifetime, audience, an empty tenant),
+`TestOneRealmsKeysNeverOpenAnotherRealmsInbox`, `TestAnUnknownKeyIDCausesAtMostOneRefetchPerInterval`,
+`TestAKeyRotatedInPlaceUnderTheSameKeyIDIsFollowedAndStillBounded`.
 
 ## D57 — Channels are built from rows, and a credential is a reference that reaches one function · *built*
 
