@@ -40,7 +40,7 @@ type keySource interface {
 // the host may have added a key, or replaced one under the same id.
 func verifyWithRefetch[T any](ctx context.Context, keys keySource, realm domain.Realm, verify func(domain.KeySet) (T, error)) (T, error) {
 	var zero T
-	set, _, err := keys.forGen(ctx, realm)
+	set, gen, err := keys.forGen(ctx, realm)
 	if err != nil {
 		return zero, err
 	}
@@ -48,8 +48,15 @@ func verifyWithRefetch[T any](ctx context.Context, keys keySource, realm domain.
 	if !errors.Is(err, domain.ErrUnknownKeyID) && !errors.Is(err, domain.ErrBadSignature) {
 		return got, err
 	}
-	set, _, refetched, ferr := keys.refetchGen(ctx, realm)
-	if !refetched || ferr != nil {
+	set, now, refetched, ferr := keys.refetchGen(ctx, realm)
+	if ferr != nil {
+		return zero, err
+	}
+	// Only one request may fetch in an interval, and when several arrive together after a rotation the
+	// others are throttled. A throttled one that read the set before the fetch still has a try left: the set
+	// is newer than the one it failed with. One that finds the same set has nothing new to try, so a forged
+	// token costs one verification and no fetch.
+	if !refetched && now == gen {
 		return zero, err
 	}
 	return verify(set)
