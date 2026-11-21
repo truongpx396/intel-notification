@@ -1129,7 +1129,7 @@ rule above.
       addresses, send one notification, and see it delivered on two channels. It fails until T048–T050 land.
       Before then, show it can fail: run it against a service started with one channel only and against
       one where the template registration is skipped; each must fail the scenario at the step it removes
-- [ ] **T048** *red → green* `postgres/topics.go`, `postgres/templates.go` (Go templates, restricted
+- [x] **T048** *red → green* `postgres/topics.go`, `postgres/templates.go` (Go templates, restricted
       function map, locale fallback), `postgres/addresses.go` — the data-backed ports
       ([D31](design-decisions.md#d31)).
       **Red first:** an integration table — a topic registered at runtime is usable without a migration
@@ -1138,6 +1138,17 @@ rule above.
       `ErrNoTemplate` when none exists; several addresses per `(recipient, channel)` with independent state
       (NR-028); the address table is scoped; the T013a fakes run the same table.
       **Mutate:** allow `env` or a file function in a template; skip the locale fallback
+      *Three contract suites (`TopicRegistryContract`, `TemplateRendererContract`, `AddressBookContract`), each run by
+      the in-memory fake and by the PostgreSQL adapter, plus what only a database holds (the address table's scope,
+      a refused template leaving no row, concurrent saves numbering each version once, activation never leaving a
+      window with no active version and two activations taken in turn), and the Notifier and Dispatcher run on these
+      ports (`TestATopicRegisteredAtRuntimeIsUsableWithoutAMigration`, `TestADeliveryIsRenderedAndAddressedFromTheDataBackedPorts`).
+      **Red, witnessed on stub adapters** against a real PostgreSQL, each on its assertion
+      (`catalogcontract.go:76: Lookup = {...}, false, not implemented, want found=false and no error`; `catalog_integration_test.go:244:
+      versions = [0 0 0 0 0 0 0 0], want [1 2 3 4 5 6 7 8]`); the pure domain half (the restricted engine) was red against a
+      stub in its own commit (89 failing cases). The tenant default of the task's wording is read as the tenant's own
+      template, and the ladder is walked before the tenant ([D55](design-decisions.md#d55)). A version is immutable and
+      activated explicitly. The write side is three new driven ports (`TopicWriter`, `TemplateWriter`, `AddressWriter`) and `postgres.NewAll`. 37 rows in the ledger for T048, three of which survived once and were closed.*
 - [ ] **T049** *red → green* `Catalog` gRPC service; realm bindings from producer principals; channels
       constructed from `channel_providers` with credentials resolved from `secret_ref`.
       **Red first:** a producer authenticated for realm A cannot register or send in realm B (NR-009); no
@@ -1229,9 +1240,9 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-014 digests | `TopicDef.Digestible`; planner rows; burst test; flush job | T009 (done), T021 (done), T034a (done), T035 (done) |
 | NR-015 unsubscribe | email golden files; the token's vector and tamper table; `Inbox.Unsubscribe`; REST unsubscribe handler rows; the `unsubscribe` spec | T026 (done), T026a (done), T044 (done), T047a |
 | NR-016 a channel is one file and one line | third-channel demonstration; `app` cannot import a channel (arch-lint) | T033a (done), T053 (done) |
-| NR-017 a topic is a registration | topics integration table, no migration | T048 |
+| NR-017 a topic is a registration | topics integration table, no migration | T048 (done) |
 | NR-018 re-anchoring identity is a host binding | structural: `Identity` is opaque strings with frozen vectors; `domain` imports nothing | T007 (done), T053 (done) |
-| NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a (done), T026 (done), T048 |
+| NR-019 copy only through the template seam | template golden files; restricted function map; locale fallback; inbox render at read time | T017a (done), T026 (done), T048 (done) |
 | NR-020 resumable paged broadcast | crash between pages and inside a page (`TestACrashBetweenPagesResumesAtTheNextPage`, `TestACrashInsideAPageRollsTheWholePageBackAndTheNextWorkerRedoesIt`); a retried broadcast (`TestARetriedBroadcastDoubleNotifiesNobody`); deterministic member keys, frozen and checked by the store on every page; the inline limit; the lease-token fence | T042a (done), T042 (done) |
 | NR-021 stable shard, changeable count | shard vectors; `RehomeShards` integration test | T010 (done), T016 (done) |
 | NR-022 bounded growth, metadata retirement | `TestEnsurePartitions`; retention with a dead letter outstanding and with a pending delivery; no row deleted on the way to a retirement (a `DELETE` witness, in place of `n_tup_del`); the jobs' cutoffs (`TestRetentionRetiresEachTableAtItsOwnWindow`, `TestTheExpiriesCutAtTheIdempotencyWindowInBatches`); that the `DELETE` witness can fire (`TestTheRetirementWitnessRecordsADeletion`) | T006 (done), T038, T039 |
@@ -1240,7 +1251,7 @@ construction or by a gate and no task adds a behaviour test for it.
 | NR-025 library and service, identical semantics | `NotifierContract` in-process and over gRPC; producer scenario | T043 (done), T047 (done), T051 |
 | NR-026 no host import | `go-arch-lint` and `depguard`; the no-host CI job | T053 (done), T054 (done) |
 | NR-027 `NotifyTx` | `StoreContract` and `NotifierContract` commit and rollback cases | T020 (done), T022a (done), T024 (done) |
-| NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033 (done), T048 |
+| NR-028 several addresses per channel | `TestBindAddresses`; addresses table; per-address retry | T016 (done), T033 (done), T048 (done) |
 | NR-029 scheduled send and expiry | planner `DeliverAfter`; `NotifierContract`; `DispatcherContract` expiry | T021 (done), T024 (done), T033 (done) |
 | NR-030 cancel | `NotifierContract` cancel cases; the queue's `Cancel` | T016 (done), T022a (done), T024 (done) |
 | NR-031 fallback chain | `TopicDef.Validate`; planner order; `DispatcherContract` fallback | T009 (done), T021 (done), T033 (done) |

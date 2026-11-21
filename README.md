@@ -204,10 +204,10 @@ mode each of these is data the service owns, managed over the API.
 | Seam | You provide | The engine never | Reference implementation today |
 |---|---|---|---|
 | **`Channel`** | your delivery targets and their dedup guarantees | branches on a channel kind | `in_app`, `email`, `webhook`, `failover` |
-| **`TopicRegistry`** | your event vocabulary + defaults | special-cases a topic | the host's; data-backed adapter is Stage 11 |
+| **`TopicRegistry`** | your event vocabulary + defaults | special-cases a topic | the host's, or `postgres.Topics` (service mode) |
 | **`Recipient` / `Tenant`** | your identity + isolation model | parses either one | n/a — opaque by design |
-| **`TemplateRenderer`** | your copy, i18n, branding | knows what a notification says | the host's; data-backed adapter is Stage 11 |
-| **`AddressBook`** | where each recipient receives — every device | assumes one address per channel | the host's; data-backed adapter is Stage 11 |
+| **`TemplateRenderer`** | your copy, i18n, branding | knows what a notification says | the host's, or `postgres.Templates` (service mode) |
+| **`AddressBook`** | where each recipient receives — every device | assumes one address per channel | the host's, or `postgres.Addresses` (service mode) |
 | **`PreferenceStore`** | your opt-in model, per recipient and per tenant | assumes a channel is on | PostgreSQL |
 | **`Store`** | your infra | requires a specific database | PostgreSQL + Redis |
 
@@ -596,7 +596,7 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | [specs/001-notification-core/](specs/001-notification-core/) | the normative specification |
 | [constitution](.specify/memory/constitution.md) | the principles every decision is held to; first in the order of authority |
 | [contracts/notification-ports.md](specs/001-notification-core/contracts/notification-ports.md) | every port, the 16 invariants, the dispatcher algorithm, contract tests, the gRPC surface |
-| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 54 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D54 from building the stages |
+| [design-decisions.md](specs/001-notification-core/design-decisions.md) | 55 decisions, each with what it prevents — D16–D37 from the architecture review, D38 from measurement, D39–D55 from building the stages |
 | [data-model.md](specs/001-notification-core/data-model.md) | tables, keys, RLS, state transitions, retention |
 | [plan.md](specs/001-notification-core/plan.md) | build order and the capacity model |
 | [tasks.md](specs/001-notification-core/tasks.md) | the task list, how a task is worked, and traceability |
