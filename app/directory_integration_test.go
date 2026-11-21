@@ -21,7 +21,7 @@ import (
 func TestADirectoryTimeoutFailsThePageAndTheBroadcastResumesAtIt(t *testing.T) {
 	t.Parallel()
 	e, rs := broadcastEnv(t, 5)
-	host, directory := notifytest.NewHostDirectory(t, e, 50*time.Millisecond)
+	host, directory := notifytest.NewHostDirectory(t, e, 250*time.Millisecond)
 	host.Stall("2") // the host hangs on the second page
 	deps := e.BroadcastDeps()
 	deps.Audience = directory

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 
 	"github.com/truongpx396/intel-notification/adapters/driving/grpcclient"
 	"github.com/truongpx396/intel-notification/api/notifyv1"
@@ -32,6 +33,16 @@ func NewHostDirectory(tb testing.TB, e *Env, timeout time.Duration) (*HostDirect
 	host := &HostDirectory{audiences: e.Audiences}
 	host.Stall("-")
 	conn := NewBufconn(tb, func(reg grpc.ServiceRegistrar) { notifyv1.RegisterDirectoryServer(reg, host) })
+	// A connection dials lazily, and a client whose timeout is a few milliseconds must not spend it on the dial: on a
+	// loaded machine the first page failed by the host's "timeout" before the host had been asked anything.
+	conn.Connect()
+	ready, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for state := conn.GetState(); state != connectivity.Ready; state = conn.GetState() {
+		if !conn.WaitForStateChange(ready, state) {
+			tb.Fatalf("the host's Directory connection did not come up: %v", state)
+		}
+	}
 	return host, grpcclient.NewDirectory(map[domain.Realm]grpc.ClientConnInterface{Realm: conn}, grpcclient.WithDirectoryTimeout(timeout))
 }
 
