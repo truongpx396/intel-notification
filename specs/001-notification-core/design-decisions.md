@@ -16,7 +16,7 @@ Four kinds of entry carry a tag:
 - **measured** comes from running the system rather than reading it: D38, and the amendments marked on
   D19 and D20. Each states what was run and what was not.
 - **built** comes from implementing a stage and finding the specification silent where the code had to
-  choose: D39–D57. Each names the test that holds the choice, so a later reader can tell what was
+  choose: D39–D58. Each names the test that holds the choice, so a later reader can tell what was
   decided from what merely happened.
 
 Every entry that claims a property names the test that asserts it: a schema test (`TEST n` in
@@ -1595,7 +1595,8 @@ keys of the realm its subject is bound to, so it cannot be claimed with another 
 in is the binding's; one engine is built per bound realm and a call is routed to the engine of its realm; a
 principal with no binding is refused before any handler runs, and a realm with no engine is a fault and never
 another realm's engine. An operator's token administers the one realm it was issued for, and a recipient's token is
-verified against the keys of the realm its `iss` names, which must be that realm. A token's signature is checked with the algorithm the **key** allows and not the one the header asks
+verified against the keys of the realm its `iss` names, which must be that realm. On the bus the realm is the
+subject's. A token's signature is checked with the algorithm the **key** allows and not the one the header asks
 for: ES256, EdDSA and RS256 are accepted, and `alg: none` and HS256 are not implemented at all (a secret both
 sides hold lets either mint a token for any recipient, so it is not accepted even for development). The identity is
 the verified `tenant` and `recipient` objects; a subject or a realm claim the token also carries is not one. The
@@ -1616,12 +1617,12 @@ reason to refetch once.
 
 Held by `TestARealmTheCallerNamesIsNeverRead`, `TestAnUnboundPrincipalIsRefusedBeforeTheHandler`,
 `TestEachCallActsInTheRealmOfItsProducer`, `TestARoutedNotifierSendsInTheRealmOfTheCaller`,
-`TestATokenIsRefused` (alg none, HS256 over the public key, the algorithm
+`TestTwoRealmsInOneProcessNeverMeet`, `TestATokenIsRefused` (alg none, HS256 over the public key, the algorithm
 the header asks for, another realm's key under the same key id, expiry, lifetime, audience, an empty tenant),
 `TestOneRealmsKeysNeverOpenAnotherRealmsInbox`, `TestAnUnknownKeyIDCausesAtMostOneRefetchPerInterval`,
 `TestAKeyRotatedInPlaceUnderTheSameKeyIDIsFollowedAndStillBounded`.
 
-## D57 — Channels are built from rows, and a credential is a reference that reaches one function · *built*
+## D57 — Channels are built from rows, a credential is a reference that reaches one function, and the service refuses a role that skips the schema · *built*
 
 **Decision.** A service has no host code, so its channels are `channel_providers` rows (D31). A manager reads them,
 resolves each `secret_ref` (`env:` and `file:` are built in), builds the provider with the factory registered under
@@ -1633,18 +1634,50 @@ kind of channel is marked **unavailable**, with the reference it was told to use
 on; a kind with no usable provider is not registered, so a topic that names it is refused when it is registered and
 not delivered into the void. The credential reaches the factory and nothing else: no report, error, log or
 delivery result carries it, including when a provider's own constructor writes it into its error, which is
-redacted. The configuration is swapped whole on reload, and a failed read keeps the old one.
+redacted. The configuration is swapped whole on reload, and a failed read keeps the old one. The service also
+refuses to start as a database role that is a superuser or bypasses row-level security.
 
-**Alternative.** Channels constructed at start from environment variables.
+**Alternative.** Channels constructed at start from environment variables; a role check left to the operator.
 
 **What goes wrong without it.** A key in an error message lands in a log aggregator and a dead letter. One missing
 secret that crashes the service takes the channels that work down with it. One realm's provider key used for
 another's mail is a billing and a deliverability incident. A database that blinks emptying the registry stops a
-healthy service delivering.
+healthy service delivering. And a service connected as a superuser silently holds none of the isolation the schema
+exists to guarantee: the forced policies do not apply to it, every test of them passes, and the leak is in
+production.
 
 Held by `TestACredentialIsHandedToTheFactoryAndAppearsNowhereElse`, `TestAnUnresolvableSecretMarksTheProviderUnavailableAndTheRestCarryOn`,
 `TestARealmIsNeverServedByAnotherRealmsProvider`, `TestATenantsOwnProvidersReplaceTheRealmsForThatTenantOnly`,
-`TestReloadSwapsTheWholeConfigurationAndAFailedReadKeepsTheOld`, `TestAFactoryThatPanicsMakesItsProviderUnavailableAndNothingElse`.
+`TestReloadSwapsTheWholeConfigurationAndAFailedReadKeepsTheOld`, `TestAFactoryThatPanicsMakesItsProviderUnavailableAndNothingElse`,
+`TestTheServiceRefusesADatabaseRoleThatBypassesRowLevelSecurity`.
+
+## D58 — The bus ingest acknowledges after the commit and never lets poison block the stream · *built*
+
+**Decision.** `natsingest` is a driving adapter that turns a JetStream message into a `Notify` call. A message is
+acknowledged (with the server's confirmation) only once `Notify` has returned, which is after PostgreSQL committed
+(D23), so a crash anywhere before that is a redelivery, and `Notify`'s idempotency makes the redelivery a replay
+that is acknowledged like a success. The realm is the subject's and a realm in the body is not read (NR-009), and the
+subject's tenant token must name the payload's tenant. A message that can never succeed (no `idem_key`, not a
+notification, an empty tenant or recipient, a tenant the subject does not name, a topic nobody registered, a
+refusal of the engine's) is **recorded** as a `dead_letters` row with source `bus` and reason `poison`, **told** to
+operators on `notify.ingest.dlq.<realm>`, and only then **terminated**; so a table or a subject that is down is a
+redelivery and nothing is ever terminated unrecorded. A transient failure is redelivered until `MaxDeliver` and is
+then poison. A shutdown mid-message settles nothing. A subject that names no realm is terminated and reported,
+because there is nothing to park it under. The stream is replicated (R3) for the durability NS-003 asks of an
+ingest bus, and one replica is for development.
+
+**Alternative.** Acknowledge on receipt, and retry in the adapter.
+
+**What goes wrong without it.** Acknowledging before the commit loses the notification when the commit fails,
+which is the case the bus exists to survive. A poison message redelivered for ever blocks every message behind it
+on its subject. A message terminated before it is recorded is a notification nobody can find. And a body that is
+believed about its own realm is a producer writing into another product's key space.
+
+Held by `TestTheAcknowledgementWaitsForTheCommit`, `TestAMessageIsNeverTerminatedUnrecorded`,
+`TestAMessageThatCanNeverSucceedIsParkedAndTerminated`, `TestTheRealmIsTheSubjectsAndNeverTheBodys`, and, against
+real PostgreSQL and a real JetStream, `TestAKillBeforeTheCommitIsARedeliveryAndNotifiesOnce`,
+`TestALostAcknowledgementIsAReplayAndNotifiesOnce` and
+`TestOverARealJetStreamAMessageDeliveredTwiceNotifiesOnceAndPoisonDoesNotBlock`.
 
 ## Open decisions
 

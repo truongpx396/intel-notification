@@ -62,6 +62,14 @@ product, so an unauthenticated producer path is an open relay. An operator's tok
 administers the one realm it was issued for, and the realm of an administrative call is that token's and never a
 request's.
 
+## The database role
+
+The schema's tenant isolation is row-level security, and PostgreSQL does not apply it to a superuser or a role with
+`BYPASSRLS`, whatever `FORCE` says. A service connected as one would pass every test of the policies and hold none
+of the isolation, so `notifyd` refuses to start as one (`NOTIFY_ALLOW_PRIVILEGED_DB_ROLE` is for a throwaway
+development database). The compose stack builds the schema as the superuser and hands it to an application role,
+as the test kit does.
+
 ## Credentials of providers
 
 `channel_providers.secret_ref` is a reference (`env:`, `file:`, or a secret manager's URI) and the schema refuses a
