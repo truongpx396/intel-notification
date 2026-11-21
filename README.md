@@ -1,4 +1,8 @@
-# 🔔 Intel Notification — Multi-Channel Notification Engine
+<div align="center">
+
+**Multi-Channel Notification Engine**
+
+# 🔔 Intel Notification
 
 ### Persist once, fan out everywhere, deliver exactly once — and prove it never told the wrong person
 
@@ -11,6 +15,8 @@
 ![Delivery](https://img.shields.io/badge/delivery-exactly--once%20per%20recipient-2ea44f)
 ![Spec Kit](https://img.shields.io/badge/Spec%20Kit-spec--first-8957e5)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+
+</div>
 
 ---
 
