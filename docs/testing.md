@@ -209,11 +209,21 @@ a host's front end does:
 - **Retries show, not hide.** CI retries a failed test once and records a trace of the retry, so a flaky
   test is visible in the report.
 
-The REST surface exists as a package (T044) but no service binary assembles it, so every spec is still written
-against the REST contract and marked `test.describe.fixme` with the tasks that will enable it (T044, T049);
-T047a switches the suite on, and stays open until `cmd/notifyd` and service-mode authentication land. CI typechecks and lists the suite
-on every change, so it cannot rot before the service arrives, and the full `e2e` job switches on with
-those tasks.
+The service exists (`cmd/notifyd`, T049a) and the compose stack runs it as the application role, with the local realm's
+topics, templates and an SMTP provider seeded (`deploy/initdb`). Against a clean stack the `api` project is 11 passed and
+2 skipped: the isolation, preferences and unsubscribe specs, and `producer.api.spec.ts`, NS-011 with a producer in
+TypeScript over gRPC. That producer is the one spec that is not driven through the operator route: it is the point of it.
+Its client is `e2e/support/grpc.ts`, Node's HTTP/2 and a small protobuf encoder with no dependency (so the lockfile is
+untouched), and it sees what it did where it landed: Mailpit for the mail, the REST inbox with a token the run's host
+signed, and the delivery status. It is shown to fail at the step taken away (a channel the service lacks fails at the
+topic, skipped templates at the delivery). Two specs are still `test.describe.fixme`: `webhooks` (the Resend decoder,
+T044a) and the `stream` browser spec (a browser run seen passing). The `e2e` CI job is switched on; its commands were
+run locally and it has not been seen on GitHub's runners (T047a).
+
+Run them with a stack up: `docker compose -f deploy/docker-compose.yml --profile e2e up --build -d`, then
+`NOTIFY_E2E_BASE_URL=http://localhost:8080 npx playwright test --project=api` from `e2e/`. Each run mints a new key under
+one key id, and the compose stack looks at the host's keys again within seconds (`NOTIFY_JWKS_MIN_REFETCH`). A stack
+started before the init scripts existed has a volume the schema was built into as a superuser: `down -v` first.
 
 ## Benchmarks
 

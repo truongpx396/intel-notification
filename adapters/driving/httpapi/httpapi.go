@@ -53,6 +53,9 @@ type Deps struct {
 	Notifier ports.Notifier
 	// Admin serves replay, erasure and tenant defaults. Required with Operator.
 	Admin ports.Admin
+	// Catalog serves PUT /admin/recipients/addresses, the REST twin of Catalog.PutAddresses. Required with
+	// Operator to serve it; nil: it is not.
+	Catalog ports.Catalog
 	// Stream serves /notifications/stream; nil: it is not served.
 	Stream   ports.StreamSubscriber
 	Identify IdentityFunc
@@ -141,6 +144,9 @@ func New(d Deps, opts ...Option) (http.Handler, error) {
 		mux.HandleFunc("POST /admin/notifications/dead-letters/{id}/replay", s.operator(s.replay))
 		mux.HandleFunc("POST /admin/erasure", s.operator(s.erase))
 		mux.HandleFunc("PUT /admin/tenants/{tenant_kind}/{tenant_id}/preferences", s.operator(s.tenantPreferences))
+		if d.Catalog != nil {
+			mux.HandleFunc("PUT /admin/recipients/addresses", s.operator(s.putAddresses))
+		}
 	}
 	if len(d.Webhooks) > 0 {
 		mux.HandleFunc("POST /webhooks/{channel}/{provider}", s.webhook)

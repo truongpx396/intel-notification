@@ -141,3 +141,19 @@ type DigestMember struct {
 	Shard          Shard
 	NotificationID string
 }
+
+// PoisonMessage is a message the bus ingest could not turn into a notification and will not try again: it
+// is parked as a dead letter with source "bus" and reason "poison" (NR-035, bus-subjects.md). It holds what
+// arrived, so an operator can read it and the producer can resend it.
+type PoisonMessage struct {
+	Realm Realm
+	// Key identifies the message so that recording it twice, as a redelivered one is, records it once: the
+	// stream and the sequence the bus gave it.
+	Key     string
+	Subject string
+	Body    []byte
+	// Attempts is how many times the bus delivered it before it was given up on.
+	Attempts int
+	// Reason says why, for the operator: which rule the message broke.
+	Reason string
+}

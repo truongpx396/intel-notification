@@ -1,9 +1,8 @@
 # Service-mode container. Multi-stage so the runtime image carries no toolchain.
 #
-# cmd/notifyd does not exist yet (tasks T043-T049), so this image cannot build
-# today -- the file is the intended shape, kept in the repository so the
-# deployment story is reviewable alongside the design rather than invented later
-# under time pressure.
+# Builds cmd/notifyd (T049a). Its environment is docs/configuration.md; the compose stack beside this
+# file shows a working one, and creates the database role the service insists on (one with neither
+# SUPERUSER nor BYPASSRLS).
 
 # Pinned to the toolchain go.mod names, so the image builds what CI tests.
 FROM golang:1.26.8-trixie AS build
@@ -17,6 +16,7 @@ FROM gcr.io/distroless/static-debian13:nonroot
 WORKDIR /
 COPY --from=build /out/notifyd /notifyd
 COPY --from=build /src/migrations /migrations
+# The migrations are applied by the database's first boot (deploy/initdb), not by this process.
 USER nonroot:nonroot
 EXPOSE 8080 9090
 # 8080 REST (recipient-facing), 9090 gRPC (producer-facing).

@@ -2,8 +2,9 @@ import { eventually, expect, Inbox, notify, test } from '../support/fixtures.js'
 
 // NR-011, NR-012, NR-015, D26, D30 (rest-api.md § Preferences and schedule).
 //
-// Pending: enable when the REST surface (T044) and service mode (T049) exist.
-test.describe.fixme('preferences over REST', () => {
+// Enabled with T047a's first step: the REST surface (T044) and service mode (T049, T049a) exist, and the
+// compose stack seeds the topics this spec sends on (deploy/initdb/30-local-topics.sh).
+test.describe('preferences over REST', () => {
   test('each preference reports where its value came from', async ({ request, recipients }) => {
     const inbox = new Inbox(request, recipients.in(recipients.tenant()));
     const res = await inbox.preferences();

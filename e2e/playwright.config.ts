@@ -3,7 +3,8 @@ import { defineConfig, devices } from '@playwright/test';
 // End-to-end tests drive the running service the way a host's front end does:
 // the REST inbox, the SSE stream, the unsubscribe link, provider callbacks.
 // Producers are driven through the operator broadcast route, so no test needs a
-// gRPC client. See docs/testing.md for where e2e sits among the test layers.
+// gRPC client, except the one that is the producer (producer.api.spec.ts, NS-011).
+// See docs/testing.md for where e2e sits among the test layers.
 //
 // The service under test is the docker compose stack, started here unless
 // NOTIFY_E2E_BASE_URL points at one already running.

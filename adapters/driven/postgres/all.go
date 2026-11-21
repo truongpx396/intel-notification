@@ -14,6 +14,7 @@ type All struct {
 	Queue        ports.Queue
 	Digests      ports.Digests
 	Maintenance  ports.Maintenance
+	Poison       ports.PoisonSink // the dead letters the bus ingest parks a message as
 	Inbox        ports.InboxStore
 	Prefs        ports.PreferenceStore
 	Suppressions ports.SuppressionStore
@@ -21,6 +22,7 @@ type All struct {
 	Topics       *Topics // ports.TopicRegistry and ports.TopicWriter
 	Templates    *Templates
 	Addresses    *Addresses
+	Providers    *Providers // ports.ProviderStore, over channel_providers
 }
 
 // NewAll returns every port of this package over pool, each configured with opts. The pool's role
@@ -28,7 +30,7 @@ type All struct {
 func NewAll(pool *pgxpool.Pool, opts ...Option) *All {
 	store := New(pool, opts...)
 	return &All{
-		Store: store, Queue: store, Digests: store, Maintenance: store,
+		Store: store, Queue: store, Digests: store, Maintenance: store, Poison: store,
 		Inbox:        NewInbox(pool, opts...),
 		Prefs:        NewPreferences(pool, opts...),
 		Suppressions: NewSuppressions(pool, opts...),
@@ -36,5 +38,6 @@ func NewAll(pool *pgxpool.Pool, opts ...Option) *All {
 		Topics:       NewTopics(pool, opts...),
 		Templates:    NewTemplates(pool, opts...),
 		Addresses:    NewAddresses(pool, opts...),
+		Providers:    NewProviders(pool, opts...),
 	}
 }

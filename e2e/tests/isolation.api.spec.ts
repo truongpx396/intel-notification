@@ -3,8 +3,9 @@ import { eventually, expect, Inbox, notify, test } from '../support/fixtures.js'
 // NS-001 — a release blocker. The REST surface never shows a recipient another
 // recipient's, tenant's or realm's notification (rest-api.md § Observable assertions).
 //
-// Pending: enable when the REST surface (T044) and service mode (T049) exist.
-test.describe.fixme('recipient isolation over REST', () => {
+// Enabled with T047a's first step: the REST surface (T044) and service mode (T049, T049a) exist, and the
+// compose stack seeds the topics this spec sends on (deploy/initdb/30-local-topics.sh).
+test.describe('recipient isolation over REST', () => {
   test('the same recipient id in two tenants sees only its own tenant', async ({ request, recipients }) => {
     const w1 = recipients.tenant('w1');
     const w2 = recipients.tenant('w2');
