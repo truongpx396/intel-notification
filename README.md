@@ -12,30 +12,6 @@
 ![Spec Kit](https://img.shields.io/badge/Spec%20Kit-spec--first-8957e5)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
-> ## ⚠️ Status: design complete, **implementation nearly through** (11 of 13 stages built)
-> The **core is built and proven**: schema, domain rules, every port, the PostgreSQL adapter, the
-> notifier, the reference channels, the dispatcher, digests and quotas — each guarantee held by a test
-> that was broken on purpose to prove it fails. The **transports are built** (Stage 10), and **service mode is built**
-> (Stage 11): `cmd/notifyd` runs the REST and SSE surface, the gRPC producer and Catalog surface, the dispatcher and the
-> jobs from a single environment, with topics, templates and addresses as data a producer manages over the API, channels
-> built from `channel_providers` rows whose credentials are references, recipient and producer tokens verified against each
-> realm's JWKS, a realm derived from the caller and never read from a request, and an optional JetStream ingest that
-> acknowledges after the commit. A producer written in TypeScript registers, stores, sends and sees a delivery on two
-> channels against the real compose stack (NS-011); Resend's signed webhooks suppress a bounced address; and the whole Playwright suite runs
-> against that stack. What is **not built**: the one-call `New`, a few operator reads, and the load test and the release (Stage 13). `Broadcast`
-> (Stage 9) and the maintenance jobs and `Admin.Erase` (Stage 8) are **built and proven against PostgreSQL**. You can adopt it
-> as a Go library and wire the pieces by hand (see [Wiring it as a library](#-wiring-it-as-a-library)), or run `notifyd`
-> (`docker compose -f deploy/docker-compose.yml up`).
->
-> [ROADMAP.md](ROADMAP.md) says what exists, what is designed and what is absent;
-> [tasks.md](specs/001-notification-core/tasks.md) is the build order.
->
-> **Scope, stated honestly:** this is a *delivery* engine — it decides who gets told what, on which
-> channel, once. It is **not** a marketing campaign tool and **not** an on-call escalation system (that
-> is [Phase 2](specs/002-escalation-workflows/), designed and not built). If you need neither
-> multi-channel fan-out nor recipient-scoped durability, [ROADMAP.md](ROADMAP.md) names the tools you
-> probably want instead.
-
 ---
 
 ## 📑 Table of Contents
@@ -90,7 +66,7 @@
   to fan-out, persistence or preferences (NS-008).
 - 📏 **Bounded growth, everywhere.** Partitions, windows, or pending-only by construction.
 - 📜 **Spec-first.** A [constitution](.specify/memory/constitution.md), a normative
-  [specification](specs/001-notification-core/), 51 recorded decisions and 16 invariants — each decision
+  [specification](specs/001-notification-core/), 58 recorded decisions and 16 invariants — each decision
   names the failure it prevents.
 
 ---
@@ -98,12 +74,12 @@
 ## 🧭 Architecture
 
 Producers call a driving port; the engine commits one transaction; any number of dispatcher replicas
-claim the resulting work and call channels. Dashed boxes are designed and **not built yet**.
+claim the resulting work and call channels. Producers in other languages reach the same port through `notifyd`.
 
 ```mermaid
 flowchart TB
     host["Host product<br/>Notify · NotifyTx · Cancel · Status"]
-    remote["Producers in other languages<br/>gRPC · REST · SSE"]
+    remote["Producers in other languages<br/>notifyd: gRPC · REST · SSE"]
 
     subgraph appl["app/ — use-cases own the invariants"]
         planner["Planner + Notifier<br/>preferences → channels → plan"]
@@ -134,7 +110,7 @@ flowchart TB
     end
 
     host --> planner
-    remote -.-> planner
+    remote --> planner
     planner --> txn --> queue
     planner -. "read before commit,<br/>write after" .-> pre
     queue -- "SKIP LOCKED lease,<br/>fenced by token" --> dispatcher
@@ -147,8 +123,6 @@ flowchart TB
     dispatcher --> history
     inbox --> txn
 
-    classDef planned stroke-dasharray: 5 5,color:#888
-    class remote planned
 ```
 
 **Ports and adapters.** `domain/` is pure rules and imports nothing from the module. `ports/` holds the
@@ -235,11 +209,12 @@ make test-pg-next      # both of those again on PostgreSQL 17 (Docker); CI runs 
 make ci                # everything CI runs today
 ```
 
-To poke at the real infrastructure, start only the two services that exist. The compose file applies
-`migrations/` on first boot of an empty volume:
+To poke at the real infrastructure, start PostgreSQL and Redis alone, or the whole service-mode stack with `notifyd`.
+The compose file applies `migrations/` on first boot of an empty volume:
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d postgres redis
+docker compose -f deploy/docker-compose.yml up -d postgres redis   # the infrastructure only
+docker compose -f deploy/docker-compose.yml up --build            # and notifyd, on 8080 and 9090
 ```
 
 | Service | Port | Notes |
@@ -278,7 +253,8 @@ compiles against the module today; the seams in the first block are the host's o
 implementations (`postgres.NewAll` also returns a data-backed topic registry, renderer and address book, the ones service mode runs on), and the last of them is optional.
 
 ```go
-// The host's implementations of the seams the engine does not ship yet.
+// The seams a host can bring itself. postgres.NewAll also returns data-backed ones (Topics, Templates,
+// Addresses) that service mode runs on; the channel registry is the host's either way.
 var (
     channels  ports.ChannelRegistry  // Register(Channel), Get(kind), Kinds()
     topics    ports.TopicRegistry    // your event vocabulary and defaults
@@ -349,12 +325,11 @@ Each constructor checks only the `Deps` fields it uses and names every missing o
 a host that builds the notifier alone can leave the dispatcher's ports empty. To enqueue inside your own
 transaction, call `NotifyTx(ctx, tx, n)`; the engine never commits or rolls it back.
 
-**Not built yet** — these appear in the design and the [integration guide](docs/integration-guide.md)
-as the intended interface, but do not exist in code:
+**Not built yet** — this appears in the design and the [integration guide](docs/integration-guide.md)
+as the intended interface, but does not exist in code:
 
 - `app.New(cfg, deps)` returning every port at once. `grpcclient.New(conn)` **is** built and satisfies
-  `ports.Notifier`, so moving a Go producer from library to service mode changes one line once a service runs.
-- The data-backed `TopicRegistry`, `TemplateRenderer` and `AddressBook`.
+  `ports.Notifier`, so moving a Go producer from library to service mode changes one line.
 
 ---
 
@@ -396,7 +371,7 @@ Each channel depends on `domain` and `ports` only, and each is held to the same 
 
 | Channel | Package | What it does |
 |---|---|---|
-| **In-app** | `channel/inapp` | Publishes a *nudge* naming a notification on the identity's stream key. The payload is never the content: the relay that consumes it (Stage 10) re-reads the row under RLS |
+| **In-app** | `channel/inapp` | Publishes a *nudge* naming a notification on the identity's stream key. The payload is never the content: the SSE relay that consumes it re-reads the row under RLS |
 | **Email** | `channel/email` | SMTP and Resend mailers; RFC 8058 `List-Unsubscribe` headers and footer; signed unsubscribe links. Resend's idempotency was checked against its sandbox (`make test-provider`) |
 | **Webhook** | `channel/webhook` | Signed POSTs. Added with no change to fan-out, persistence or preferences — the NS-008 demonstration |
 | **Failover** | `channel/failover` | An ordered list of providers behind one channel; reports the *weakest* `Dedup` of its members, honestly |
@@ -408,7 +383,8 @@ SMS, push and Slack are one more `Register` call each; none is written yet.
 ## 🧰 Configuration
 
 `notify.Config` is the **entire** configuration surface. The core reads no environment variables and no
-global config; adapters dial what they are given. The ones you will reach for first:
+global config; adapters dial what they are given. `notifyd` maps its environment onto it
+([`cmd/notifyd/config.go`](cmd/notifyd/config.go), [docs/configuration.md](docs/configuration.md)). The ones you will reach for first:
 
 | Field | Default | Why you would change it |
 |---|---|---|
@@ -441,7 +417,7 @@ when the red was witnessed, `make ci` is green, and each new guarantee has a row
 | **Unit** | `go test`, table-driven, parallel | Pure rules in `domain/`: the canonical encoding and every derived key (frozen vectors), shard, backoff, the terminal-outcome policy | `make test` |
 | **Schema** | `psql` on a throwaway PG 16 | Constraints, forced RLS on every scoped table and partition, key spaces | `make verify-schema` |
 | **Integration** | `-tags integration` + Testcontainers | Every state transition, as the non-superuser owner, with real concurrency | `make test-integration` |
-| **End to end** | Playwright | The running service as a host's front end sees it | `make e2e-list` now; `make e2e` once the service exists |
+| **End to end** | Playwright | The running service as a host's front end sees it, against the compose stack | `make e2e` (Docker, Node 24); `make e2e-list` typechecks without the stack |
 | **Benchmark** | `go test -bench` | What one PostgreSQL primary sustains. Not a pass/fail gate | `make bench`, `make soak` |
 | **Boundaries** | `golangci-lint`, `go-arch-lint` | The hexagon's dependency graph and the test conventions | `make lint arch-lint` |
 
@@ -462,16 +438,19 @@ Run `make help` for the live list.
 | | `make test` | Unit tests, race detector, shuffled; no Docker |
 | | `make test-integration` | Integration tests via Testcontainers (Docker) |
 | | `make test-provider` | Email-channel suites against the provider's sandbox; needs `NOTIFY_PROVIDER_RESEND_API_KEY`; not in `ci` |
+| | `make test-pg-next` | `verify-schema` and the integration tests on PostgreSQL 17 (Docker) |
 | **Schema** | `make verify-schema` | Migrations + schema assertions on a throwaway PG 16 (Docker) |
 | | `make lint-sql` | Migration hygiene: `BEGIN`/`COMMIT`, header comment, sequential numbering |
 | **Quality gates** | `make lint` | `golangci-lint`: depguard boundaries, `paralleltest`, goimports |
 | | `make arch-lint` | `go-arch-lint`: the hexagon's dependency graph |
 | | `make docs-links` | Fails on a dangling relative markdown link |
+| **Proto** | `make proto` | Regenerate `api/notifyv1` from `api/proto` (needs `buf` and the Go plugins) |
+| | `make proto-lint` `proto-check` `proto-breaking` | `buf lint`; generated code is current; no breaking change against `origin/main` (need `buf`) |
 | **End to end** | `make e2e-list` | Typecheck the Playwright suite and list it, no stack needed |
-| | `make e2e` | Run it against the compose stack (Docker, Node 24); switches on with the HTTP layer |
+| | `make e2e` | Run it against the compose stack (Docker, Node 24) |
 | **Performance** | `make bench` | Queue throughput benchmarks (Docker; minutes) |
 | | `make soak` | Sustained-load soak for `SOAK_DURATION`, default `10m` (Docker; up to hours) |
-| **Everything** | `make ci` | `lint-sql verify-schema docs-links build test test-integration lint arch-lint e2e-list` |
+| **Everything** | `make ci` | `lint-sql verify-schema docs-links proto-lint proto-check proto-breaking build test test-integration lint arch-lint e2e-list` |
 
 ---
 
@@ -488,15 +467,20 @@ Run `make help` for the live list.
 │   ├── driven/
 │   │   ├── postgres/    delivery queue, digests, maintenance, store (broadcasts included), inbox, prefs, suppressions, quotas
 │   │   ├── redis/       pre-check, live stream, quota counter
-│   │   └── channel/     inapp · email · failover · webhook
+│   │   ├── secrets/     resolves a credential from its reference (env:, file:)
+│   │   └── channel/     inapp · email · failover · webhook; providers builds them from channel_providers rows
 │   └── driving/
 │       ├── inprocess/   the engine's ports as a library host holds them
 │       ├── httpapi/     REST, SSE relay, one-click unsubscribe, provider webhooks, operator routes, health
-│       ├── grpcserver/  notify.v1 Notifier over a ports.Notifier
-│       └── grpcclient/  a ports.Notifier over gRPC (NotifyTx is ErrTxUnsupported)
+│       ├── grpcserver/  notify.v1 Notifier and Catalog services
+│       ├── grpcclient/  a ports.Notifier over gRPC (NotifyTx is ErrTxUnsupported), and the host's Directory callback
+│       ├── wire/        message and error mapping both gRPC sides stand on
+│       ├── auth/        realm from the caller, token verification against each realm's JWKS, operator tokens
+│       └── natsingest/  the optional JetStream ingest
 ├── api/
 │   ├── proto/           the contract's proto, linted and breaking-checked by buf
 │   └── notifyv1/        its generated Go, committed (`make proto`, `make proto-check`)
+├── cmd/notifyd/         the service: assembles every package above from the environment, an engine per realm
 ├── migrations/          the schema, embedded as migrations.FS (hosts, tests and the service share it)
 ├── config.go            notify.Config — the one configuration surface
 ├── internal/
@@ -508,17 +492,14 @@ Run `make help` for the live list.
 │   ├── 001-notification-core/   spec, plan, data-model, design-decisions, tasks, contracts/
 │   └── 002-escalation-workflows/
 ├── docs/                integration-guide, configuration, operations, security, testing, mutations
-├── e2e/                 Playwright suite, written against the contract; switches on with the HTTP layer
-├── deploy/              Dockerfile (intended shape) and docker-compose.yml
+├── e2e/                 Playwright suite, run against the compose stack
+├── deploy/              Dockerfile, docker-compose.yml and initdb (the application role, the schema, local seeds)
 ├── design-system/       reference inbox and preferences UI a host builds on the REST contract
 ├── .specify/            the constitution
 ├── .github/workflows/   ci.yml, provider.yml
 ├── ROADMAP.md           scope, phases, and when to use something else
 └── PROVENANCE.md        where this came from and what changed in the lift and the review
 ```
-
-Not created yet: `cmd/`. Its line in `.go-arch-lint.yml` is commented out and is uncommented in the change
-that creates the directory.
 
 ---
 
@@ -538,7 +519,7 @@ non-goals live in [ROADMAP.md](ROADMAP.md).
 | 7 | Digest, quotas, fairness — leased flush job, Redis counter, noisy-neighbour test | ✅ built |
 | 8 | Maintenance — leased retention jobs, `Admin.Erase`, startup preflight, a record of each job's last clean finish | ✅ built |
 | 9 | Broadcast — a durable record, expanded a page at a time under a lease, resumable at the next page | ✅ built |
-| 10 | Transports — gRPC, REST, SSE relay, in-process port | ✅ built |
+| 10 | Transports — gRPC, REST, SSE relay, in-process port | ✅ built; the operator reads (T044b) are open |
 | 11 | Service mode — data-backed topics, templates and addresses; the service binary; recipient and producer token verification; the Directory callback; NATS ingest; the Resend webhook | ✅ built |
 | 12 | Boundary gates — arch-lint, depguard, builds with no host present | ✅ built |
 | 13 | Load test and release — capacity harness, integration-guide samples, tag `v0.1.0` | 🚧 not built |
